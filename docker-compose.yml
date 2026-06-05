@@ -9,7 +9,7 @@ services:
     volumes:
       - pgdata:/var/lib/postgresql/data
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U nanny"]
+      test: ["CMD-SHELL", "pg_isready -U nanny -d printer_nanny"]
       interval: 5s
       timeout: 3s
       retries: 10
