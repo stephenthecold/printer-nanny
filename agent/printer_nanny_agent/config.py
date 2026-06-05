@@ -1,0 +1,103 @@
+"""Agent configuration loaded from a TOML file.
+
+Resolution order for the path: explicit ``--config`` arg → ``$PRINTER_NANNY_CONFIG``
+→ ``/etc/printer-nanny/agent.toml``.
+"""
+
+from __future__ import annotations
+
+import os
+from dataclasses import dataclass, field
+from typing import List, Optional
+
+try:  # Python 3.11+ has tomllib in the stdlib.
+    import tomllib as _toml
+
+    def _load(fp):
+        return _toml.load(fp)
+
+except ModuleNotFoundError:  # 3.9/3.10
+    import tomli as _toml
+
+    def _load(fp):
+        return _toml.load(fp)
+
+from printer_nanny_agent.snmp import SnmpParams
+
+DEFAULT_CONFIG_PATH = "/etc/printer-nanny/agent.toml"
+
+
+@dataclass
+class SubnetConfig:
+    cidr: str
+    community: Optional[str] = None  # overrides the global SNMP community
+    version: Optional[str] = None
+
+
+@dataclass
+class AgentConfig:
+    central_url: str
+    agent_id: int
+    api_key: str
+    poll_interval_seconds: int = 300
+    discovery_interval_seconds: int = 3600
+    heartbeat_interval_seconds: int = 60
+    verify_tls: bool = True
+    snmp: SnmpParams = field(default_factory=SnmpParams)
+    subnets: List[SubnetConfig] = field(default_factory=list)
+
+    def snmp_for(self, subnet: SubnetConfig) -> SnmpParams:
+        """SNMP params for a subnet, applying per-subnet overrides."""
+        return SnmpParams(
+            community=subnet.community or self.snmp.community,
+            version=subnet.version or self.snmp.version,
+            port=self.snmp.port,
+            timeout=self.snmp.timeout,
+            retries=self.snmp.retries,
+        )
+
+
+def resolve_config_path(explicit: Optional[str] = None) -> str:
+    return explicit or os.environ.get("PRINTER_NANNY_CONFIG") or DEFAULT_CONFIG_PATH
+
+
+def load_config(path: Optional[str] = None) -> AgentConfig:
+    config_path = resolve_config_path(path)
+    with open(config_path, "rb") as fp:
+        data = _load(fp)
+    return parse_config(data)
+
+
+def parse_config(data: dict) -> AgentConfig:
+    """Build an AgentConfig from a parsed TOML mapping (separated for testing)."""
+    missing = [k for k in ("central_url", "agent_id", "api_key") if k not in data]
+    if missing:
+        raise ValueError(f"config missing required keys: {', '.join(missing)}")
+
+    snmp_raw = data.get("snmp", {})
+    snmp = SnmpParams(
+        community=snmp_raw.get("community", "public"),
+        version=str(snmp_raw.get("version", "2c")),
+        port=int(snmp_raw.get("port", 161)),
+        timeout=float(snmp_raw.get("timeout", 2.0)),
+        retries=int(snmp_raw.get("retries", 1)),
+    )
+    subnets = [
+        SubnetConfig(
+            cidr=s["cidr"],
+            community=s.get("community"),
+            version=str(s["version"]) if s.get("version") is not None else None,
+        )
+        for s in data.get("subnets", [])
+    ]
+    return AgentConfig(
+        central_url=str(data["central_url"]).rstrip("/"),
+        agent_id=int(data["agent_id"]),
+        api_key=str(data["api_key"]),
+        poll_interval_seconds=int(data.get("poll_interval_seconds", 300)),
+        discovery_interval_seconds=int(data.get("discovery_interval_seconds", 3600)),
+        heartbeat_interval_seconds=int(data.get("heartbeat_interval_seconds", 60)),
+        verify_tls=bool(data.get("verify_tls", True)),
+        snmp=snmp,
+        subnets=subnets,
+    )

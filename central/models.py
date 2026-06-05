@@ -74,6 +74,7 @@ class SupplyType(str, enum.Enum):
     fuser = "fuser"
     waste = "waste"
     staples = "staples"
+    developer = "developer"
     other = "other"
 
 

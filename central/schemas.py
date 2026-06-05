@@ -78,6 +78,16 @@ class CommandOut(ORMModel):
     created_at: datetime
 
 
+class PollTargetOut(ORMModel):
+    """An approved printer the agent should poll, with its SNMP connection params."""
+
+    id: int
+    ip: str
+    snmp_version: str
+    snmp_community: Optional[str] = None
+    snmp_v3: Optional[dict] = None
+
+
 # --------------------------------------------------------------------------- #
 # Management CRUD
 # --------------------------------------------------------------------------- #

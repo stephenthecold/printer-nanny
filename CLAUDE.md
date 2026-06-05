@@ -55,5 +55,8 @@ printer), multi-subnet, agent-collected.
 - `pytest` — run tests.
 
 ## Status
-Milestone 1: central server (API, model, dashboard, seeded data, alerting).
-Milestone 2 (next): the `printer-nanny-agent` package — real SNMP discovery/poll.
+Milestone 1 (DONE): central server (API, model, dashboard, seeded data, alerting).
+Milestone 2 (DONE): `printer-nanny-agent` — SNMP discovery/poll over pysnmp,
+pushes to central, pulls commands. See `agent/README.md`. The SNMP layer is
+behind a swappable `SnmpBackend` so poller/discovery unit-test with a fake;
+`scripts/e2e_agent_demo.py` drives a full agent cycle against a live central.

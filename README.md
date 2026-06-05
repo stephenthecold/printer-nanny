@@ -6,9 +6,11 @@ sites, and subnets. Lightweight site agents collect printer telemetry over SNMP
 server that tracks **supply levels, errors, status, page counts, and
 maintenance** — and raises alerts via email, FreeScout tickets, or Teams.
 
-> **Milestone 1 (this repo today): the central server.** Full data model, JSON
-> API, background worker + alerting, and an HTMX dashboard, all demoable with
-> seeded data. The real SNMP-collecting agent is Milestone 2.
+> **Milestone 1 — central server:** data model, JSON API, background worker +
+> alerting, and an HTMX dashboard, all demoable with seeded data.
+> **Milestone 2 — site agent** (`printer-nanny-agent`): SNMP discovery/polling
+> over pysnmp that pushes to central and pulls commands. See
+> [`agent/README.md`](agent/README.md).
 
 ## Quick start (local, SQLite — no Docker needed)
 

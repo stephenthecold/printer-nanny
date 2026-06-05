@@ -63,6 +63,25 @@ def post_discovered(
     return {"new_pending": created, "already_known": known}
 
 
+@router.get("/targets", response_model=list[s.PollTargetOut])
+def get_targets(
+    agent: m.Agent = Depends(authenticated_agent),
+    db: Session = Depends(get_db),
+):
+    """Approved printers at the agent's site, with SNMP params — the poll list."""
+    touch_heartbeat(agent)
+    targets = list(
+        db.scalars(
+            select(m.Printer).where(
+                m.Printer.site_id == agent.site_id,
+                m.Printer.discovery_state == m.DiscoveryState.approved,
+            )
+        )
+    )
+    db.commit()
+    return targets
+
+
 @router.get("/commands", response_model=list[s.CommandOut])
 def get_commands(
     agent: m.Agent = Depends(authenticated_agent),

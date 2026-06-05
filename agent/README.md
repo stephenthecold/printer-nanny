@@ -1,31 +1,61 @@
-# printer-nanny-agent (Milestone 2 — placeholder)
+# printer-nanny-agent
 
-The site agent is the next milestone. It will be a standalone, pip-installable
-Python package that runs at each site (systemd service or Docker container) and:
+The site agent: a Python package that runs at each site (systemd service or
+container) and collects printer telemetry over SNMP, pushing it to the central
+server. No inbound ports are needed at the site — the agent dials out over HTTPS
+and pulls any queued commands on its heartbeat.
 
-1. **Discovers** printers by SNMP-sweeping its assigned subnet(s), GETting
-   `sysDescr` across the host range and keeping anything that answers the Printer
-   MIB → `POST /api/v1/agents/{id}/discovered`.
-2. **Polls** approved printers on a schedule over SNMP (`pysnmp`), reading the
-   OIDs documented in [`../central/snmp.md`](../central/snmp.md), normalizing
-   supplies via the shared [`central/snmp_parse.py`](../central/snmp_parse.py)
-   helpers → `POST /api/v1/agents/{id}/readings`.
-3. **Heartbeats** and **pulls commands** (`rescan`, `poll_now`, `update_config`)
-   from `GET /api/v1/agents/{id}/commands` — the hybrid model: no inbound ports
-   at the site, central can still trigger work on demand.
+## What it does
+1. **Heartbeat** — `POST /api/v1/agents/{id}/heartbeat` every `heartbeat_interval`.
+2. **Poll** — fetches the approved-printer list (`GET .../targets`), polls each
+   over SNMP (the OIDs in [`../central/snmp.md`](../central/snmp.md)), and pushes
+   `POST .../readings`. Supplies are normalized with the shared
+   [`central/snmp_parse.py`](../central/snmp_parse.py) (sentinel-safe).
+3. **Discover** — SNMP-sweeps each configured subnet, reports anything that
+   answers the Printer MIB via `POST .../discovered` (lands as *pending* for a
+   tech to approve). Multi-subnet sites just list several `[[subnets]]`.
+4. **Commands** — pulls `GET .../commands` and acts on `rescan` / `poll_now` /
+   `update_config`.
 
-## Config (planned: `/etc/printer-nanny/agent.toml`)
-```toml
-central_url = "https://printers.msp.example.com"
-api_key     = "pn_xxxxxxxx"          # issued by POST /api/v1/agents
-poll_interval_seconds = 300
-heartbeat_interval_seconds = 60
+## Architecture
+The SNMP layer sits behind the `SnmpBackend` interface ([snmp.py](printer_nanny_agent/snmp.py)),
+so the poller and discovery are fully unit-testable with a fake backend and never
+import pysnmp. `PysnmpBackend` is the real implementation (pysnmp 7, asyncio).
 
-[[subnets]]
-cidr = "10.10.0.0/24"
-snmp_version = "2c"
-snmp_community = "public"
+```
+printer_nanny_agent/
+  snmp.py       SnmpBackend interface + PysnmpBackend
+  oids.py       Printer-MIB / Host-Resources OID constants
+  poller.py     poll one printer -> central reading payload (pure builders)
+  discovery.py  concurrent subnet sweep -> discovered devices
+  client.py     async httpx client for the central ingest API
+  config.py     TOML config loader (agent.example.toml)
+  runner.py     orchestration: run_once / run_forever (backend injectable)
+  cli.py        `printer-nanny-agent` entry point
 ```
 
-The agent reuses the central server's parsing/contract code, so discovery and
-polling produce exactly the payloads the ingest API already accepts (and tests).
+## Install & run
+```bash
+pip install -e ".[agent]"           # from the repo root
+cp agent/printer_nanny_agent/agent.example.toml /etc/printer-nanny/agent.toml
+# fill in central_url, agent_id, api_key (from POST /api/v1/agents), and subnets
+
+printer-nanny-agent --config /etc/printer-nanny/agent.toml selftest   # check central
+printer-nanny-agent --config ... poll 10.10.0.20                      # one printer -> JSON
+printer-nanny-agent --config ... discover                            # sweep subnets -> JSON
+printer-nanny-agent --config ... run                                 # main loop
+printer-nanny-agent --config ... run --once                          # single cycle
+```
+A sample systemd unit is in [`../deploy/printer-nanny-agent.service`](../deploy/printer-nanny-agent.service).
+
+## End-to-end demo (no real printers)
+With the central server running and seeded, [`../scripts/e2e_agent_demo.py`](../scripts/e2e_agent_demo.py)
+drives a full agent cycle through a fake SNMP backend:
+```bash
+PYTHONPATH=. python scripts/e2e_agent_demo.py http://localhost:8000
+```
+
+## Note on shared code
+The agent currently imports `central.snmp_parse` for supply normalization (single
+source of truth, no drift). For a slim standalone deploy that logic can later be
+extracted into a small shared package both sides depend on.

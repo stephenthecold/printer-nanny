@@ -1,0 +1,34 @@
+# Printer Nanny site agent config. Copy to /etc/printer-nanny/agent.toml
+# (or point $PRINTER_NANNY_CONFIG at it) and fill in the values.
+
+# Central server base URL (no trailing path).
+central_url = "https://printers.msp.example.com"
+
+# Identity issued by the central API when the agent was created
+# (POST /api/v1/agents returns {id, api_key} — the key is shown only once).
+agent_id = 1
+api_key  = "pn_xxxxxxxxxxxxxxxxxxxxxxxxxxxx"
+
+# Cadence (seconds).
+poll_interval_seconds      = 300    # how often to poll approved printers
+discovery_interval_seconds = 3600   # how often to sweep subnets for new devices
+heartbeat_interval_seconds = 60     # heartbeat + command-pull interval
+
+# Set false only for self-signed central certs in a trusted tunnel.
+verify_tls = true
+
+# Default SNMP settings (overridable per subnet below).
+[snmp]
+version   = "2c"      # "1" or "2c"
+community = "public"
+port      = 161
+timeout   = 2.0
+retries   = 1
+
+# One or more subnets this agent owns. Multi-subnet sites just list several.
+[[subnets]]
+cidr = "10.10.0.0/24"
+
+[[subnets]]
+cidr      = "10.10.1.0/24"
+community = "printers-ro"   # per-subnet community override
