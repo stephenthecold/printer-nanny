@@ -88,6 +88,22 @@ class PollTargetOut(ORMModel):
     snmp_v3: Optional[dict] = None
 
 
+class AgentSubnetConfig(BaseModel):
+    cidr: str
+    snmp_community: str = "public"
+    snmp_version: str = "2c"
+
+
+class AgentConfigOut(BaseModel):
+    """Central-managed config delivered to an agent (so its local file is just URL+key)."""
+
+    poll_interval_seconds: int
+    discovery_interval_seconds: int
+    heartbeat_interval_seconds: int
+    snmp: dict
+    subnets: list[AgentSubnetConfig]
+
+
 # --------------------------------------------------------------------------- #
 # Management CRUD
 # --------------------------------------------------------------------------- #

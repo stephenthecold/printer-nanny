@@ -6,7 +6,6 @@ import smtplib
 from email.message import EmailMessage
 
 from central.channels.base import ChannelResult, Notification, NotificationChannel
-from central.config import settings
 
 
 class EmailChannel(NotificationChannel):
@@ -23,7 +22,7 @@ class EmailChannel(NotificationChannel):
     def build_message(self, note: Notification) -> EmailMessage:
         msg = EmailMessage()
         msg["Subject"] = f"[Printer Nanny][{note.severity.upper()}] {note.title}"
-        msg["From"] = self.config.get("from") or settings.smtp_from
+        msg["From"] = self.config.get("from") or self.setting("smtp.from")
         msg["To"] = ", ".join(self._recipients())
         lines = [note.body, ""]
         if note.printer_label:
@@ -40,12 +39,15 @@ class EmailChannel(NotificationChannel):
         if not recipients:
             return ChannelResult(ok=False, detail="no recipients configured")
         msg = self.build_message(note)
+        host = self.setting("smtp.host")
+        port = int(self.setting("smtp.port", 25))
+        user = self.setting("smtp.user")
         try:
-            with smtplib.SMTP(settings.smtp_host, settings.smtp_port, timeout=15) as smtp:
-                if settings.smtp_use_tls:
+            with smtplib.SMTP(host, port, timeout=15) as smtp:
+                if self.setting("smtp.use_tls"):
                     smtp.starttls()
-                if settings.smtp_user:
-                    smtp.login(settings.smtp_user, settings.smtp_password)
+                if user:
+                    smtp.login(user, self.setting("smtp.password", ""))
                 smtp.send_message(msg)
             return ChannelResult(ok=True, detail=f"emailed {len(recipients)} recipient(s)")
         except OSError as exc:

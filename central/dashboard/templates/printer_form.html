@@ -1,0 +1,64 @@
+{% extends "base.html" %}
+{% block title %}{{ 'Edit' if printer else 'Add' }} printer · Printer Nanny{% endblock %}
+{% block body %}
+{% set action = '/manage/printers/' ~ printer.id if printer else '/manage/printers' %}
+<div class="flex items-center gap-3 mb-4">
+  <a href="/manage/clients/{{ client.id }}" class="text-sm text-sky-700 hover:underline">← {{ client.name }}</a>
+  <h1 class="text-2xl font-semibold">{{ 'Edit printer' if printer else 'Add printer' }}</h1>
+</div>
+
+<form method="post" action="{{ action }}" class="bg-white rounded-lg shadow p-5 max-w-2xl space-y-4">
+  <input type="hidden" name="client_id" value="{{ client.id }}" />
+  <div class="grid grid-cols-2 gap-4">
+    <label class="block">
+      <span class="text-xs text-slate-500">Site</span>
+      <select name="site_id" required class="w-full border rounded px-3 py-2 text-sm">
+        {% for s in sites %}
+        <option value="{{ s.id }}" {{ 'selected' if s.id == selected_site_id else '' }}>{{ s.name }}</option>
+        {% endfor %}
+      </select>
+    </label>
+    <label class="block">
+      <span class="text-xs text-slate-500">IP address</span>
+      <input name="ip" value="{{ printer.ip if printer else '' }}" required placeholder="10.10.0.20"
+             class="w-full border rounded px-3 py-2 text-sm tabular-nums" />
+    </label>
+    <label class="block">
+      <span class="text-xs text-slate-500">Hostname</span>
+      <input name="hostname" value="{{ printer.hostname if printer else '' }}" class="w-full border rounded px-3 py-2 text-sm" />
+    </label>
+    <label class="block">
+      <span class="text-xs text-slate-500">Location</span>
+      <input name="location" value="{{ printer.location if printer else '' }}" placeholder="Copy room" class="w-full border rounded px-3 py-2 text-sm" />
+    </label>
+    <label class="block">
+      <span class="text-xs text-slate-500">Brand</span>
+      <input name="brand" value="{{ printer.brand if printer else '' }}" placeholder="HP" class="w-full border rounded px-3 py-2 text-sm" />
+    </label>
+    <label class="block">
+      <span class="text-xs text-slate-500">Model</span>
+      <input name="model" value="{{ printer.model if printer else '' }}" placeholder="LaserJet M404" class="w-full border rounded px-3 py-2 text-sm" />
+    </label>
+    <label class="block">
+      <span class="text-xs text-slate-500">Serial</span>
+      <input name="serial" value="{{ printer.serial if printer else '' }}" class="w-full border rounded px-3 py-2 text-sm" />
+    </label>
+    <label class="block">
+      <span class="text-xs text-slate-500">SNMP version</span>
+      <select name="snmp_version" class="w-full border rounded px-3 py-2 text-sm">
+        {% set v = printer.snmp_version if printer else '2c' %}
+        <option value="2c" {{ 'selected' if v == '2c' else '' }}>v2c</option>
+        <option value="1" {{ 'selected' if v == '1' else '' }}>v1</option>
+      </select>
+    </label>
+    <label class="block col-span-2">
+      <span class="text-xs text-slate-500">SNMP community</span>
+      <input name="snmp_community" value="{{ printer.snmp_community if printer else 'public' }}" class="w-full border rounded px-3 py-2 text-sm" />
+    </label>
+  </div>
+  <div class="flex gap-2">
+    <button class="bg-slate-900 text-white rounded px-4 py-2 text-sm font-medium">{{ 'Save changes' if printer else 'Add printer' }}</button>
+    <a href="/manage/clients/{{ client.id }}" class="px-4 py-2 text-sm text-slate-600">Cancel</a>
+  </div>
+</form>
+{% endblock %}

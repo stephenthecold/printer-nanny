@@ -5,6 +5,11 @@
   <h1 class="text-xl font-semibold mb-1">🖨️ Printer Nanny</h1>
   <p class="text-sm text-slate-500 mb-5">Sign in to the fleet console</p>
   {% if error %}<p class="text-sm text-red-600 mb-3">{{ error }}</p>{% endif %}
+  {% if sso_error %}<p class="text-sm text-amber-600 mb-3">SSO sign-in failed: {{ sso_error }}</p>{% endif %}
+  {% if sso_enabled %}
+  <a href="/auth/sso/login" class="block w-full text-center bg-sky-600 text-white rounded py-2 text-sm font-medium mb-3">{{ sso_label }}</a>
+  <div class="flex items-center gap-2 my-3 text-xs text-slate-400"><div class="flex-1 border-t"></div>or<div class="flex-1 border-t"></div></div>
+  {% endif %}
   <form method="post" action="/login" class="space-y-3">
     <input name="username" placeholder="Username" autofocus
            class="w-full border rounded px-3 py-2 text-sm" />

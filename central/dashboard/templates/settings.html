@@ -1,0 +1,40 @@
+{% extends "base.html" %}
+{% block title %}Settings · Printer Nanny{% endblock %}
+{% block body %}
+<h1 class="text-2xl font-semibold mb-1">Settings</h1>
+<p class="text-sm text-slate-500 mb-4">Operator-managed config — stored in the database, no env vars needed. Only DATABASE_URL and SECRET_KEY live in the environment.</p>
+
+<form method="post" action="/settings" class="space-y-6 max-w-3xl">
+  {% for section, fields in sections.items() %}
+  <section class="bg-white rounded-lg shadow">
+    <div class="px-4 py-3 border-b font-semibold">{{ section }}</div>
+    <div class="p-4 grid md:grid-cols-2 gap-4">
+      {% for f in fields %}
+      {% set spec = f.spec %}
+      <label class="block {{ 'md:col-span-2' if spec.type == 'bool' else '' }}">
+        {% if spec.type == 'bool' %}
+          <span class="inline-flex items-center gap-2 text-sm">
+            <input type="checkbox" name="{{ spec.key }}" {{ 'checked' if f.value else '' }} class="rounded" />
+            {{ spec.label }}
+          </span>
+        {% else %}
+          <span class="text-xs text-slate-500">{{ spec.label }}</span>
+          <input
+            name="{{ spec.key }}"
+            type="{{ 'password' if spec.type == 'secret' else ('number' if spec.type in ('int','float') else 'text') }}"
+            {{ 'step=any' if spec.type == 'float' else '' }}
+            value="{{ f.value if f.value is not none else '' }}"
+            {% if spec.type == 'secret' %}placeholder="•••• unchanged ••••"{% endif %}
+            class="w-full border rounded px-3 py-2 text-sm" />
+        {% endif %}
+        {% if spec.help %}<span class="block text-xs text-slate-400 mt-0.5">{{ spec.help }}</span>{% endif %}
+      </label>
+      {% endfor %}
+    </div>
+  </section>
+  {% endfor %}
+  <div class="sticky bottom-4">
+    <button class="bg-slate-900 text-white rounded px-5 py-2.5 text-sm font-medium shadow-lg">Save settings</button>
+  </div>
+</form>
+{% endblock %}

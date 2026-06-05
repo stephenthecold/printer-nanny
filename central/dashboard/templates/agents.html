@@ -1,0 +1,71 @@
+{% extends "base.html" %}
+{% block title %}Agents · Printer Nanny{% endblock %}
+{% block body %}
+<h1 class="text-2xl font-semibold mb-1">Agents</h1>
+<p class="text-sm text-slate-500 mb-4">Each site runs one agent. Enroll it here to get its API key, then assign the subnets it should scan. The agent's local file only needs the central URL + this key — everything else is managed here.</p>
+
+{% if new_key %}
+<div class="mb-5 rounded-lg border border-amber-300 bg-amber-50 p-4">
+  <div class="font-semibold text-amber-900">API key for “{{ new_key.name }}” (agent #{{ new_key.id }})</div>
+  <p class="text-sm text-amber-800 mt-1">Copy this now — it is shown only once and stored only as a hash.</p>
+  <code class="block mt-2 bg-white border rounded px-3 py-2 text-sm break-all select-all">{{ new_key.key }}</code>
+  <p class="text-xs text-amber-800 mt-2">Put it in <code>agent.toml</code> as <code>agent_id = {{ new_key.id }}</code> and <code>api_key = "{{ new_key.key }}"</code>.</p>
+</div>
+{% endif %}
+
+<div class="grid md:grid-cols-3 gap-6">
+  <section class="md:col-span-2 space-y-4">
+    {% for a in agents %}
+    <div class="bg-white rounded-lg shadow">
+      <div class="px-4 py-3 border-b flex items-center justify-between">
+        <div>
+          <span class="font-medium">{{ a.name }}</span>
+          <span class="text-xs text-slate-400">agent #{{ a.id }} · {{ a.site.name if a.site else 'site?' }}</span>
+        </div>
+        <div class="flex items-center gap-3">
+          <span class="px-2 py-0.5 rounded text-xs {{ 'bg-green-100 text-green-700' if a.status.value=='online' else ('bg-red-100 text-red-700' if a.status.value=='offline' else 'bg-slate-100 text-slate-500') }}">{{ a.status.value }}</span>
+          {% if user.role.value == 'admin' %}
+          <form method="post" action="/manage/agents/{{ a.id }}/delete" onsubmit="return confirm('Delete agent {{ a.name }}?')">
+            <button class="text-xs text-red-600 hover:underline">Delete</button>
+          </form>
+          {% endif %}
+        </div>
+      </div>
+      <div class="px-4 py-3">
+        <div class="text-xs text-slate-500 mb-1">Subnets</div>
+        {% for s in a.subnets %}
+        <div class="flex items-center justify-between text-sm py-1">
+          <span class="tabular-nums">{{ s.cidr }} <span class="text-slate-400 text-xs">· {{ s.snmp_community }} / v{{ s.snmp_version }}</span></span>
+          <form method="post" action="/manage/subnets/{{ s.id }}/delete" class="inline"><button class="text-xs text-red-600 hover:underline">remove</button></form>
+        </div>
+        {% else %}
+        <div class="text-sm text-slate-400">No subnets assigned.</div>
+        {% endfor %}
+        <form method="post" action="/manage/agents/{{ a.id }}/subnets" class="mt-2 grid grid-cols-4 gap-2">
+          <input name="cidr" placeholder="10.10.0.0/24" required class="col-span-2 border rounded px-2 py-1 text-sm tabular-nums" />
+          <input name="snmp_community" value="public" class="border rounded px-2 py-1 text-sm" />
+          <select name="snmp_version" class="border rounded px-2 py-1 text-sm"><option value="2c">v2c</option><option value="1">v1</option></select>
+          <button class="col-span-4 bg-slate-700 text-white rounded py-1.5 text-xs">Assign subnet</button>
+        </form>
+      </div>
+    </div>
+    {% else %}
+    <div class="bg-white rounded-lg shadow p-4 text-slate-400 text-sm">No agents enrolled yet.</div>
+    {% endfor %}
+  </section>
+
+  <section class="bg-white rounded-lg shadow p-4 h-fit">
+    <h2 class="font-semibold mb-3">Enroll agent</h2>
+    <form method="post" action="/manage/agents" class="space-y-2">
+      <label class="block">
+        <span class="text-xs text-slate-500">Site</span>
+        <select name="site_id" required class="w-full border rounded px-3 py-2 text-sm">
+          {% for s in sites %}<option value="{{ s.id }}">{{ s.name }}</option>{% endfor %}
+        </select>
+      </label>
+      <input name="name" placeholder="Agent name" required class="w-full border rounded px-3 py-2 text-sm" />
+      <button class="w-full bg-slate-900 text-white rounded py-2 text-sm font-medium">Create &amp; show key</button>
+    </form>
+  </section>
+</div>
+{% endblock %}

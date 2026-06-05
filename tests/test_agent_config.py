@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import pytest
 
-from printer_nanny_agent.config import parse_config
+from printer_nanny_agent.config import merge_remote, parse_config
 
 
 def _valid() -> dict:
@@ -35,6 +35,33 @@ def test_missing_keys_raise():
         parse_config({"central_url": "x"})
     assert "agent_id" in str(exc.value)
     assert "api_key" in str(exc.value)
+
+
+def test_merge_remote_overlays_central_config():
+    local = parse_config(_valid())
+    remote = {
+        "poll_interval_seconds": 90,
+        "discovery_interval_seconds": 1800,
+        "heartbeat_interval_seconds": 45,
+        "snmp": {"community": "central-ro", "version": "2c", "timeout": 4.0, "retries": 2},
+        "subnets": [{"cidr": "192.168.5.0/24", "snmp_community": "vlan5", "snmp_version": "2c"}],
+    }
+    merged = merge_remote(local, remote)
+    # Local identity is preserved; operational config comes from central.
+    assert merged.central_url == local.central_url
+    assert merged.api_key == local.api_key
+    assert merged.poll_interval_seconds == 90
+    assert merged.snmp.community == "central-ro"
+    assert merged.snmp.retries == 2
+    assert len(merged.subnets) == 1
+    assert merged.subnets[0].cidr == "192.168.5.0/24"
+    assert merged.snmp_for(merged.subnets[0]).community == "vlan5"
+
+
+def test_merge_remote_keeps_local_subnets_when_central_has_none():
+    local = parse_config(_valid())
+    merged = merge_remote(local, {"snmp": {}, "subnets": []})
+    assert len(merged.subnets) == 2  # fell back to local
 
 
 def test_per_subnet_snmp_override():

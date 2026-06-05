@@ -1,0 +1,93 @@
+{% extends "base.html" %}
+{% from "base.html" import status_badge %}
+{% block title %}{{ client.name }} · Manage · Printer Nanny{% endblock %}
+{% block body %}
+<div class="flex items-center gap-3 mb-4">
+  <a href="/manage" class="text-sm text-sky-700 hover:underline">← Clients</a>
+  <h1 class="text-2xl font-semibold">{{ client.name }}</h1>
+  <a href="/clients/{{ client.id }}" class="text-xs text-slate-500 hover:underline">(view dashboard)</a>
+</div>
+
+<div class="grid md:grid-cols-3 gap-6">
+  <div class="md:col-span-2 space-y-6">
+    <!-- Sites -->
+    <section class="bg-white rounded-lg shadow">
+      <div class="px-4 py-3 border-b font-semibold">Sites</div>
+      <table class="w-full text-sm">
+        <tbody>
+        {% for s in sites %}
+          <tr class="border-t">
+            <td class="px-4 py-2">
+              <div class="font-medium">{{ s.name }}</div>
+              <div class="text-slate-400 text-xs">{{ s.address or '' }}{% if s.contact %} · {{ s.contact }}{% endif %}</div>
+            </td>
+            <td class="py-2 text-right pr-4">
+              <form method="post" action="/manage/sites/{{ s.id }}/delete" onsubmit="return confirm('Delete site {{ s.name }}?')" class="inline">
+                <button class="text-xs text-red-600 hover:underline">Delete</button>
+              </form>
+            </td>
+          </tr>
+        {% else %}
+          <tr><td class="px-4 py-3 text-slate-400">No sites yet.</td></tr>
+        {% endfor %}
+        </tbody>
+      </table>
+      <form method="post" action="/manage/sites" class="border-t p-4 grid grid-cols-2 gap-2">
+        <input type="hidden" name="client_id" value="{{ client.id }}" />
+        <input name="name" placeholder="Site name" required class="border rounded px-3 py-2 text-sm" />
+        <input name="address" placeholder="Address (optional)" class="border rounded px-3 py-2 text-sm" />
+        <input name="contact" placeholder="Contact (optional)" class="border rounded px-3 py-2 text-sm col-span-2" />
+        <button class="col-span-2 bg-slate-900 text-white rounded py-2 text-sm font-medium">Add site</button>
+      </form>
+    </section>
+
+    <!-- Printers -->
+    <section class="bg-white rounded-lg shadow">
+      <div class="px-4 py-3 border-b flex justify-between items-center">
+        <span class="font-semibold">Printers</span>
+        <a href="/manage/printers/new?client_id={{ client.id }}" class="text-xs bg-sky-600 text-white rounded px-2 py-1">+ Add printer</a>
+      </div>
+      <table class="w-full text-sm">
+        <thead class="text-left text-slate-500"><tr><th class="px-4 py-2">IP</th><th class="py-2">Model</th><th class="py-2">State</th><th class="py-2 text-right pr-4"></th></tr></thead>
+        <tbody>
+        {% for p in printers %}
+          <tr class="border-t">
+            <td class="px-4 py-2 tabular-nums">{{ p.ip }}</td>
+            <td class="py-2">{{ p.model or p.hostname or '—' }} <span class="text-slate-400">{{ p.location or '' }}</span></td>
+            <td class="py-2"><span class="text-xs text-slate-500">{{ p.discovery_state.value }}</span></td>
+            <td class="py-2 text-right pr-4">
+              <a href="/manage/printers/{{ p.id }}/edit" class="text-xs text-sky-700 hover:underline">Edit</a>
+              <form method="post" action="/manage/printers/{{ p.id }}/delete" onsubmit="return confirm('Delete printer {{ p.ip }}?')" class="inline ml-2">
+                <button class="text-xs text-red-600 hover:underline">Delete</button>
+              </form>
+            </td>
+          </tr>
+        {% else %}
+          <tr><td class="px-4 py-3 text-slate-400" colspan="4">No printers — add manually or let an agent discover them.</td></tr>
+        {% endfor %}
+        </tbody>
+      </table>
+    </section>
+  </div>
+
+  <!-- Edit client / danger zone -->
+  <div class="space-y-6">
+    <section class="bg-white rounded-lg shadow p-4">
+      <h2 class="font-semibold mb-3">Edit client</h2>
+      <form method="post" action="/manage/clients/{{ client.id }}" class="space-y-2">
+        <input name="name" value="{{ client.name }}" required class="w-full border rounded px-3 py-2 text-sm" />
+        <textarea name="notes" rows="3" class="w-full border rounded px-3 py-2 text-sm" placeholder="Notes">{{ client.notes or '' }}</textarea>
+        <button class="w-full bg-slate-900 text-white rounded py-2 text-sm font-medium">Save</button>
+      </form>
+    </section>
+    {% if user.role.value == 'admin' %}
+    <section class="bg-white rounded-lg shadow p-4">
+      <h2 class="font-semibold mb-2 text-red-700">Danger zone</h2>
+      <form method="post" action="/manage/clients/{{ client.id }}/delete" onsubmit="return confirm('Delete {{ client.name }} and ALL its sites/printers?')">
+        <button class="w-full border border-red-300 text-red-700 rounded py-2 text-sm">Delete client</button>
+      </form>
+    </section>
+    {% endif %}
+  </div>
+</div>
+{% endblock %}

@@ -14,7 +14,7 @@ from sqlalchemy.orm import Session
 from central import models as m
 from central import queries
 from central.channels import Notification, dispatch
-from central.config import settings
+from central.runtime import load_settings
 
 _SEVERITY_RANK = {
     m.EventSeverity.info: 0,
@@ -39,7 +39,8 @@ def _aware(dt: Optional[datetime]) -> Optional[datetime]:
 # --------------------------------------------------------------------------- #
 def mark_offline_agents(db: Session, now: Optional[datetime] = None) -> dict:
     now = now or _now()
-    grace = timedelta(seconds=settings.agent_offline_grace_seconds)
+    grace_seconds = load_settings(db).get("alerts.offline_grace_seconds", 300)
+    grace = timedelta(seconds=grace_seconds)
     changed = 0
     for agent in db.scalars(select(m.Agent)):
         last = _aware(agent.last_heartbeat)
@@ -109,6 +110,7 @@ def _open_alert(
     *,
     printer: Optional[m.Printer] = None,
     agent: Optional[m.Agent] = None,
+    runtime: Optional[dict] = None,
 ) -> Optional[m.Alert]:
     """Open an alert if one isn't already open for this dedupe_key. Returns it (or None)."""
     if _find_open_alert(db, dedupe_key) is not None:
@@ -134,7 +136,7 @@ def _open_alert(
         printer_label=_printer_label(printer) if printer else None,
         alert_id=alert.id,
     )
-    results = dispatch(note, _channels_for_rule(db, rule))
+    results = dispatch(note, _channels_for_rule(db, rule), runtime)
     alert.notified_channels = [
         {"channel": name, "ok": res.ok, "detail": res.detail} for name, res in results
     ]
@@ -156,6 +158,7 @@ def _resolve_stale(db: Session, active_keys: set[str], rule_ids: set[int]) -> in
 def evaluate_alerts(db: Session, now: Optional[datetime] = None) -> dict:
     now = now or _now()
     rules = list(db.scalars(select(m.AlertRule).where(m.AlertRule.enabled.is_(True))))
+    runtime = load_settings(db)
     opened = 0
     active_keys: set[str] = set()
     rule_ids = {r.id for r in rules}
@@ -173,7 +176,7 @@ def evaluate_alerts(db: Session, now: Optional[datetime] = None) -> dict:
                         f"No heartbeat for over {rule.threshold} min "
                         f"(last: {last.isoformat() if last else 'never'})."
                     )
-                    if _open_alert(db, rule, key, title, detail, agent=agent):
+                    if _open_alert(db, rule, key, title, detail, agent=agent, runtime=runtime):
                         opened += 1
             continue
 
@@ -187,7 +190,7 @@ def evaluate_alerts(db: Session, now: Optional[datetime] = None) -> dict:
                         label = supply.color or supply.type.value
                         title = f"Low {label} on {_printer_label(printer)}"
                         detail = f"{label} at {supply.level_pct:.0f}% (threshold {threshold:.0f}%)."
-                        if _open_alert(db, rule, key, title, detail, printer=printer):
+                        if _open_alert(db, rule, key, title, detail, printer=printer, runtime=runtime):
                             opened += 1
 
             elif rule.condition_type == m.AlertConditionType.error_severity:
@@ -203,7 +206,7 @@ def evaluate_alerts(db: Session, now: Optional[datetime] = None) -> dict:
                     active_keys.add(key)
                     title = f"Error on {_printer_label(printer)}"
                     detail = f"{latest.severity.value}: {latest.message}"
-                    if _open_alert(db, rule, key, title, detail, printer=printer):
+                    if _open_alert(db, rule, key, title, detail, printer=printer, runtime=runtime):
                         opened += 1
 
     resolved = _resolve_stale(db, active_keys, rule_ids)

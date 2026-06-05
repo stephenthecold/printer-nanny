@@ -199,6 +199,9 @@ class Subnet(Base):
     )
     cidr: Mapped[str] = mapped_column(String(64))
     label: Mapped[Optional[str]] = mapped_column(String(200), default=None)
+    # SNMP creds for this subnet — pushed to the owning agent for discovery.
+    snmp_community: Mapped[str] = mapped_column(String(120), default="public")
+    snmp_version: Mapped[str] = mapped_column(String(8), default="2c")
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
 
     site: Mapped[Site] = relationship(back_populates="subnets")
@@ -433,10 +436,27 @@ class User(Base):
 
     id: Mapped[int] = mapped_column(primary_key=True)
     username: Mapped[str] = mapped_column(String(120), unique=True, index=True)
-    password_hash: Mapped[str] = mapped_column(String(256))
+    # Null for SSO-only users (no local password). Local users have a hash.
+    password_hash: Mapped[Optional[str]] = mapped_column(String(256), default=None)
+    email: Mapped[Optional[str]] = mapped_column(String(200), unique=True, default=None)
+    auth_provider: Mapped[str] = mapped_column(String(40), default="local")  # local | oidc
     role: Mapped[UserRole] = mapped_column(_enum(UserRole), default=UserRole.tech)
     # For client_readonly users: restrict visibility to this client.
     client_id: Mapped[Optional[int]] = mapped_column(
         ForeignKey("clients.id", ondelete="SET NULL"), default=None
     )
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+
+
+class AppSetting(Base):
+    """Key/value store for operator-managed runtime settings (edited in the UI).
+
+    Values are JSON; the settings service overlays these on top of env-derived
+    defaults so only DATABASE_URL + SECRET_KEY need to live in the environment.
+    """
+
+    __tablename__ = "app_settings"
+
+    key: Mapped[str] = mapped_column(String(120), primary_key=True)
+    value: Mapped[Optional[dict]] = mapped_column(JSON, default=None)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)

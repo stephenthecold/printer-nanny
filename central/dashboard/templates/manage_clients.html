@@ -1,0 +1,35 @@
+{% extends "base.html" %}
+{% block title %}Manage · Printer Nanny{% endblock %}
+{% block body %}
+<h1 class="text-2xl font-semibold mb-4">Clients &amp; sites</h1>
+
+<div class="grid md:grid-cols-3 gap-6">
+  <section class="md:col-span-2 bg-white rounded-lg shadow">
+    <table class="w-full text-sm">
+      <thead class="text-left text-slate-500 bg-slate-50">
+        <tr><th class="px-4 py-2">Client</th><th class="py-2">Sites</th><th class="py-2 text-right pr-4"></th></tr>
+      </thead>
+      <tbody>
+      {% for c in clients %}
+        <tr class="border-t">
+          <td class="px-4 py-2"><a href="/manage/clients/{{ c.id }}" class="text-sky-700 font-medium hover:underline">{{ c.name }}</a></td>
+          <td class="py-2 text-slate-500">{{ c.sites|length }}</td>
+          <td class="py-2 text-right pr-4"><a href="/manage/clients/{{ c.id }}" class="text-xs text-sky-700 hover:underline">Manage →</a></td>
+        </tr>
+      {% else %}
+        <tr><td class="px-4 py-3 text-slate-400" colspan="3">No clients yet — add one to get started.</td></tr>
+      {% endfor %}
+      </tbody>
+    </table>
+  </section>
+
+  <section class="bg-white rounded-lg shadow p-4 h-fit">
+    <h2 class="font-semibold mb-3">Add client</h2>
+    <form method="post" action="/manage/clients" class="space-y-2">
+      <input name="name" placeholder="Client name" required class="w-full border rounded px-3 py-2 text-sm" />
+      <textarea name="notes" placeholder="Notes (optional)" class="w-full border rounded px-3 py-2 text-sm" rows="2"></textarea>
+      <button class="w-full bg-slate-900 text-white rounded py-2 text-sm font-medium">Add client</button>
+    </form>
+  </section>
+</div>
+{% endblock %}

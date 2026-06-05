@@ -13,14 +13,20 @@
   <div class="max-w-7xl mx-auto px-4 flex items-center gap-6 h-14">
     <a href="/" class="font-semibold text-lg">🖨️ Printer&nbsp;Nanny</a>
     <a href="/" class="hover:text-white/80 text-sm">Overview</a>
+    <a href="/manage" class="hover:text-white/80 text-sm">Manage</a>
+    <a href="/manage/agents" class="hover:text-white/80 text-sm">Agents</a>
     <a href="/approvals" class="hover:text-white/80 text-sm">Approvals</a>
     <a href="/alerts" class="hover:text-white/80 text-sm">Alerts</a>
+    {% if user.role.value == 'admin' %}<a href="/settings" class="hover:text-white/80 text-sm">Settings</a>{% endif %}
     <span class="ml-auto text-sm text-slate-400">{{ user.username }} ({{ user.role.value }})</span>
     <a href="/logout" class="text-sm text-slate-300 hover:text-white">Logout</a>
   </div>
 </nav>
 {% endif %}
 <main class="max-w-7xl mx-auto px-4 py-6">
+  {% if flash %}
+  <div class="mb-4 rounded bg-emerald-50 border border-emerald-200 text-emerald-800 text-sm px-3 py-2">{{ flash }}</div>
+  {% endif %}
   {% block body %}{% endblock %}
 </main>
 </body>

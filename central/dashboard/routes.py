@@ -36,8 +36,16 @@ def _render(request: Request, template: str, **ctx) -> HTMLResponse:
 
 # --- Auth ------------------------------------------------------------------- #
 @router.get("/login", response_class=HTMLResponse)
-def login_form(request: Request):
-    return _render(request, "login.html", error=None)
+def login_form(request: Request, sso_error: str = "", db: Session = Depends(get_db)):
+    from central.auth_oidc import oidc_config, oidc_enabled
+
+    cfg = oidc_config(db)
+    return _render(
+        request, "login.html", error=None,
+        sso_enabled=oidc_enabled(db),
+        sso_label=cfg.get("button_label") or "Sign in with SSO",
+        sso_error=sso_error,
+    )
 
 
 @router.post("/login")

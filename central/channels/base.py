@@ -29,13 +29,28 @@ class ChannelResult:
 
 
 class NotificationChannel(abc.ABC):
-    """A delivery target. Implementations are built from a NotificationChannel row."""
+    """A delivery target. Implementations are built from a NotificationChannel row.
+
+    ``runtime`` is the operator settings map (see central.runtime). When omitted,
+    channels fall back to env-derived defaults so direct construction still works.
+    """
 
     type: str = "base"
 
-    def __init__(self, name: str, config: Optional[dict] = None):
+    def __init__(
+        self, name: str, config: Optional[dict] = None, runtime: Optional[dict] = None
+    ):
         self.name = name
         self.config = config or {}
+        if runtime is None:
+            from central.runtime import default_settings
+
+            runtime = default_settings()
+        self.runtime = runtime
+
+    def setting(self, key: str, default=None):
+        """Channel-row config overrides the global runtime setting."""
+        return self.config.get(key.split(".")[-1], self.runtime.get(key, default))
 
     @abc.abstractmethod
     def send(self, note: Notification) -> ChannelResult:  # pragma: no cover - interface

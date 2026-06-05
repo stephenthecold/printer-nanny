@@ -27,6 +27,11 @@ class CentralClient:
         resp.raise_for_status()
         return resp.json()
 
+    async def get_config(self) -> dict:
+        resp = await self._client.get(self._url("/config"))
+        resp.raise_for_status()
+        return resp.json()
+
     async def get_targets(self) -> List[dict]:
         resp = await self._client.get(self._url("/targets"))
         resp.raise_for_status()

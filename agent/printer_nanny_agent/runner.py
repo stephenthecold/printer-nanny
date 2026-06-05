@@ -11,7 +11,7 @@ from typing import List, Optional
 
 from printer_nanny_agent import __version__
 from printer_nanny_agent.client import CentralClient
-from printer_nanny_agent.config import AgentConfig
+from printer_nanny_agent.config import AgentConfig, merge_remote
 from printer_nanny_agent.discovery import discover_subnet
 from printer_nanny_agent.poller import poll_printer
 from printer_nanny_agent.snmp import PysnmpBackend, SnmpBackend, SnmpError, SnmpParams
@@ -71,6 +71,16 @@ async def discover_all(client: CentralClient, backend: SnmpBackend, config: Agen
     return {"new_pending": new_pending}
 
 
+async def _effective_config(client: CentralClient, config: AgentConfig) -> AgentConfig:
+    """Fetch central-managed config and overlay it; fall back to local on error."""
+    try:
+        remote = await client.get_config()
+        return merge_remote(config, remote)
+    except Exception as exc:  # noqa: BLE001 - never let a config fetch stop a cycle
+        log.warning("could not fetch central config, using local: %s", exc)
+        return config
+
+
 async def handle_commands(
     client: CentralClient, backend: SnmpBackend, config: AgentConfig, commands: List[dict]
 ) -> None:
@@ -96,6 +106,7 @@ async def run_once(config: AgentConfig, backend: Optional[SnmpBackend] = None) -
     )
     try:
         await client.heartbeat(__version__)
+        config = await _effective_config(client, config)
         commands = await client.get_commands()
         await handle_commands(client, backend, config, commands)
         poll = await poll_targets(client, backend, config)
@@ -114,23 +125,26 @@ async def run_forever(config: AgentConfig, backend: Optional[SnmpBackend] = None
     )
     last_poll = 0.0
     last_discovery = 0.0
+    effective = config
     log.info("agent %d started → %s", config.agent_id, config.central_url)
     try:
         while True:
             now = time.monotonic()
             try:
                 await client.heartbeat(__version__)
+                # Pull central-managed config each cycle so UI changes apply live.
+                effective = await _effective_config(client, config)
                 commands = await client.get_commands()
-                await handle_commands(client, backend, config, commands)
-                if now - last_poll >= config.poll_interval_seconds:
-                    await poll_targets(client, backend, config)
+                await handle_commands(client, backend, effective, commands)
+                if now - last_poll >= effective.poll_interval_seconds:
+                    await poll_targets(client, backend, effective)
                     last_poll = now
-                if now - last_discovery >= config.discovery_interval_seconds:
-                    await discover_all(client, backend, config)
+                if now - last_discovery >= effective.discovery_interval_seconds:
+                    await discover_all(client, backend, effective)
                     last_discovery = now
             except Exception:  # noqa: BLE001 - keep the agent alive across transient errors
                 log.exception("cycle error; retrying next interval")
-            await asyncio.sleep(config.heartbeat_interval_seconds)
+            await asyncio.sleep(effective.heartbeat_interval_seconds)
     finally:
         await client.aclose()
         await backend.close()

@@ -19,7 +19,10 @@ printer), multi-subnet, agent-collected.
   - `api/` — JSON API routers: `ingest`, `management`, `reporting`.
   - `worker/` — APScheduler jobs (heartbeat, alerts, maintenance, forecast).
   - `channels/` — pluggable `NotificationChannel` impls (email, freescout, teams).
-  - `dashboard/` — HTMX/Jinja routes + templates.
+  - `dashboard/` — HTMX/Jinja: `routes` (overview/drill-down/approvals/alerts/login),
+    `manage` (clients/sites/printers/agents CRUD + enrollment), `settings_routes`.
+  - `runtime.py` — spec-driven DB-backed settings (the Settings page); env only
+    supplies defaults. `auth_oidc.py` — pluggable OIDC/SSO login.
   - `snmp_parse.py` — brand-agnostic SNMP supply/level parsing (shared w/ agent).
   - `snmp.md` — Printer-MIB OID reference.
 - `migrations/` — Alembic environment + versions.
@@ -42,7 +45,15 @@ printer), multi-subnet, agent-collected.
 - SNMP is brand-agnostic via RFC 3805 Printer MIB + Host Resources MIB. Handle
   sentinel supply levels (-1 other / -2 unknown / -3 some-remaining) in
   `central/snmp_parse.py`. OIDs documented in `central/snmp.md`.
-- Config is centralized in `central/config.py` (pydantic-settings, reads `.env`).
+- Operational config (SMTP, FreeScout, alert thresholds, polling intervals, SNMP
+  defaults, SSO) lives in the DB via `central/runtime.py` and is edited in the
+  Settings UI. Only `DATABASE_URL` + `SECRET_KEY` come from env (`central/config.py`,
+  which also supplies first-run defaults for the settings specs).
+- Agents are managed entirely in the UI: enroll (key shown once) and assign
+  subnets/SNMP under Agents; the agent fetches subnets, SNMP, and intervals from
+  `GET /api/v1/agents/{id}/config`, so its local file holds only URL + API key.
+- Auth is pluggable: local username/password always works; OIDC/SSO turns on from
+  Settings (`auth_oidc.py`), matching/provisioning users by email.
 
 ## Dev
 - `pip install -e ".[dev]"` (add `postgres` / `agent` extras as needed).

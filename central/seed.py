@@ -271,7 +271,7 @@ def seed() -> None:
     }
     db.close()
     print(f"Seeded: {counts}")
-    print("Login at http://localhost:8000  (admin / admin)")
+    print("Log in as admin / admin (local dev: http://localhost:8000, Docker: http://localhost:8080)")
 
 
 if __name__ == "__main__":

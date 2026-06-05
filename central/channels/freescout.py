@@ -11,7 +11,6 @@ from __future__ import annotations
 import httpx
 
 from central.channels.base import ChannelResult, Notification, NotificationChannel
-from central.config import settings
 
 # FreeScout severity → conversation status hint. New tickets stay "active".
 _DEFAULT_STATUS = "active"
@@ -21,13 +20,13 @@ class FreeScoutChannel(NotificationChannel):
     type = "freescout"
 
     def _base_url(self) -> str:
-        return (self.config.get("base_url") or settings.freescout_base_url or "").rstrip("/")
+        return str(self.setting("freescout.base_url") or "").rstrip("/")
 
     def _api_key(self) -> str:
-        return self.config.get("api_key") or settings.freescout_api_key
+        return self.setting("freescout.api_key") or ""
 
     def _mailbox_id(self) -> int:
-        return int(self.config.get("mailbox_id") or settings.freescout_mailbox_id)
+        return int(self.setting("freescout.mailbox_id") or 1)
 
     def build_payload(self, note: Notification) -> dict:
         """Build the POST /api/conversations body. Pure function — unit tested."""

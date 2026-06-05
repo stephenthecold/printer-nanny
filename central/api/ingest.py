@@ -63,6 +63,41 @@ def post_discovered(
     return {"new_pending": created, "already_known": known}
 
 
+@router.get("/config", response_model=s.AgentConfigOut)
+def get_agent_config(
+    agent: m.Agent = Depends(authenticated_agent),
+    db: Session = Depends(get_db),
+):
+    """Central-managed config for this agent: intervals, SNMP defaults, and subnets.
+
+    Lets the agent's local file hold only the central URL + API key — everything
+    else is set in the site UI and delivered here.
+    """
+    from central.runtime import load_settings
+
+    touch_heartbeat(agent)
+    rt = load_settings(db)
+    subnets = db.scalars(select(m.Subnet).where(m.Subnet.agent_id == agent.id))
+    db.commit()
+    return s.AgentConfigOut(
+        poll_interval_seconds=rt["polling.poll_interval_seconds"],
+        discovery_interval_seconds=rt["polling.discovery_interval_seconds"],
+        heartbeat_interval_seconds=rt["polling.heartbeat_interval_seconds"],
+        snmp={
+            "community": rt["snmp.community"],
+            "version": rt["snmp.version"],
+            "timeout": rt["snmp.timeout"],
+            "retries": rt["snmp.retries"],
+        },
+        subnets=[
+            s.AgentSubnetConfig(
+                cidr=sub.cidr, snmp_community=sub.snmp_community, snmp_version=sub.snmp_version
+            )
+            for sub in subnets
+        ],
+    )
+
+
 @router.get("/targets", response_model=list[s.PollTargetOut])
 def get_targets(
     agent: m.Agent = Depends(authenticated_agent),

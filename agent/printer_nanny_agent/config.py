@@ -7,7 +7,7 @@ Resolution order for the path: explicit ``--config`` arg → ``$PRINTER_NANNY_CO
 from __future__ import annotations
 
 import os
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import List, Optional
 
 try:  # Python 3.11+ has tomllib in the stdlib.
@@ -55,6 +55,43 @@ class AgentConfig:
             timeout=self.snmp.timeout,
             retries=self.snmp.retries,
         )
+
+
+def merge_remote(config: AgentConfig, remote: dict) -> AgentConfig:
+    """Overlay central-delivered config (subnets, intervals, SNMP) onto the local file.
+
+    The local file stays authoritative for central_url / agent_id / api_key /
+    verify_tls; everything operational comes from central. Remote subnets, when
+    present, replace the local list (central is the source of truth).
+    """
+    snmp_raw = remote.get("snmp", {})
+    snmp = SnmpParams(
+        community=snmp_raw.get("community", config.snmp.community),
+        version=str(snmp_raw.get("version", config.snmp.version)),
+        port=config.snmp.port,
+        timeout=float(snmp_raw.get("timeout", config.snmp.timeout)),
+        retries=int(snmp_raw.get("retries", config.snmp.retries)),
+    )
+    remote_subnets = [
+        SubnetConfig(
+            cidr=s["cidr"],
+            community=s.get("snmp_community"),
+            version=str(s["snmp_version"]) if s.get("snmp_version") else None,
+        )
+        for s in remote.get("subnets", [])
+    ]
+    return replace(
+        config,
+        snmp=snmp,
+        subnets=remote_subnets or config.subnets,
+        poll_interval_seconds=int(remote.get("poll_interval_seconds", config.poll_interval_seconds)),
+        discovery_interval_seconds=int(
+            remote.get("discovery_interval_seconds", config.discovery_interval_seconds)
+        ),
+        heartbeat_interval_seconds=int(
+            remote.get("heartbeat_interval_seconds", config.heartbeat_interval_seconds)
+        ),
+    )
 
 
 def resolve_config_path(explicit: Optional[str] = None) -> str:
