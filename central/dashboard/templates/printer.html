@@ -1,0 +1,65 @@
+{% extends "base.html" %}
+{% from "base.html" import status_badge, level_bar %}
+{% block title %}{{ printer_label(printer) }} · Printer Nanny{% endblock %}
+{% block body %}
+<div class="flex items-center gap-3 mb-4">
+  <a href="/clients/{{ printer.client_id }}" class="text-sm text-sky-700 hover:underline">← Client</a>
+  <h1 class="text-2xl font-semibold">{{ printer.model or printer.hostname or 'Printer' }}</h1>
+  {{ status_badge(printer.status) }}
+</div>
+
+<div class="grid md:grid-cols-3 gap-4 mb-6 text-sm">
+  <div class="bg-white rounded-lg shadow p-4">
+    <div class="text-slate-500 text-xs">Identity</div>
+    <div class="mt-1">{{ printer.brand or '—' }} {{ printer.model or '' }}</div>
+    <div class="text-slate-500">IP {{ printer.ip }} · {{ printer.location or 'no location' }}</div>
+    <div class="text-slate-500">S/N {{ printer.serial or '—' }}</div>
+    <div class="text-slate-500">Last seen {{ printer.last_seen.strftime('%Y-%m-%d %H:%M') if printer.last_seen else 'never' }}</div>
+  </div>
+  <div class="bg-white rounded-lg shadow p-4">
+    <div class="text-slate-500 text-xs">Page count</div>
+    <div class="text-2xl font-semibold mt-1 tabular-nums">{{ '{:,}'.format(printer.page_count) if printer.page_count else '—' }}</div>
+    {% if spark %}
+    <svg viewBox="0 0 280 48" class="mt-2 w-full h-12">
+      <polyline points="{{ spark }}" fill="none" stroke="#0284c7" stroke-width="2" />
+    </svg>
+    {% endif %}
+  </div>
+  <div class="bg-white rounded-lg shadow p-4">
+    <div class="text-slate-500 text-xs mb-2">Supplies</div>
+    {% for sup in supplies %}
+    <div class="flex justify-between items-center py-1">
+      <span>{{ sup.color or sup.type.value }}</span>{{ level_bar(sup.level_pct) }}
+    </div>
+    {% else %}<div class="text-slate-400">No supply data.</div>{% endfor %}
+  </div>
+</div>
+
+<div class="grid md:grid-cols-2 gap-6">
+  <section class="bg-white rounded-lg shadow p-4">
+    <h2 class="font-semibold mb-3">Error history</h2>
+    <ul class="space-y-2 text-sm">
+      {% for e in events %}
+      <li class="flex gap-2">
+        <span class="text-slate-400 tabular-nums text-xs w-28">{{ e.ts.strftime('%m-%d %H:%M') }}</span>
+        <span class="px-1.5 py-0.5 rounded text-xs h-fit {{ 'bg-red-100 text-red-700' if e.severity.value=='critical' else ('bg-amber-100 text-amber-700' if e.severity.value=='warning' else 'bg-slate-100 text-slate-600') }}">{{ e.severity.value }}</span>
+        <span>{{ e.message }}</span>
+      </li>
+      {% else %}<li class="text-slate-400">No events.</li>{% endfor %}
+    </ul>
+  </section>
+
+  <section class="bg-white rounded-lg shadow p-4">
+    <h2 class="font-semibold mb-3">Maintenance log</h2>
+    <ul class="space-y-2 text-sm">
+      {% for r in maintenance %}
+      <li class="flex gap-2">
+        <span class="text-slate-400 tabular-nums text-xs w-20">{{ r.performed_at.strftime('%Y-%m-%d') }}</span>
+        <span class="px-1.5 py-0.5 rounded text-xs h-fit bg-sky-100 text-sky-700">{{ r.type.value }}</span>
+        <span>{{ r.notes or '' }} <span class="text-slate-400">{{ '· ' + r.performed_by if r.performed_by else '' }}</span></span>
+      </li>
+      {% else %}<li class="text-slate-400">No maintenance recorded.</li>{% endfor %}
+    </ul>
+  </section>
+</div>
+{% endblock %}

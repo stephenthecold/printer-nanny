@@ -1,0 +1,52 @@
+"""SMTP email notification channel."""
+
+from __future__ import annotations
+
+import smtplib
+from email.message import EmailMessage
+
+from central.channels.base import ChannelResult, Notification, NotificationChannel
+from central.config import settings
+
+
+class EmailChannel(NotificationChannel):
+    type = "email"
+
+    def _recipients(self) -> list[str]:
+        to = self.config.get("to")
+        if isinstance(to, str):
+            return [addr.strip() for addr in to.split(",") if addr.strip()]
+        if isinstance(to, list):
+            return to
+        return []
+
+    def build_message(self, note: Notification) -> EmailMessage:
+        msg = EmailMessage()
+        msg["Subject"] = f"[Printer Nanny][{note.severity.upper()}] {note.title}"
+        msg["From"] = self.config.get("from") or settings.smtp_from
+        msg["To"] = ", ".join(self._recipients())
+        lines = [note.body, ""]
+        if note.printer_label:
+            lines.append(f"Printer: {note.printer_label}")
+        if note.site_name:
+            lines.append(f"Site: {note.site_name}")
+        if note.client_name:
+            lines.append(f"Client: {note.client_name}")
+        msg.set_content("\n".join(lines))
+        return msg
+
+    def send(self, note: Notification) -> ChannelResult:
+        recipients = self._recipients()
+        if not recipients:
+            return ChannelResult(ok=False, detail="no recipients configured")
+        msg = self.build_message(note)
+        try:
+            with smtplib.SMTP(settings.smtp_host, settings.smtp_port, timeout=15) as smtp:
+                if settings.smtp_use_tls:
+                    smtp.starttls()
+                if settings.smtp_user:
+                    smtp.login(settings.smtp_user, settings.smtp_password)
+                smtp.send_message(msg)
+            return ChannelResult(ok=True, detail=f"emailed {len(recipients)} recipient(s)")
+        except OSError as exc:
+            return ChannelResult(ok=False, detail=f"smtp error: {exc}")

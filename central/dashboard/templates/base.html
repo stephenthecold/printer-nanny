@@ -1,0 +1,44 @@
+<!doctype html>
+<html lang="en" class="h-full bg-slate-50">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>{% block title %}Printer Nanny{% endblock %}</title>
+  <script src="https://cdn.tailwindcss.com"></script>
+  <script src="https://unpkg.com/htmx.org@1.9.12"></script>
+</head>
+<body class="h-full text-slate-800">
+{% if user %}
+<nav class="bg-slate-900 text-slate-100">
+  <div class="max-w-7xl mx-auto px-4 flex items-center gap-6 h-14">
+    <a href="/" class="font-semibold text-lg">🖨️ Printer&nbsp;Nanny</a>
+    <a href="/" class="hover:text-white/80 text-sm">Overview</a>
+    <a href="/approvals" class="hover:text-white/80 text-sm">Approvals</a>
+    <a href="/alerts" class="hover:text-white/80 text-sm">Alerts</a>
+    <span class="ml-auto text-sm text-slate-400">{{ user.username }} ({{ user.role.value }})</span>
+    <a href="/logout" class="text-sm text-slate-300 hover:text-white">Logout</a>
+  </div>
+</nav>
+{% endif %}
+<main class="max-w-7xl mx-auto px-4 py-6">
+  {% block body %}{% endblock %}
+</main>
+</body>
+</html>
+
+{% macro status_badge(status) -%}
+{%- set colors = {'ok':'bg-green-100 text-green-800','warning':'bg-amber-100 text-amber-800','error':'bg-red-100 text-red-800','offline':'bg-slate-200 text-slate-700','unknown':'bg-slate-100 text-slate-500'} -%}
+<span class="px-2 py-0.5 rounded text-xs font-medium {{ colors.get(status.value, 'bg-slate-100') }}">{{ status.value }}</span>
+{%- endmacro %}
+
+{% macro level_bar(pct) -%}
+{%- if pct is none -%}
+<span class="text-xs text-slate-400">unknown</span>
+{%- else -%}
+{%- set color = 'bg-red-500' if pct <= 10 else ('bg-amber-500' if pct <= 25 else 'bg-green-500') -%}
+<div class="flex items-center gap-2">
+  <div class="w-24 h-2 bg-slate-200 rounded"><div class="h-2 rounded {{ color }}" style="width: {{ pct }}%"></div></div>
+  <span class="text-xs tabular-nums w-9">{{ '%.0f'|format(pct) }}%</span>
+</div>
+{%- endif -%}
+{%- endmacro %}

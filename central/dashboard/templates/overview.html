@@ -1,0 +1,79 @@
+{% extends "base.html" %}
+{% from "base.html" import status_badge, level_bar %}
+{% block title %}Overview · Printer Nanny{% endblock %}
+{% block body %}
+<h1 class="text-2xl font-semibold mb-4">Fleet overview</h1>
+
+<div class="grid grid-cols-2 md:grid-cols-5 gap-3 mb-6">
+  {% set s = summary %}
+  <div class="bg-white rounded-lg shadow p-4">
+    <div class="text-3xl font-semibold">{{ s.total_printers }}</div>
+    <div class="text-xs text-slate-500 mt-1">Printers</div>
+  </div>
+  <div class="bg-white rounded-lg shadow p-4">
+    <div class="text-3xl font-semibold text-green-600">{{ s.by_status.ok }}</div>
+    <div class="text-xs text-slate-500 mt-1">OK</div>
+  </div>
+  <div class="bg-white rounded-lg shadow p-4">
+    <div class="text-3xl font-semibold text-red-600">{{ s.by_status.error + s.by_status.offline }}</div>
+    <div class="text-xs text-slate-500 mt-1">Error / Offline</div>
+  </div>
+  <div class="bg-white rounded-lg shadow p-4">
+    <a href="/approvals"><div class="text-3xl font-semibold text-sky-600">{{ s.pending_discovery }}</div>
+    <div class="text-xs text-slate-500 mt-1">Pending discovery</div></a>
+  </div>
+  <div class="bg-white rounded-lg shadow p-4">
+    <a href="/alerts"><div class="text-3xl font-semibold text-amber-600">{{ s.open_alerts }}</div>
+    <div class="text-xs text-slate-500 mt-1">Open alerts</div></a>
+  </div>
+</div>
+
+<div class="grid md:grid-cols-2 gap-6">
+  <section class="bg-white rounded-lg shadow p-4">
+    <h2 class="font-semibold mb-3">Clients</h2>
+    <ul class="divide-y">
+      {% for c in clients %}
+      <li class="py-2 flex justify-between text-sm">
+        <a href="/clients/{{ c.id }}" class="text-sky-700 hover:underline">{{ c.name }}</a>
+        <span class="text-slate-400">{{ c.sites|length }} site(s)</span>
+      </li>
+      {% else %}<li class="py-2 text-sm text-slate-400">No clients yet.</li>{% endfor %}
+    </ul>
+  </section>
+
+  <section class="bg-white rounded-lg shadow p-4">
+    <h2 class="font-semibold mb-3">Low supplies</h2>
+    <table class="w-full text-sm">
+      <tbody>
+      {% for sup in low %}
+      <tr class="border-t">
+        <td class="py-1.5"><a href="/printers/{{ sup.printer_id }}" class="text-sky-700 hover:underline">{{ sup.color or sup.type.value }}</a></td>
+        <td class="py-1.5 text-right">{{ level_bar(sup.level_pct) }}</td>
+      </tr>
+      {% else %}<tr><td class="py-2 text-slate-400">All supplies healthy.</td></tr>{% endfor %}
+      </tbody>
+    </table>
+  </section>
+
+  <section class="bg-white rounded-lg shadow p-4">
+    <h2 class="font-semibold mb-3">Recent errors</h2>
+    <ul class="space-y-2 text-sm">
+      {% for e in errors %}
+      <li class="flex gap-2">
+        <span class="px-1.5 py-0.5 rounded text-xs {{ 'bg-red-100 text-red-700' if e.severity.value=='critical' else 'bg-amber-100 text-amber-700' }}">{{ e.severity.value }}</span>
+        <a href="/printers/{{ e.printer_id }}" class="hover:underline">{{ e.message }}</a>
+      </li>
+      {% else %}<li class="text-slate-400">No recent errors.</li>{% endfor %}
+    </ul>
+  </section>
+
+  <section class="bg-white rounded-lg shadow p-4">
+    <h2 class="font-semibold mb-3">Open alerts</h2>
+    <ul class="space-y-2 text-sm">
+      {% for a in alerts %}
+      <li><a href="/alerts" class="hover:underline">{{ a.title }}</a></li>
+      {% else %}<li class="text-slate-400">No open alerts.</li>{% endfor %}
+    </ul>
+  </section>
+</div>
+{% endblock %}

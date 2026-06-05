@@ -1,0 +1,8 @@
+# Dev reverse proxy. For production, replace :80 with your hostname so Caddy
+# provisions TLS automatically, e.g.:
+#   printers.msp.example.com {
+#       reverse_proxy api:8000
+#   }
+:80 {
+	reverse_proxy api:8000
+}

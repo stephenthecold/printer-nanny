@@ -1,0 +1,22 @@
+# Sample systemd unit for a site agent (Milestone 2). Install on a small Linux
+# box / VM at each site with line-of-sight (or tunnel reach) to the printer subnets.
+#
+#   sudo cp printer-nanny-agent.service /etc/systemd/system/
+#   sudo systemctl enable --now printer-nanny-agent
+#
+[Unit]
+Description=Printer Nanny site agent
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=printer-nanny
+# Config holds the central URL, this agent's API key, subnets, and SNMP creds.
+Environment=PRINTER_NANNY_CONFIG=/etc/printer-nanny/agent.toml
+ExecStart=/opt/printer-nanny/.venv/bin/printer-nanny-agent run
+Restart=always
+RestartSec=10
+
+[Install]
+WantedBy=multi-user.target

@@ -1,0 +1,38 @@
+{% extends "base.html" %}
+{% from "base.html" import status_badge %}
+{% block title %}{{ client.name }} · Printer Nanny{% endblock %}
+{% block body %}
+<div class="flex items-center gap-3 mb-4">
+  <a href="/" class="text-sm text-sky-700 hover:underline">← Overview</a>
+  <h1 class="text-2xl font-semibold">{{ client.name }}</h1>
+</div>
+
+{% for site in sites %}
+<section class="bg-white rounded-lg shadow mb-4">
+  <div class="px-4 py-3 border-b flex justify-between">
+    <h2 class="font-semibold">{{ site.name }}</h2>
+    <span class="text-xs text-slate-400">{{ site.address or '' }}</span>
+  </div>
+  <table class="w-full text-sm">
+    <thead class="text-left text-slate-500">
+      <tr><th class="px-4 py-2">Printer</th><th class="py-2">IP</th><th class="py-2">Status</th><th class="py-2">Pages</th></tr>
+    </thead>
+    <tbody>
+      {% for p in printers if p.site_id == site.id %}
+      <tr class="border-t">
+        <td class="px-4 py-2"><a href="/printers/{{ p.id }}" class="text-sky-700 hover:underline">{{ p.model or p.hostname or 'printer' }}</a>
+          <span class="text-slate-400">{{ p.location or '' }}</span></td>
+        <td class="py-2 tabular-nums">{{ p.ip }}</td>
+        <td class="py-2">{{ status_badge(p.status) }}</td>
+        <td class="py-2 tabular-nums">{{ '{:,}'.format(p.page_count) if p.page_count else '—' }}</td>
+      </tr>
+      {% else %}
+      <tr><td class="px-4 py-3 text-slate-400" colspan="4">No approved printers at this site.</td></tr>
+      {% endfor %}
+    </tbody>
+  </table>
+</section>
+{% else %}
+<p class="text-slate-400">No sites for this client.</p>
+{% endfor %}
+{% endblock %}

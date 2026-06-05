@@ -1,0 +1,31 @@
+{% extends "base.html" %}
+{% block title %}Approvals · Printer Nanny{% endblock %}
+{% block body %}
+<h1 class="text-2xl font-semibold mb-1">Pending discovery</h1>
+<p class="text-sm text-slate-500 mb-4">Devices agents found on their subnets. Approve to start monitoring, or ignore.</p>
+
+<div class="bg-white rounded-lg shadow overflow-hidden">
+  <table class="w-full text-sm">
+    <thead class="text-left text-slate-500 bg-slate-50">
+      <tr><th class="px-4 py-2">IP</th><th class="py-2">Host / model</th><th class="py-2">MAC</th><th class="py-2 text-right pr-4">Action</th></tr>
+    </thead>
+    <tbody>
+      {% for p in pending %}
+      <tr class="border-t" id="pending-{{ p.id }}">
+        <td class="px-4 py-2 tabular-nums">{{ p.ip }}</td>
+        <td class="py-2">{{ p.hostname or '—' }} <span class="text-slate-400">{{ p.brand or '' }} {{ p.model or '' }}</span></td>
+        <td class="py-2 text-slate-400">{{ p.mac or '—' }}</td>
+        <td class="py-2 text-right pr-4">
+          <button hx-post="/approvals/{{ p.id }}/approve" hx-target="#pending-{{ p.id }}" hx-swap="outerHTML"
+                  class="bg-green-600 text-white rounded px-2 py-1 text-xs">Approve</button>
+          <button hx-post="/approvals/{{ p.id }}/ignore" hx-target="#pending-{{ p.id }}" hx-swap="outerHTML"
+                  class="bg-slate-300 text-slate-700 rounded px-2 py-1 text-xs">Ignore</button>
+        </td>
+      </tr>
+      {% else %}
+      <tr><td class="px-4 py-4 text-slate-400" colspan="4">Nothing pending. 🎉</td></tr>
+      {% endfor %}
+    </tbody>
+  </table>
+</div>
+{% endblock %}

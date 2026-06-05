@@ -1,0 +1,68 @@
+# On-prem central stack: Postgres + API + worker + dashboard behind Caddy.
+services:
+  db:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: nanny
+      POSTGRES_PASSWORD: nanny
+      POSTGRES_DB: printer_nanny
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U nanny"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  api:
+    build:
+      context: .
+      dockerfile: deploy/Dockerfile
+    environment:
+      DATABASE_URL: postgresql+psycopg://nanny:nanny@db:5432/printer_nanny
+      SECRET_KEY: ${SECRET_KEY:-change-me-in-prod}
+      FREESCOUT_BASE_URL: ${FREESCOUT_BASE_URL:-}
+      FREESCOUT_API_KEY: ${FREESCOUT_API_KEY:-}
+      SMTP_HOST: ${SMTP_HOST:-mailhog}
+      SMTP_PORT: ${SMTP_PORT:-1025}
+    depends_on:
+      db:
+        condition: service_healthy
+    # Apply migrations, then serve.
+    command: >
+      sh -c "alembic upgrade head &&
+             uvicorn central.main:app --host 0.0.0.0 --port 8000"
+
+  worker:
+    build:
+      context: .
+      dockerfile: deploy/Dockerfile
+    environment:
+      DATABASE_URL: postgresql+psycopg://nanny:nanny@db:5432/printer_nanny
+      SECRET_KEY: ${SECRET_KEY:-change-me-in-prod}
+      FREESCOUT_BASE_URL: ${FREESCOUT_BASE_URL:-}
+      FREESCOUT_API_KEY: ${FREESCOUT_API_KEY:-}
+      SMTP_HOST: ${SMTP_HOST:-mailhog}
+      SMTP_PORT: ${SMTP_PORT:-1025}
+    depends_on:
+      db:
+        condition: service_healthy
+    command: ["python", "-m", "central.worker.run", "--interval", "60"]
+
+  # Local SMTP catcher so email alerts are visible in dev (http://localhost:8025).
+  mailhog:
+    image: mailhog/mailhog
+    ports:
+      - "8025:8025"
+
+  caddy:
+    image: caddy:2-alpine
+    ports:
+      - "8080:80"
+    volumes:
+      - ./deploy/Caddyfile:/etc/caddy/Caddyfile:ro
+    depends_on:
+      - api
+
+volumes:
+  pgdata:
