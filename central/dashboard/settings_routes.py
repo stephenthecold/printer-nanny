@@ -58,3 +58,33 @@ async def settings_save(request: Request, db: Session = Depends(get_db)):
     runtime.save_settings(db, form)
     request.session["flash"] = "Settings saved."
     return RedirectResponse("/settings", status_code=303)
+
+
+@router.post("/settings/test-notification")
+def settings_test(request: Request, db: Session = Depends(get_db)):
+    """Send a test alert through every enabled channel and report each result."""
+    from central.channels import Notification, active_channels, dispatch
+
+    user = _admin(request, db)
+    if user is None:
+        return RedirectResponse("/login", status_code=303)
+    channels = active_channels(runtime.load_settings(db))
+    if not channels:
+        request.session["flash"] = (
+            "No channels enabled — turn on Email and/or FreeScout above, then save first."
+        )
+        return RedirectResponse("/settings", status_code=303)
+    note = Notification(
+        title="Printer Nanny test notification",
+        body="If you're reading this, the channel is wired up correctly.",
+        severity="info",
+        client_name="Test Client",
+        site_name="Test Site",
+        printer_label="Test Printer @ 10.0.0.1",
+    )
+    results = dispatch(note, channels)
+    summary = "; ".join(
+        f"{name}: {'OK' if res.ok else 'FAILED'} ({res.detail})" for name, res in results
+    )
+    request.session["flash"] = f"Test sent — {summary}"
+    return RedirectResponse("/settings", status_code=303)

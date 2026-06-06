@@ -58,15 +58,17 @@ def seed() -> None:
     db.add(m.User(username="admin", password_hash=hash_password("admin"), role=m.UserRole.admin))
     db.add(m.User(username="tech", password_hash=hash_password("tech"), role=m.UserRole.tech))
 
-    # Notification channels (global). FreeScout/email run in dry-run without creds.
-    email_ch = m.NotificationChannel(
-        name="Ops email", type=m.ChannelType.email, config={"to": "ops@example.com"}
-    )
-    fs_ch = m.NotificationChannel(
-        name="FreeScout tickets", type=m.ChannelType.freescout, config={}
-    )
-    db.add_all([email_ch, fs_ch])
-    db.flush()
+    # Channels are configured in Settings; enable email to a demo address so the
+    # Docker stack's MailHog catches alert mail. FreeScout stays off until creds
+    # are entered. (See central/runtime.py.)
+    from central import runtime
+
+    runtime.save_settings(db, {
+        "email.enabled": "on",
+        "email.default_recipients": "ops@example.com",
+        "smtp.host": "mailhog",
+        "smtp.port": "1025",
+    })
 
     clients_spec = [
         ("Northwind Health", ["Main Clinic", "Westside Annex"]),
@@ -233,6 +235,7 @@ def seed() -> None:
     db.add(stray)
 
     # Alert rules: low supply <10%, any error, agent offline >30 min.
+    # Channels come from Settings (active_channels), so no per-rule channel_ids.
     db.add_all(
         [
             m.AlertRule(
@@ -241,14 +244,12 @@ def seed() -> None:
                 condition_type=m.AlertConditionType.supply_below,
                 threshold=10,
                 severity=m.EventSeverity.warning,
-                channel_ids=[email_ch.id, fs_ch.id],
             ),
             m.AlertRule(
                 name="Printer errors",
                 scope=m.AlertScope.global_,
                 condition_type=m.AlertConditionType.error_severity,
                 severity=m.EventSeverity.critical,
-                channel_ids=[fs_ch.id],
             ),
             m.AlertRule(
                 name="Agent offline (>30 min)",
@@ -256,7 +257,6 @@ def seed() -> None:
                 condition_type=m.AlertConditionType.offline_minutes,
                 threshold=30,
                 severity=m.EventSeverity.warning,
-                channel_ids=[email_ch.id],
             ),
         ]
     )

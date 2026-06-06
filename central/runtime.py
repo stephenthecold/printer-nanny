@@ -33,6 +33,9 @@ class Spec:
 
 SPECS: List[Spec] = [
     # Email (SMTP)
+    Spec("email.enabled", "bool", "Email (SMTP)", "Send email on alerts", False),
+    Spec("email.default_recipients", "str", "Email (SMTP)", "Alert recipients",
+         "", "Comma-separated addresses that receive alert emails"),
     Spec("smtp.host", "str", "Email (SMTP)", "SMTP host", _env.smtp_host),
     Spec("smtp.port", "int", "Email (SMTP)", "SMTP port", _env.smtp_port),
     Spec("smtp.user", "str", "Email (SMTP)", "SMTP username", _env.smtp_user),
@@ -40,6 +43,7 @@ SPECS: List[Spec] = [
     Spec("smtp.from", "str", "Email (SMTP)", "From address", _env.smtp_from),
     Spec("smtp.use_tls", "bool", "Email (SMTP)", "Use STARTTLS", _env.smtp_use_tls),
     # FreeScout (ticketing)
+    Spec("freescout.enabled", "bool", "FreeScout", "Open a ticket on alerts", False),
     Spec("freescout.base_url", "str", "FreeScout", "Base URL", _env.freescout_base_url,
          "e.g. https://help.msp.example.com"),
     Spec("freescout.api_key", "secret", "FreeScout", "API key", _env.freescout_api_key,

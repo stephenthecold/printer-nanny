@@ -13,7 +13,7 @@ from sqlalchemy.orm import Session
 
 from central import models as m
 from central import queries
-from central.channels import Notification, dispatch
+from central.channels import Notification, active_channels, dispatch
 from central.runtime import load_settings
 
 _SEVERITY_RANK = {
@@ -62,21 +62,6 @@ def mark_offline_agents(db: Session, now: Optional[datetime] = None) -> dict:
 # --------------------------------------------------------------------------- #
 # Alert evaluation
 # --------------------------------------------------------------------------- #
-def _channels_for_rule(db: Session, rule: m.AlertRule) -> list[m.NotificationChannel]:
-    if rule.channel_ids:
-        rows = [db.get(m.NotificationChannel, cid) for cid in rule.channel_ids]
-        return [r for r in rows if r is not None and r.enabled]
-    # Fall back to all enabled global channels.
-    return list(
-        db.scalars(
-            select(m.NotificationChannel).where(
-                m.NotificationChannel.enabled.is_(True),
-                m.NotificationChannel.scope == m.AlertScope.global_,
-            )
-        )
-    )
-
-
 def _printer_label(printer: m.Printer) -> str:
     name = printer.model or printer.hostname or "printer"
     return f"{name} @ {printer.ip}"
@@ -110,7 +95,7 @@ def _open_alert(
     *,
     printer: Optional[m.Printer] = None,
     agent: Optional[m.Agent] = None,
-    runtime: Optional[dict] = None,
+    channels: Optional[list] = None,
 ) -> Optional[m.Alert]:
     """Open an alert if one isn't already open for this dedupe_key. Returns it (or None)."""
     if _find_open_alert(db, dedupe_key) is not None:
@@ -129,14 +114,23 @@ def _open_alert(
     db.add(alert)
     db.flush()  # assign alert.id
 
+    client_name = site_name = None
+    if printer is not None:
+        client = db.get(m.Client, printer.client_id)
+        site = db.get(m.Site, printer.site_id)
+        client_name = client.name if client else None
+        site_name = site.name if site else None
+
     note = Notification(
         title=title,
         body=detail,
         severity=rule.severity.value,
+        client_name=client_name,
+        site_name=site_name,
         printer_label=_printer_label(printer) if printer else None,
         alert_id=alert.id,
     )
-    results = dispatch(note, _channels_for_rule(db, rule), runtime)
+    results = dispatch(note, channels or [])
     alert.notified_channels = [
         {"channel": name, "ok": res.ok, "detail": res.detail} for name, res in results
     ]
@@ -159,6 +153,7 @@ def evaluate_alerts(db: Session, now: Optional[datetime] = None) -> dict:
     now = now or _now()
     rules = list(db.scalars(select(m.AlertRule).where(m.AlertRule.enabled.is_(True))))
     runtime = load_settings(db)
+    channels = active_channels(runtime)
     opened = 0
     active_keys: set[str] = set()
     rule_ids = {r.id for r in rules}
@@ -176,7 +171,7 @@ def evaluate_alerts(db: Session, now: Optional[datetime] = None) -> dict:
                         f"No heartbeat for over {rule.threshold} min "
                         f"(last: {last.isoformat() if last else 'never'})."
                     )
-                    if _open_alert(db, rule, key, title, detail, agent=agent, runtime=runtime):
+                    if _open_alert(db, rule, key, title, detail, agent=agent, channels=channels):
                         opened += 1
             continue
 
@@ -190,7 +185,7 @@ def evaluate_alerts(db: Session, now: Optional[datetime] = None) -> dict:
                         label = supply.color or supply.type.value
                         title = f"Low {label} on {_printer_label(printer)}"
                         detail = f"{label} at {supply.level_pct:.0f}% (threshold {threshold:.0f}%)."
-                        if _open_alert(db, rule, key, title, detail, printer=printer, runtime=runtime):
+                        if _open_alert(db, rule, key, title, detail, printer=printer, channels=channels):
                             opened += 1
 
             elif rule.condition_type == m.AlertConditionType.error_severity:
@@ -206,7 +201,7 @@ def evaluate_alerts(db: Session, now: Optional[datetime] = None) -> dict:
                     active_keys.add(key)
                     title = f"Error on {_printer_label(printer)}"
                     detail = f"{latest.severity.value}: {latest.message}"
-                    if _open_alert(db, rule, key, title, detail, printer=printer, runtime=runtime):
+                    if _open_alert(db, rule, key, title, detail, printer=printer, channels=channels):
                         opened += 1
 
     resolved = _resolve_stale(db, active_keys, rule_ids)

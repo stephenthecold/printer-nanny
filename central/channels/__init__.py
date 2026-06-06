@@ -3,12 +3,13 @@
 from __future__ import annotations
 
 from central.channels.base import ChannelResult, NotificationChannel, Notification
-from central.channels.registry import build_channel, dispatch
+from central.channels.registry import active_channels, build_channel, dispatch
 
 __all__ = [
     "ChannelResult",
     "Notification",
     "NotificationChannel",
+    "active_channels",
     "build_channel",
     "dispatch",
 ]

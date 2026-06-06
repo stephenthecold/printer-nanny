@@ -14,7 +14,15 @@
         <td class="px-4 py-2">
           <span class="px-1.5 py-0.5 rounded text-xs {{ 'bg-red-100 text-red-700' if a.severity.value=='critical' else 'bg-amber-100 text-amber-700' }}">{{ a.severity.value }}</span>
         </td>
-        <td class="py-2"><div class="font-medium">{{ a.title }}</div><div class="text-slate-500 text-xs">{{ a.detail or '' }}</div></td>
+        <td class="py-2"><div class="font-medium">{{ a.title }}</div><div class="text-slate-500 text-xs">{{ a.detail or '' }}</div>
+          {% if a.notified_channels %}
+          <div class="mt-1 flex flex-wrap gap-1">
+            {% for ch in a.notified_channels %}
+            <span title="{{ ch.detail }}" class="text-[10px] px-1.5 py-0.5 rounded {{ 'bg-green-100 text-green-700' if ch.ok else 'bg-red-100 text-red-700' }}">{{ ch.channel }} {{ '✓' if ch.ok else '✕' }}</span>
+            {% endfor %}
+          </div>
+          {% endif %}
+        </td>
         <td class="py-2"><span class="text-xs {{ 'text-amber-600' if a.state.value=='open' else 'text-slate-500' }}">{{ a.state.value }}</span></td>
         <td class="py-2 text-slate-400 text-xs tabular-nums">{{ a.created_at.strftime('%m-%d %H:%M') }}</td>
         <td class="py-2 text-right pr-4">

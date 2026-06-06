@@ -37,4 +37,9 @@
     <button class="bg-slate-900 text-white rounded px-5 py-2.5 text-sm font-medium shadow-lg">Save settings</button>
   </div>
 </form>
+
+<form method="post" action="/settings/test-notification" class="max-w-3xl mt-4">
+  <button class="border border-slate-300 bg-white rounded px-4 py-2 text-sm">Send test notification</button>
+  <span class="text-xs text-slate-400 ml-2">Fires a test alert through every enabled channel (save first).</span>
+</form>
 {% endblock %}

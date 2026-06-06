@@ -2,11 +2,11 @@
 
 from __future__ import annotations
 
-from central import models as m
-from central.channels import Notification, dispatch
+from central.channels import Notification, active_channels, dispatch
 from central.channels.email import EmailChannel
 from central.channels.freescout import FreeScoutChannel
 from central.channels.teams import TeamsChannel
+from central.runtime import default_settings
 
 NOTE = Notification(
     title="Low magenta on HP M404 @ 10.0.0.5",
@@ -58,12 +58,23 @@ def test_teams_payload_and_dry_run():
     assert ch.send(NOTE).ok is True  # dry-run without webhook
 
 
-def test_dispatch_skips_disabled_and_reports_each():
-    rows = [
-        m.NotificationChannel(name="email", type=m.ChannelType.email, config={"to": ""}, enabled=True),
-        m.NotificationChannel(name="fs", type=m.ChannelType.freescout, config={}, enabled=True),
-        m.NotificationChannel(name="off", type=m.ChannelType.teams, config={}, enabled=False),
-    ]
-    results = dispatch(NOTE, rows)
-    names = {name for name, _ in results}
-    assert names == {"email", "fs"}  # disabled one skipped
+def test_active_channels_from_settings():
+    rt = default_settings()
+    assert active_channels(rt) == []  # nothing enabled by default
+    rt.update({"email.enabled": True, "email.default_recipients": "ops@x.com"})
+    rt["freescout.enabled"] = True
+    chans = active_channels(rt)
+    types = {c.type for c in chans}
+    assert types == {"email", "freescout"}
+    # email needs recipients to be active
+    rt2 = default_settings()
+    rt2["email.enabled"] = True  # but no recipients
+    assert active_channels(rt2) == []
+
+
+def test_dispatch_reports_each_channel():
+    rt = default_settings()
+    rt.update({"freescout.enabled": True})  # dry-run (no creds) → ok
+    results = dispatch(NOTE, active_channels(rt))
+    assert [name for name, _ in results] == ["FreeScout"]
+    assert results[0][1].ok is True  # dry-run success
