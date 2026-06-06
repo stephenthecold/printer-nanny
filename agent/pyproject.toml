@@ -7,6 +7,7 @@
 name = "printer-nanny-agent"
 version = "0.1.0"
 description = "Printer Nanny site agent — SNMP collector that reports to the central server"
+license = "Apache-2.0"
 requires-python = ">=3.9"
 dependencies = [
     "httpx>=0.27",
