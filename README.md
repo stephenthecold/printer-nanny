@@ -9,8 +9,12 @@ maintenance** — and raises alerts via email, FreeScout tickets, or Teams.
 > **Milestone 1 — central server:** data model, JSON API, background worker +
 > alerting, and an HTMX dashboard, all demoable with seeded data.
 > **Milestone 2 — site agent** (`printer-nanny-agent`): SNMP discovery/polling
-> over pysnmp that pushes to central and pulls commands. See
+> over pysnmp that pushes to central and pulls commands. Self-contained; install
+> with a one-liner the UI generates (key baked in) — see
 > [`agent/README.md`](agent/README.md).
+> **Milestone 3 — operator UI**: clients/sites/printers CRUD, agent enrollment +
+> one-line installer, DB-backed Settings (no env-var sprawl), and pluggable
+> OIDC/SSO.
 
 ## Quick start (local, SQLite — no Docker needed)
 

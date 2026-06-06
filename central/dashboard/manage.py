@@ -255,15 +255,21 @@ def printer_delete(printer_id: int, request: Request, db: Session = Depends(get_
 # --------------------------------------------------------------------------- #
 @router.get("/agents", response_class=HTMLResponse)
 def agents_home(request: Request, db: Session = Depends(get_db)):
+    from central.runtime import load_settings
+
     user = _user(request, db)
     if user is None:
         return _redirect("/login")
     agents = list(db.scalars(select(m.Agent).order_by(m.Agent.id)))
     sites = list(db.scalars(select(m.Site).order_by(m.Site.name)))
+    rt = load_settings(db)
     return _templates.TemplateResponse(
         request, "agents.html",
         {"user": user, "agents": agents, "sites": sites,
          "new_key": request.session.pop("new_agent_key", None),
+         "central_url": str(request.base_url).rstrip("/"),
+         "pip_source": rt["agent.pip_source"],
+         "docker_image": rt["agent.docker_image"],
          "flash": _pop_flash(request)},
     )
 
@@ -281,6 +287,20 @@ def agent_create(
     db.commit()
     # Surface the plaintext key exactly once (it's only stored hashed).
     request.session["new_agent_key"] = {"id": agent.id, "name": agent.name, "key": api_key}
+    return _redirect("/manage/agents")
+
+
+@router.post("/agents/{agent_id}/rotate-key")
+def agent_rotate_key(agent_id: int, request: Request, db: Session = Depends(get_db)):
+    """Issue a fresh API key for an agent (e.g. if the original was lost)."""
+    if _user(request, db) is None:
+        return _redirect("/login")
+    agent = db.get(m.Agent, agent_id)
+    if agent:
+        api_key = generate_api_key()
+        agent.api_key_hash = hash_api_key(api_key)
+        db.commit()
+        request.session["new_agent_key"] = {"id": agent.id, "name": agent.name, "key": api_key}
     return _redirect("/manage/agents")
 
 

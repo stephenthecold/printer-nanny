@@ -34,19 +34,40 @@ printer_nanny_agent/
   cli.py        `printer-nanny-agent` entry point
 ```
 
-## Install & run
-```bash
-pip install -e ".[agent]"           # from the repo root
-cp agent/printer_nanny_agent/agent.example.toml /etc/printer-nanny/agent.toml
-# fill in central_url, agent_id, api_key (from POST /api/v1/agents), and subnets
+## Install — one-liner (recommended)
+Enroll the agent in the central UI (**Agents → enroll**) and it shows a ready
+copy-paste command with the key baked in. No file to edit:
 
-printer-nanny-agent --config /etc/printer-nanny/agent.toml selftest   # check central
-printer-nanny-agent --config ... poll 10.10.0.20                      # one printer -> JSON
-printer-nanny-agent --config ... discover                            # sweep subnets -> JSON
-printer-nanny-agent --config ... run                                 # main loop
-printer-nanny-agent --config ... run --once                          # single cycle
+```bash
+# Linux (systemd) — installs a venv + service:
+curl -fsSL https://CENTRAL/install-agent.sh | sudo bash -s -- \
+  --central-url https://CENTRAL --agent-id 12 --api-key pn_xxxxx
+
+# or Docker:
+docker run -d --restart=always --network host --name printer-nanny-agent \
+  -e PN_CENTRAL_URL=https://CENTRAL -e PN_AGENT_ID=12 -e PN_API_KEY=pn_xxxxx \
+  ghcr.io/your-org/printer-nanny-agent
 ```
-A sample systemd unit is in [`../deploy/printer-nanny-agent.service`](../deploy/printer-nanny-agent.service).
+
+The installer ([`../deploy/install-agent.sh`](../deploy/install-agent.sh), served
+at `GET /install-agent.sh`) writes a minimal config and a systemd unit. Subnets,
+SNMP, and intervals are managed in the central UI and fetched at runtime — the
+local file/env holds only the central URL + key. Lost the key? **Rotate key** on
+the agent in the UI for a fresh command.
+
+## Install — manual / dev
+```bash
+# Standalone (e.g. on a site box, from your published repo):
+pip install "git+https://github.com/your-org/printer-nanny.git#subdirectory=agent"
+# or from the monorepo for dev: pip install -e ".[agent]"
+
+# Config via env vars (no file), flags, or a TOML file — precedence: flags > env > file.
+PN_CENTRAL_URL=https://CENTRAL PN_AGENT_ID=12 PN_API_KEY=pn_xxx printer-nanny-agent run
+printer-nanny-agent --central-url https://CENTRAL --agent-id 12 --api-key pn_xxx selftest
+printer-nanny-agent --config /etc/printer-nanny/agent.toml poll 10.10.0.20   # one printer -> JSON
+printer-nanny-agent --config ... discover                                    # sweep -> JSON
+printer-nanny-agent --config ... run --once                                  # single cycle
+```
 
 ## End-to-end demo (no real printers)
 With the central server running and seeded, [`../scripts/e2e_agent_demo.py`](../scripts/e2e_agent_demo.py)
@@ -55,7 +76,8 @@ drives a full agent cycle through a fake SNMP backend:
 PYTHONPATH=. python scripts/e2e_agent_demo.py http://localhost:8000
 ```
 
-## Note on shared code
-The agent currently imports `central.snmp_parse` for supply normalization (single
-source of truth, no drift). For a slim standalone deploy that logic can later be
-extracted into a small shared package both sides depend on.
+## Self-contained
+The package has no dependency on the central server — supply parsing is vendored
+as [`snmp_parse.py`](printer_nanny_agent/snmp_parse.py) so it installs with just
+`httpx` + `pysnmp`. A parity test (`tests/test_snmp_parse_parity.py`) keeps it in
+lockstep with the server's copy.

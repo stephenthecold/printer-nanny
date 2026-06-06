@@ -69,6 +69,13 @@ SPECS: List[Spec] = [
     Spec("oidc.button_label", "str", "Single sign-on (OIDC)", "Login button label", "Sign in with SSO"),
     Spec("oidc.auto_provision", "bool", "Single sign-on (OIDC)", "Auto-create users on first login", True),
     Spec("oidc.default_role", "str", "Single sign-on (OIDC)", "Role for new SSO users", "tech"),
+    # Agent install (used to build the one-line install command shown on the Agents page)
+    Spec("agent.pip_source", "str", "Agent install", "pip install source",
+         "git+https://github.com/your-org/printer-nanny.git#subdirectory=agent",
+         "Where install-agent.sh pip-installs the agent from — set to your repo after publishing"),
+    Spec("agent.docker_image", "str", "Agent install", "Docker image",
+         "ghcr.io/your-org/printer-nanny-agent:latest",
+         "Image used by the Docker install option"),
 ]
 
 SPEC_BY_KEY: Dict[str, Spec] = {s.key: s for s in SPECS}

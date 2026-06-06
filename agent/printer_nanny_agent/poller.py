@@ -7,9 +7,12 @@ from __future__ import annotations
 
 from typing import Dict, List, Optional
 
-from central.snmp_parse import normalize_color, parse_supply_level, supply_type_from_code
-
 from printer_nanny_agent import oids
+from printer_nanny_agent.snmp_parse import (
+    normalize_color,
+    parse_supply_level,
+    supply_type_from_code,
+)
 from printer_nanny_agent.snmp import SnmpBackend, SnmpError, SnmpParams
 
 # Vendor keywords matched (case-insensitively) in sysDescr / printer name.

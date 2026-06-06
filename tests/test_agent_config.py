@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import pytest
 
-from printer_nanny_agent.config import merge_remote, parse_config
+from printer_nanny_agent.config import load_config, merge_remote, parse_config
 
 
 def _valid() -> dict:
@@ -56,6 +56,31 @@ def test_merge_remote_overlays_central_config():
     assert len(merged.subnets) == 1
     assert merged.subnets[0].cidr == "192.168.5.0/24"
     assert merged.snmp_for(merged.subnets[0]).community == "vlan5"
+
+
+def test_config_from_env_only_no_file(monkeypatch):
+    # No file — the installer relies on env-only config.
+    monkeypatch.setenv("PRINTER_NANNY_CONFIG", "/definitely/not/here.toml")
+    monkeypatch.setenv("PN_CENTRAL_URL", "https://central.test/")
+    monkeypatch.setenv("PN_AGENT_ID", "42")
+    monkeypatch.setenv("PN_API_KEY", "pn_envkey")
+    monkeypatch.setenv("PN_VERIFY_TLS", "false")
+    cfg = load_config()
+    assert cfg.central_url == "https://central.test"
+    assert cfg.agent_id == 42
+    assert cfg.api_key == "pn_envkey"
+    assert cfg.verify_tls is False
+
+
+def test_cli_flags_override_env(monkeypatch):
+    monkeypatch.setenv("PRINTER_NANNY_CONFIG", "/definitely/not/here.toml")
+    monkeypatch.setenv("PN_CENTRAL_URL", "https://env.test")
+    monkeypatch.setenv("PN_AGENT_ID", "1")
+    monkeypatch.setenv("PN_API_KEY", "env")
+    cfg = load_config(cli={"agent_id": 99, "api_key": "cli", "central_url": None, "verify_tls": None})
+    assert cfg.agent_id == 99       # flag wins
+    assert cfg.api_key == "cli"     # flag wins
+    assert cfg.central_url == "https://env.test"  # fell through to env
 
 
 def test_merge_remote_keeps_local_subnets_when_central_has_none():

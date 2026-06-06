@@ -8,7 +8,7 @@ from starlette.middleware.sessions import SessionMiddleware
 from central import auth_oidc
 from central.api import ingest, management, reporting
 from central.config import settings
-from central.dashboard import manage, routes as dashboard, settings_routes
+from central.dashboard import installer, manage, routes as dashboard, settings_routes
 from central.db import create_all
 
 app = FastAPI(title="Printer Nanny", version="0.1.0")
@@ -23,6 +23,7 @@ app.include_router(dashboard.router)
 app.include_router(manage.router)
 app.include_router(settings_routes.router)
 app.include_router(auth_oidc.router)
+app.include_router(installer.router)
 
 
 @app.get("/healthz", tags=["meta"])

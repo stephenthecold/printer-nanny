@@ -98,10 +98,41 @@ def resolve_config_path(explicit: Optional[str] = None) -> str:
     return explicit or os.environ.get("PRINTER_NANNY_CONFIG") or DEFAULT_CONFIG_PATH
 
 
-def load_config(path: Optional[str] = None) -> AgentConfig:
+# Environment variables that can supply config without any file.
+_ENV_MAP = {
+    "central_url": "PN_CENTRAL_URL",
+    "agent_id": "PN_AGENT_ID",
+    "api_key": "PN_API_KEY",
+    "verify_tls": "PN_VERIFY_TLS",
+}
+
+
+def _env_overrides() -> dict:
+    data: dict = {}
+    for key, env in _ENV_MAP.items():
+        val = os.environ.get(env)
+        if val is None or val == "":
+            continue
+        data[key] = val.lower() not in ("0", "false", "no") if key == "verify_tls" else val
+    return data
+
+
+def load_config(
+    path: Optional[str] = None, cli: Optional[dict] = None
+) -> AgentConfig:
+    """Build config from a TOML file (if present) overlaid with env vars and CLI flags.
+
+    Precedence: CLI flags > env vars > file. A file is optional — env/flags alone
+    are enough, which is what the one-line installer relies on.
+    """
+    data: dict = {}
     config_path = resolve_config_path(path)
-    with open(config_path, "rb") as fp:
-        data = _load(fp)
+    if config_path and os.path.exists(config_path):
+        with open(config_path, "rb") as fp:
+            data = _load(fp)
+    data.update(_env_overrides())
+    if cli:
+        data.update({k: v for k, v in cli.items() if v is not None})
     return parse_config(data)
 
 

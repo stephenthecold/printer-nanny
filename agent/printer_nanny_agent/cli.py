@@ -76,7 +76,13 @@ async def _cmd_selftest(config: AgentConfig) -> int:
 
 def main(argv: Optional[list] = None) -> int:
     parser = argparse.ArgumentParser(prog="printer-nanny-agent")
-    parser.add_argument("--config", help="path to agent.toml")
+    parser.add_argument("--config", help="path to agent.toml (optional)")
+    # Config can come entirely from flags/env — no file needed (used by the installer).
+    parser.add_argument("--central-url", help="central server base URL (or $PN_CENTRAL_URL)")
+    parser.add_argument("--agent-id", type=int, help="agent id (or $PN_AGENT_ID)")
+    parser.add_argument("--api-key", help="agent API key (or $PN_API_KEY)")
+    parser.add_argument("--no-verify-tls", dest="verify_tls", action="store_false", default=None,
+                        help="disable TLS verification (self-signed central)")
     parser.add_argument("-v", "--verbose", action="store_true")
     parser.add_argument("--version", action="version", version=f"%(prog)s {__version__}")
     sub = parser.add_subparsers(dest="command", required=True)
@@ -91,8 +97,14 @@ def main(argv: Optional[list] = None) -> int:
     args = parser.parse_args(argv)
     _setup_logging(args.verbose)
 
+    cli_overrides = {
+        "central_url": args.central_url,
+        "agent_id": args.agent_id,
+        "api_key": args.api_key,
+        "verify_tls": args.verify_tls,
+    }
     try:
-        config = load_config(args.config)
+        config = load_config(args.config, cli=cli_overrides)
     except (OSError, ValueError) as exc:
         print(f"config error: {exc}", file=sys.stderr)
         return 2
