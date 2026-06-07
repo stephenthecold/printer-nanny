@@ -146,7 +146,9 @@ async def _verify_id_token(
         },
     )
     claims.validate()  # exp / iat / nbf
-    if nonce and claims.get("nonce") not in (None, nonce):
+    # If we sent a nonce, the token MUST echo it back exactly (a missing nonce
+    # claim is a failure, not a pass — prevents replay).
+    if nonce and claims.get("nonce") != nonce:
         raise ValueError("nonce mismatch")
     return dict(claims)
 

@@ -41,6 +41,9 @@ die() { echo "error: $*" >&2; exit 1; }
 [ -n "$CENTRAL_URL" ] || die "--central-url is required"
 [ -n "$AGENT_ID" ] || die "--agent-id is required"
 [ -n "$API_KEY" ] || die "--api-key is required"
+case "$PIP_SOURCE" in
+  *your-org*) die "pip source still points at the 'your-org' placeholder. Pass --pip-source with your real repo, or set it in the central UI (Settings → Agent install)." ;;
+esac
 command -v "$PYTHON_BIN" >/dev/null 2>&1 || die "$PYTHON_BIN not found; install Python 3.9+"
 
 echo "==> Printer Nanny agent installer"

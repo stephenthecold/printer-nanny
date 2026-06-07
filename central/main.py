@@ -12,7 +12,13 @@ from central.dashboard import installer, manage, routes as dashboard, settings_r
 from central.db import create_all
 
 app = FastAPI(title="Printer Nanny", version="0.1.0")
-app.add_middleware(SessionMiddleware, secret_key=settings.secret_key, max_age=60 * 60 * 12)
+app.add_middleware(
+    SessionMiddleware,
+    secret_key=settings.secret_key,
+    max_age=60 * 60 * 12,
+    https_only=settings.secure_cookies,  # Secure flag in production (TLS at the proxy)
+    same_site="lax",  # mitigates cross-site POST/CSRF on the dashboard
+)
 
 # JSON API
 app.include_router(ingest.router)
@@ -33,6 +39,8 @@ def healthz():
 
 @app.on_event("startup")
 def _startup() -> None:
+    # Refuse to boot a production deployment with a default/blank SECRET_KEY.
+    settings.assert_secure()
     # On SQLite (local dev) create tables automatically. On Postgres, migrations own
     # the schema, but create_all is a harmless no-op if they've already run.
     if settings.is_sqlite:

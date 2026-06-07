@@ -28,6 +28,10 @@ def _email_unique_exists(insp) -> bool:
     return {"email"} in cols_sets
 
 
+def _named_index_exists(insp, table: str, name: str) -> bool:
+    return any(ix.get("name") == name for ix in insp.get_indexes(table))
+
+
 def upgrade() -> None:
     bind = op.get_bind()
     insp = sa.inspect(bind)
@@ -73,7 +77,9 @@ def downgrade() -> None:
     insp = sa.inspect(bind)
     if insp.has_table("app_settings"):
         op.drop_table("app_settings")
-    if _email_unique_exists(insp):
+    # Only drop the index we created (by exact name) — on a fresh DB the unique
+    # came from the model's column constraint under a different name.
+    if _named_index_exists(insp, "users", "uq_users_email"):
         op.drop_index("uq_users_email", table_name="users")
     for col in ("auth_provider", "email"):
         if col in _columns(insp, "users"):

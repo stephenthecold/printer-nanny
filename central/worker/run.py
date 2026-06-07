@@ -9,6 +9,7 @@ from __future__ import annotations
 import argparse
 import logging
 import sys
+from typing import Optional
 
 from central.db import SessionLocal, create_all
 from central.worker import jobs
@@ -39,7 +40,7 @@ def run_cycle() -> dict:
     return summary
 
 
-def main(argv: list[str] | None = None) -> int:
+def main(argv: Optional[list] = None) -> int:
     parser = argparse.ArgumentParser(description="Printer Nanny worker")
     parser.add_argument("--once", action="store_true", help="run one cycle and exit")
     parser.add_argument("--interval", type=int, default=60, help="seconds between cycles")

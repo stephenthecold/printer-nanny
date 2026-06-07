@@ -29,6 +29,11 @@ def _login_redirect() -> RedirectResponse:
     return RedirectResponse("/login", status_code=303)
 
 
+def _forbidden_client(user, client_id) -> bool:
+    """A client_readonly user may only see their own client's data."""
+    return user.role == m.UserRole.client_readonly and user.client_id != client_id
+
+
 def _render(request: Request, template: str, **ctx) -> HTMLResponse:
     ctx.setdefault("user", ctx.get("user"))
     return _templates.TemplateResponse(request, template, ctx)
@@ -95,7 +100,7 @@ def client_detail(client_id: int, request: Request, db: Session = Depends(get_db
     if user is None:
         return _login_redirect()
     client = db.get(m.Client, client_id)
-    if client is None:
+    if client is None or _forbidden_client(user, client_id):
         return RedirectResponse("/", status_code=303)
     printers = list(
         db.scalars(
@@ -125,7 +130,7 @@ def printer_detail(printer_id: int, request: Request, db: Session = Depends(get_
     if user is None:
         return _login_redirect()
     printer = db.get(m.Printer, printer_id)
-    if printer is None:
+    if printer is None or _forbidden_client(user, printer.client_id):
         return RedirectResponse("/", status_code=303)
     history = queries.page_count_history(db, printer_id, 60)
     events = list(
@@ -163,6 +168,8 @@ def approvals(request: Request, db: Session = Depends(get_db)):
     user = _user(request, db)
     if user is None:
         return _login_redirect()
+    if user.role == m.UserRole.client_readonly:
+        return RedirectResponse("/", status_code=303)
     pending = list(
         db.scalars(
             select(m.Printer)
@@ -180,6 +187,8 @@ def approval_action(
     user = _user(request, db)
     if user is None:
         return _login_redirect()
+    if user.role == m.UserRole.client_readonly:
+        return RedirectResponse("/", status_code=303)
     printer = db.get(m.Printer, printer_id)
     if printer is not None and action in ("approve", "ignore"):
         printer.discovery_state = (
@@ -196,6 +205,8 @@ def alerts_inbox(request: Request, db: Session = Depends(get_db)):
     user = _user(request, db)
     if user is None:
         return _login_redirect()
+    if user.role == m.UserRole.client_readonly:
+        return RedirectResponse("/", status_code=303)
     rows = list(
         db.scalars(
             select(m.Alert)
@@ -211,6 +222,8 @@ def alert_action(alert_id: int, action: str, request: Request, db: Session = Dep
     user = _user(request, db)
     if user is None:
         return _login_redirect()
+    if user.role == m.UserRole.client_readonly:
+        return RedirectResponse("/", status_code=303)
     alert = db.get(m.Alert, alert_id)
     if alert is not None:
         if action == "ack":

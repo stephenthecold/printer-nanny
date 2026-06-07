@@ -4,6 +4,7 @@ version = "0.1.0"
 description = "Self-hosted fleet management for printers across MSP clients/sites"
 readme = "README.md"
 license = "Apache-2.0"
+authors = [{ name = "Stephen Warren", email = "stephen.warren09@gmail.com" }]
 requires-python = ">=3.9"
 dependencies = [
     "fastapi>=0.110",
@@ -35,6 +36,11 @@ dev = [
 [project.scripts]
 printer-nanny-agent = "printer_nanny_agent.cli:main"
 
+# TODO: update the org/repo slug once published to GitHub.
+[project.urls]
+Repository = "https://github.com/your-org/printer-nanny"
+Issues = "https://github.com/your-org/printer-nanny/issues"
+
 [build-system]
 requires = ["setuptools>=68"]
 build-backend = "setuptools.build_meta"
@@ -44,6 +50,9 @@ packages = ["central", "printer_nanny_agent"]
 
 [tool.setuptools.package-dir]
 printer_nanny_agent = "agent/printer_nanny_agent"
+
+[tool.setuptools.package-data]
+printer_nanny_agent = ["agent.example.toml"]
 
 [tool.ruff]
 line-length = 100

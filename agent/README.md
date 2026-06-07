@@ -43,7 +43,8 @@ copy-paste command with the key baked in. No file to edit:
 curl -fsSL https://CENTRAL/install-agent.sh | sudo bash -s -- \
   --central-url https://CENTRAL --agent-id 12 --api-key pn_xxxxx
 
-# or Docker:
+# or Docker (build & push the image first — see deploy/agent.Dockerfile;
+# there is no prebuilt public image yet):
 docker run -d --restart=always --network host --name printer-nanny-agent \
   -e PN_CENTRAL_URL=https://CENTRAL -e PN_AGENT_ID=12 -e PN_API_KEY=pn_xxxxx \
   ghcr.io/your-org/printer-nanny-agent

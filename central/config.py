@@ -39,6 +39,26 @@ class Settings(BaseSettings):
     def is_sqlite(self) -> bool:
         return self.database_url.startswith("sqlite")
 
+    @property
+    def is_production(self) -> bool:
+        """A non-SQLite database means a real deployment (Docker/Postgres)."""
+        return not self.is_sqlite
+
+    @property
+    def secure_cookies(self) -> bool:
+        """Mark the session cookie Secure in production (TLS via the reverse proxy)."""
+        return self.is_production
+
+    def assert_secure(self) -> None:
+        """Fail fast if a real deployment is still using a known-insecure SECRET_KEY."""
+        insecure = {"dev-insecure-change-me", "change-me-in-prod", ""}
+        if self.is_production and self.secret_key in insecure:
+            raise RuntimeError(
+                "SECRET_KEY is unset or a known default but DATABASE_URL is not SQLite. "
+                "Set a strong SECRET_KEY (e.g. `python -c \"import secrets;print(secrets.token_urlsafe(48))\"`) "
+                "before running in production."
+            )
+
 
 @lru_cache
 def get_settings() -> Settings:

@@ -16,16 +16,25 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from central import models as m
+from central.dashboard import _keystore
 from central.db import get_db
 from central.security import generate_api_key, hash_api_key
 
 router = APIRouter(prefix="/manage", tags=["manage"])
 _templates = Jinja2Templates(directory=str(Path(__file__).parent / "templates"))
 
+_MANAGER_ROLES = {m.UserRole.admin, m.UserRole.tech}
+
 
 def _user(request: Request, db: Session) -> Optional[m.User]:
     uid = request.session.get("user_id")
     return db.get(m.User, uid) if uid else None
+
+
+def _manager(request: Request, db: Session) -> Optional[m.User]:
+    """Management is for admin/tech only — client_readonly users get nothing here."""
+    user = _user(request, db)
+    return user if (user is not None and user.role in _MANAGER_ROLES) else None
 
 
 def _redirect(path: str) -> RedirectResponse:
@@ -45,7 +54,7 @@ def _pop_flash(request: Request) -> Optional[str]:
 # --------------------------------------------------------------------------- #
 @router.get("", response_class=HTMLResponse)
 def manage_home(request: Request, db: Session = Depends(get_db)):
-    user = _user(request, db)
+    user = _manager(request, db)
     if user is None:
         return _redirect("/login")
     clients = list(db.scalars(select(m.Client).order_by(m.Client.name)))
@@ -59,7 +68,7 @@ def manage_home(request: Request, db: Session = Depends(get_db)):
 def create_client(
     request: Request, name: str = Form(...), notes: str = Form(""), db: Session = Depends(get_db)
 ):
-    if _user(request, db) is None:
+    if _manager(request, db) is None:
         return _redirect("/login")
     if name.strip():
         db.add(m.Client(name=name.strip(), notes=notes.strip() or None))
@@ -70,7 +79,7 @@ def create_client(
 
 @router.get("/clients/{client_id}", response_class=HTMLResponse)
 def client_manage(client_id: int, request: Request, db: Session = Depends(get_db)):
-    user = _user(request, db)
+    user = _manager(request, db)
     if user is None:
         return _redirect("/login")
     client = db.get(m.Client, client_id)
@@ -91,7 +100,7 @@ def update_client(
     client_id: int, request: Request,
     name: str = Form(...), notes: str = Form(""), db: Session = Depends(get_db),
 ):
-    if _user(request, db) is None:
+    if _manager(request, db) is None:
         return _redirect("/login")
     client = db.get(m.Client, client_id)
     if client:
@@ -104,7 +113,7 @@ def update_client(
 
 @router.post("/clients/{client_id}/delete")
 def delete_client(client_id: int, request: Request, db: Session = Depends(get_db)):
-    user = _user(request, db)
+    user = _manager(request, db)
     if user is None or user.role != m.UserRole.admin:
         _flash(request, "Only admins can delete clients.")
         return _redirect(f"/manage/clients/{client_id}")
@@ -121,7 +130,7 @@ def create_site(
     request: Request, client_id: int = Form(...), name: str = Form(...),
     address: str = Form(""), contact: str = Form(""), db: Session = Depends(get_db),
 ):
-    if _user(request, db) is None:
+    if _manager(request, db) is None:
         return _redirect("/login")
     if name.strip():
         db.add(m.Site(
@@ -135,7 +144,7 @@ def create_site(
 
 @router.post("/sites/{site_id}/delete")
 def delete_site(site_id: int, request: Request, db: Session = Depends(get_db)):
-    user = _user(request, db)
+    user = _manager(request, db)
     site = db.get(m.Site, site_id)
     if user is None or site is None:
         return _redirect("/manage")
@@ -156,7 +165,7 @@ def delete_site(site_id: int, request: Request, db: Session = Depends(get_db)):
 def printer_new(
     request: Request, client_id: int, site_id: Optional[int] = None, db: Session = Depends(get_db)
 ):
-    user = _user(request, db)
+    user = _manager(request, db)
     if user is None:
         return _redirect("/login")
     client = db.get(m.Client, client_id)
@@ -171,7 +180,7 @@ def printer_new(
 
 @router.get("/printers/{printer_id}/edit", response_class=HTMLResponse)
 def printer_edit(printer_id: int, request: Request, db: Session = Depends(get_db)):
-    user = _user(request, db)
+    user = _manager(request, db)
     if user is None:
         return _redirect("/login")
     printer = db.get(m.Printer, printer_id)
@@ -194,7 +203,7 @@ def printer_create(
     snmp_version: str = Form("2c"), snmp_community: str = Form("public"),
     db: Session = Depends(get_db),
 ):
-    if _user(request, db) is None:
+    if _manager(request, db) is None:
         return _redirect("/login")
     printer = m.Printer(
         client_id=client_id, site_id=site_id, ip=ip.strip(),
@@ -218,7 +227,7 @@ def printer_update(
     location: str = Form(""), snmp_version: str = Form("2c"),
     snmp_community: str = Form("public"), db: Session = Depends(get_db),
 ):
-    if _user(request, db) is None:
+    if _manager(request, db) is None:
         return _redirect("/login")
     printer = db.get(m.Printer, printer_id)
     if printer:
@@ -239,7 +248,7 @@ def printer_update(
 
 @router.post("/printers/{printer_id}/delete")
 def printer_delete(printer_id: int, request: Request, db: Session = Depends(get_db)):
-    user = _user(request, db)
+    user = _manager(request, db)
     printer = db.get(m.Printer, printer_id)
     if user is None or printer is None:
         return _redirect("/manage")
@@ -257,7 +266,7 @@ def printer_delete(printer_id: int, request: Request, db: Session = Depends(get_
 def agents_home(request: Request, db: Session = Depends(get_db)):
     from central.runtime import load_settings
 
-    user = _user(request, db)
+    user = _manager(request, db)
     if user is None:
         return _redirect("/login")
     agents = list(db.scalars(select(m.Agent).order_by(m.Agent.id)))
@@ -266,7 +275,7 @@ def agents_home(request: Request, db: Session = Depends(get_db)):
     return _templates.TemplateResponse(
         request, "agents.html",
         {"user": user, "agents": agents, "sites": sites,
-         "new_key": request.session.pop("new_agent_key", None),
+         "new_key": _keystore.pop(request.session.pop("new_agent_key_token", None)),
          "central_url": str(request.base_url).rstrip("/"),
          "pip_source": rt["agent.pip_source"],
          "docker_image": rt["agent.docker_image"],
@@ -279,34 +288,39 @@ def agent_create(
     request: Request, site_id: int = Form(...), name: str = Form(...),
     db: Session = Depends(get_db),
 ):
-    if _user(request, db) is None:
+    if _manager(request, db) is None:
         return _redirect("/login")
     api_key = generate_api_key()
     agent = m.Agent(site_id=site_id, name=name.strip() or "agent", api_key_hash=hash_api_key(api_key))
     db.add(agent)
     db.commit()
-    # Surface the plaintext key exactly once (it's only stored hashed).
-    request.session["new_agent_key"] = {"id": agent.id, "name": agent.name, "key": api_key}
+    # Surface the plaintext key exactly once. Keep it server-side (not in the
+    # signed-but-readable session cookie); the session holds only a one-shot token.
+    request.session["new_agent_key_token"] = _keystore.put(
+        {"id": agent.id, "name": agent.name, "key": api_key}
+    )
     return _redirect("/manage/agents")
 
 
 @router.post("/agents/{agent_id}/rotate-key")
 def agent_rotate_key(agent_id: int, request: Request, db: Session = Depends(get_db)):
     """Issue a fresh API key for an agent (e.g. if the original was lost)."""
-    if _user(request, db) is None:
+    if _manager(request, db) is None:
         return _redirect("/login")
     agent = db.get(m.Agent, agent_id)
     if agent:
         api_key = generate_api_key()
         agent.api_key_hash = hash_api_key(api_key)
         db.commit()
-        request.session["new_agent_key"] = {"id": agent.id, "name": agent.name, "key": api_key}
+        request.session["new_agent_key_token"] = _keystore.put(
+            {"id": agent.id, "name": agent.name, "key": api_key}
+        )
     return _redirect("/manage/agents")
 
 
 @router.post("/agents/{agent_id}/delete")
 def agent_delete(agent_id: int, request: Request, db: Session = Depends(get_db)):
-    user = _user(request, db)
+    user = _manager(request, db)
     if user is None or user.role != m.UserRole.admin:
         _flash(request, "Only admins can delete agents.")
         return _redirect("/manage/agents")
@@ -324,7 +338,7 @@ def subnet_add(
     snmp_community: str = Form("public"), snmp_version: str = Form("2c"),
     db: Session = Depends(get_db),
 ):
-    if _user(request, db) is None:
+    if _manager(request, db) is None:
         return _redirect("/login")
     agent = db.get(m.Agent, agent_id)
     if agent and cidr.strip():
@@ -339,7 +353,7 @@ def subnet_add(
 
 @router.post("/subnets/{subnet_id}/delete")
 def subnet_delete(subnet_id: int, request: Request, db: Session = Depends(get_db)):
-    if _user(request, db) is None:
+    if _manager(request, db) is None:
         return _redirect("/login")
     subnet = db.get(m.Subnet, subnet_id)
     if subnet:

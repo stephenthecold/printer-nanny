@@ -38,7 +38,9 @@ and `SECRET_KEY` live in the environment.
 ```bash
 cp .env.example .env          # set SECRET_KEY (DATABASE_URL is preset for Postgres)
 docker compose up -d --build
-docker compose exec api python -m central.seed   # optional demo data + admin/admin
+# optional demo data + admin/admin login. WARNING: drops & recreates all tables —
+# demo only, never run against real data.
+docker compose exec api python -m central.seed
 # open http://localhost:8080   (login: admin / admin)
 ```
 
@@ -50,7 +52,7 @@ MailHog (`:8025`) so demo alert email is visible.
 ```bash
 python3 -m venv .venv && source .venv/bin/activate
 pip install -e ".[dev]"
-python -m central.seed                 # tables + demo data
+python -m central.seed                 # tables + demo data (drops & recreates all tables)
 uvicorn central.main:app --reload      # http://localhost:8000  (admin / admin)
 python -m central.worker.run --once    # evaluate alerts once
 ```
@@ -94,7 +96,7 @@ subdir) and can also run from env vars or Docker. See
 | Ingest      | `GET  /api/v1/agents/{id}/targets` · `/commands`           |
 | Management  | CRUD `clients`, `sites`, `subnets`, `agents`, `printers`   |
 | Management  | `POST /api/v1/printers/{id}/approve` \| `/ignore`          |
-| Reporting   | `GET /api/v1/reports/fleet`, `/supplies/low`, `/errors`    |
+| Reporting   | `GET /api/v1/reports/fleet`, `/supplies/low`, `/errors`, `/maintenance/due` |
 
 Agents authenticate with `Authorization: Bearer <agent-api-key>`.
 
