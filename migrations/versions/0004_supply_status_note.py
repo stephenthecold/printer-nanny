@@ -27,4 +27,6 @@ def upgrade() -> None:
 def downgrade() -> None:
     insp = sa.inspect(op.get_bind())
     if "status_note" in _columns(insp, "supplies"):
-        op.drop_column("supplies", "status_note")
+        # Batch mode keeps SQLite happy (table recreate); plain ALTER on Postgres.
+        with op.batch_alter_table("supplies") as batch:
+            batch.drop_column("status_note")

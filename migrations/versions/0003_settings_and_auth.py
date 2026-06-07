@@ -81,9 +81,15 @@ def downgrade() -> None:
     # came from the model's column constraint under a different name.
     if _named_index_exists(insp, "users", "uq_users_email"):
         op.drop_index("uq_users_email", table_name="users")
-    for col in ("auth_provider", "email"):
-        if col in _columns(insp, "users"):
-            op.drop_column("users", col)
-    for col in ("snmp_version", "snmp_community"):
-        if col in _columns(insp, "subnets"):
-            op.drop_column("subnets", col)
+    # Batch mode so SQLite can drop columns that carry a UNIQUE constraint
+    # (it recreates the table); a no-op ALTER path on Postgres.
+    user_drop = [c for c in ("auth_provider", "email") if c in _columns(insp, "users")]
+    if user_drop:
+        with op.batch_alter_table("users") as batch:
+            for col in user_drop:
+                batch.drop_column(col)
+    subnet_drop = [c for c in ("snmp_version", "snmp_community") if c in _columns(insp, "subnets")]
+    if subnet_drop:
+        with op.batch_alter_table("subnets") as batch:
+            for col in subnet_drop:
+                batch.drop_column(col)
