@@ -2,9 +2,9 @@
 
 from __future__ import annotations
 
-from typing import List, Optional
+from typing import List
 
-from printer_nanny_agent.config import parse_config
+from printer_nanny_agent.config import AgentConfig, parse_config
 from printer_nanny_agent.runner import handle_commands, poll_one_target
 
 from tests.fakes import FakeSnmpBackend, canned_printer
@@ -25,7 +25,7 @@ class _StubClient:
         return {"applied": len(readings)}
 
 
-def _config() -> "config_type":  # type: ignore[name-defined]
+def _config() -> AgentConfig:
     return parse_config({
         "central_url": "https://c.example",
         "agent_id": 1,

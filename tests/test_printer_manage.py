@@ -10,7 +10,6 @@ import pytest
 from fastapi.testclient import TestClient
 
 from central import models as m
-from central.db import SessionLocal
 from central.main import app
 from central.security import hash_password
 
