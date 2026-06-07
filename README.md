@@ -40,16 +40,25 @@ curl -fsSL https://raw.githubusercontent.com/stephenthecold/printer-nanny/main/d
 ```
 
 That clones the repo into `./printer-nanny`, generates a `.env` with a strong
-`SECRET_KEY`, brings the full stack up with `docker compose up -d --build`, and
-waits for the API. Open <http://localhost:8080> and log in with **`admin` /
+`SECRET_KEY`, brings the stack up with `docker compose up -d --build`, and
+waits for the API. Open <http://localhost:8000> and log in with **`admin` /
 `admin`** — change that password immediately.
+
+The API binds to host port `8000` by default so you can point your existing
+**Caddy / Nginx / Traefik** at it. If you'd rather use the bundled Caddy
+reverse proxy on `:8080`, add `--with-caddy`:
+
+```bash
+curl -fsSL .../install.sh | bash -s -- --with-caddy
+```
 
 Re-running the installer is safe: it pulls the latest code, leaves your `.env`
 and data alone, and just rebuilds/restarts. To wipe and re-seed with demo data
 (destructive), add `--demo`.
 
-The stack: Postgres + API + worker + dashboard behind Caddy (`:8080`), plus
-MailHog (`:8025`) so demo alert email is visible.
+The default stack: Postgres + API + worker + dashboard, plus MailHog (`:8025`)
+so demo alert email is visible. The bundled Caddy is opt-in via the `caddy`
+compose profile.
 
 <details>
 <summary>Manual steps (what the installer does under the hood)</summary>
@@ -58,7 +67,9 @@ MailHog (`:8025`) so demo alert email is visible.
 git clone https://github.com/stephenthecold/printer-nanny.git
 cd printer-nanny
 echo "SECRET_KEY=$(openssl rand -base64 48)" > .env
-docker compose up -d --build
+docker compose up -d --build                  # API on :8000, BYO proxy
+# or, include the bundled Caddy on :8080:
+docker compose --profile caddy up -d --build
 # optional: drop & re-seed with demo clients/printers
 docker compose exec api python -m central.seed
 ```
@@ -66,7 +77,30 @@ docker compose exec api python -m central.seed
 The api container runs migrations and the idempotent `python -m central.seed
 --init` on every start — that's what creates the initial `admin`/`tech` users
 and default alert rules on a fresh database without touching an existing one.
+
+To change the host port, set `API_PORT` (or `CADDY_PORT` for the bundled Caddy)
+in `.env` before bringing the stack up.
 </details>
+
+### Point your own reverse proxy at it
+
+The API listens on `http://<docker-host>:${API_PORT:-8000}` with no TLS. A
+minimal Caddyfile entry on your host:
+
+```Caddyfile
+printers.msp.example.com {
+    reverse_proxy localhost:8000
+}
+```
+
+Nginx equivalent:
+
+```nginx
+server {
+    server_name printers.msp.example.com;
+    location / { proxy_pass http://127.0.0.1:8000; proxy_set_header Host $host; }
+}
+```
 
 ## Quick start — local (SQLite, no Docker)
 
