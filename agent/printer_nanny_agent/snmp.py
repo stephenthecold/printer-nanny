@@ -105,12 +105,17 @@ class PysnmpBackend(SnmpBackend):
 
         target = await self._target(host, params)
         results: Dict[str, str] = {}
+        # lexicographicMode=False stops the walk at the end of the base_oid subtree;
+        # without it pysnmp walks to the end of the device's entire MIB (slow/hang on
+        # real printers). maxRows bounds pathological tables as a safety net.
         async for err_ind, err_stat, _err_idx, var_binds in walk_cmd(
             self._engine,
             self._auth(params),
             target,
             ContextData(),
             ObjectType(ObjectIdentity(base_oid)),
+            lexicographicMode=False,
+            maxRows=512,
         ):
             if err_ind:
                 raise SnmpError(f"{host}: {err_ind}")

@@ -137,12 +137,19 @@ def _open_alert(
     return alert
 
 
-def _resolve_stale(db: Session, active_keys: set[str], rule_ids: set[int]) -> int:
-    """Resolve open alerts whose condition no longer holds (key not seen this run)."""
+def _resolve_stale(db: Session, active_keys: set[str]) -> int:
+    """Resolve open rule-driven alerts whose condition no longer holds this run.
+
+    Covers both cleared conditions (key not re-added) and alerts orphaned by a
+    rule that was disabled/deleted (its key is never re-added). Maintenance alerts
+    have their own lifecycle in check_maintenance_due and are left untouched here.
+    """
     resolved = 0
     stmt = select(m.Alert).where(m.Alert.state == m.AlertState.open)
     for alert in db.scalars(stmt):
-        if alert.rule_id in rule_ids and alert.dedupe_key not in active_keys:
+        if alert.type == m.AlertConditionType.maintenance_due:
+            continue
+        if alert.dedupe_key not in active_keys:
             alert.state = m.AlertState.resolved
             alert.resolved_at = _now()
             resolved += 1
@@ -156,7 +163,6 @@ def evaluate_alerts(db: Session, now: Optional[datetime] = None) -> dict:
     channels = active_channels(runtime)
     opened = 0
     active_keys: set[str] = set()
-    rule_ids = {r.id for r in rules}
 
     for rule in rules:
         if rule.condition_type == m.AlertConditionType.offline_minutes:
@@ -204,38 +210,97 @@ def evaluate_alerts(db: Session, now: Optional[datetime] = None) -> dict:
                     if _open_alert(db, rule, key, title, detail, printer=printer, channels=channels):
                         opened += 1
 
-    resolved = _resolve_stale(db, active_keys, rule_ids)
+    resolved = _resolve_stale(db, active_keys)
     db.commit()
     return {"alerts_opened": opened, "alerts_resolved": resolved}
 
 
 # --------------------------------------------------------------------------- #
-# Maintenance due
+# Maintenance due — schedule-driven (no alert_rule needed), with its own
+# open/dispatch/resolve lifecycle so a due schedule actually notifies, and the
+# alert clears once the schedule's next_due is rolled forward (e.g. service logged).
 # --------------------------------------------------------------------------- #
 def check_maintenance_due(db: Session, now: Optional[datetime] = None) -> dict:
     now = now or _now()
-    due = 0
+    runtime = load_settings(db)
+    channels = active_channels(runtime)
+    opened = 0
+    active_keys: set[str] = set()
+
     for sched in queries.maintenance_due(db, now):
         printer = db.get(m.Printer, sched.printer_id) if sched.printer_id else None
-        # Page-threshold rules also gate on page count when set.
+        # Page-threshold schedules also require the page count to be reached.
         if sched.page_threshold and printer and printer.page_count is not None:
             if printer.page_count < sched.page_threshold:
                 continue
-        due += 1
+        due_str = sched.next_due.date().isoformat() if sched.next_due else "due"
+        key = f"maintenance:{sched.id}:{due_str}"
+        active_keys.add(key)
+        if _find_open_alert(db, key) is not None:
+            continue
+        label = _printer_label(printer) if printer else (sched.model or "fleet")
+        alert = m.Alert(
+            rule_id=None,
+            printer_id=printer.id if printer else None,
+            type=m.AlertConditionType.maintenance_due,
+            severity=m.EventSeverity.warning,
+            state=m.AlertState.open,
+            title=f"Maintenance due: {sched.name} ({label})",
+            detail=f"'{sched.name}' is due as of {due_str}.",
+            dedupe_key=key,
+        )
+        db.add(alert)
+        db.flush()
+        note = Notification(
+            title=alert.title, body=alert.detail, severity="warning",
+            printer_label=_printer_label(printer) if printer else None, alert_id=alert.id,
+        )
+        results = dispatch(note, channels)
+        alert.notified_channels = [
+            {"channel": n, "ok": r.ok, "detail": r.detail} for n, r in results
+        ]
+        opened += 1
+
+    # Resolve maintenance alerts whose schedule is no longer due (next_due rolled forward).
+    resolved = 0
+    for alert in db.scalars(
+        select(m.Alert).where(
+            m.Alert.state == m.AlertState.open,
+            m.Alert.type == m.AlertConditionType.maintenance_due,
+        )
+    ):
+        if alert.dedupe_key not in active_keys:
+            alert.state = m.AlertState.resolved
+            alert.resolved_at = now
+            resolved += 1
+
     db.commit()
-    return {"maintenance_due": due}
+    return {"maintenance_opened": opened, "maintenance_resolved": resolved}
 
 
 # --------------------------------------------------------------------------- #
 # Supply-depletion forecast (days-to-empty from the recent slope)
 # --------------------------------------------------------------------------- #
-def forecast_days_to_empty(readings: list[tuple[datetime, float]]) -> Optional[float]:
-    """Linear extrapolation of level→0 from (ts, level_pct) points. None if rising/flat."""
-    points = [(t, lvl) for t, lvl in readings if lvl is not None]
+def forecast_days_to_empty(
+    readings: list[tuple[datetime, float]], refill_tolerance: float = 5.0
+) -> Optional[float]:
+    """Linear extrapolation of level→0 from (ts, level_pct) points. None if rising/flat.
+
+    Fits only the most-recent depleting segment: a jump up of more than
+    ``refill_tolerance`` points is treated as a cartridge refill and resets the
+    baseline, so a fresh cartridge isn't averaged against the spent one.
+    """
+    points = sorted([(t, lvl) for t, lvl in readings if lvl is not None], key=lambda p: p[0])
     if len(points) < 2:
         return None
-    points.sort(key=lambda p: p[0])
-    (t0, l0), (t1, l1) = points[0], points[-1]
+    start = 0
+    for i in range(1, len(points)):
+        if points[i][1] > points[i - 1][1] + refill_tolerance:
+            start = i  # refill detected — baseline resets here
+    seg = points[start:]
+    if len(seg) < 2:
+        return None
+    (t0, l0), (t1, l1) = seg[0], seg[-1]
     days = (t1 - t0).total_seconds() / 86400.0
     if days <= 0:
         return None

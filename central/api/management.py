@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from datetime import datetime, timedelta, timezone
 from typing import Optional
 
 from fastapi import APIRouter, Depends, HTTPException, status
@@ -166,6 +167,16 @@ def add_maintenance(payload: s.MaintenanceRecordIn, db: Session = Depends(get_db
     _get_or_404(db, m.Printer, payload.printer_id)
     record = m.MaintenanceRecord(**payload.model_dump())
     db.add(record)
+    # Logging service rolls any due schedule(s) for this printer forward, which
+    # clears the maintenance-due alert: use the supplied next_due, else now+interval.
+    now = datetime.now(timezone.utc)
+    for sched in db.scalars(
+        select(m.MaintenanceSchedule).where(m.MaintenanceSchedule.printer_id == payload.printer_id)
+    ):
+        if payload.next_due is not None:
+            sched.next_due = payload.next_due
+        elif sched.interval_days:
+            sched.next_due = now + timedelta(days=sched.interval_days)
     db.commit()
     db.refresh(record)
     return record

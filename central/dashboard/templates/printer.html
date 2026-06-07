@@ -29,7 +29,10 @@
     <div class="text-slate-500 text-xs mb-2">Supplies</div>
     {% for sup in supplies %}
     <div class="flex justify-between items-center py-1">
-      <span>{{ sup.color or sup.type.value }}</span>{{ level_bar(sup.level_pct) }}
+      <span>{{ sup.color or sup.type.value }}</span>
+      {% if sup.level_pct is not none %}{{ level_bar(sup.level_pct) }}
+      {% elif sup.status_note %}<span class="text-xs text-slate-500 italic">{{ sup.status_note }}</span>
+      {% else %}<span class="text-xs text-slate-400">unknown</span>{% endif %}
     </div>
     {% else %}<div class="text-slate-400">No supply data.</div>{% endfor %}
   </div>

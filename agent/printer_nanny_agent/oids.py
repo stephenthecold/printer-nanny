@@ -56,4 +56,10 @@ ERROR_STATE_BITS = {
 }
 
 # Bits that should escalate the printer to an error (vs. a warning).
-CRITICAL_ERROR_BITS = {1, 3, 5, 6, 7}  # no paper, no toner, jammed, offline, service
+CRITICAL_ERROR_BITS = {1, 3, 5, 7}  # no paper, no toner, jammed, service requested
+
+# Informational bits — recorded but NOT alarmed. The "offline" detected-error bit
+# is set by many printers when in power-save/sleep; if we successfully polled the
+# device it is reachable, so this must not raise a critical offline alert. (Real
+# offline detection is handled centrally via missed heartbeats / stale last_seen.)
+INFO_ERROR_BITS = {6}  # offline (power-save)

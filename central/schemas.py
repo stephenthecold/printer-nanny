@@ -26,6 +26,7 @@ class SupplyIn(BaseModel):
     color: Optional[str] = None
     description: Optional[str] = None
     level_pct: Optional[float] = Field(default=None, ge=0, le=100)
+    status_note: Optional[str] = None
     current: Optional[int] = None
     max_capacity: Optional[int] = None
     unit: Optional[str] = None

@@ -273,6 +273,8 @@ class Supply(Base):
     color: Mapped[Optional[str]] = mapped_column(String(40), default=None)  # black/cyan/magenta/yellow
     description: Mapped[Optional[str]] = mapped_column(String(200), default=None)
     level_pct: Mapped[Optional[float]] = mapped_column(Float, default=None)  # None == unknown
+    # Coarse state when no numeric level is reported (e.g. "some remaining").
+    status_note: Mapped[Optional[str]] = mapped_column(String(60), default=None)
     current: Mapped[Optional[int]] = mapped_column(Integer, default=None)
     max_capacity: Mapped[Optional[int]] = mapped_column(Integer, default=None)
     unit: Mapped[Optional[str]] = mapped_column(String(40), default=None)

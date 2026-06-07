@@ -7,6 +7,7 @@ to translate raw SNMP gets into the normalized values the central API stores.
 from __future__ import annotations
 
 from dataclasses import dataclass
+from typing import Optional
 
 # prtMarkerSuppliesLevel / prtMarkerSuppliesMaxCapacity sentinel values (RFC 3805).
 LEVEL_OTHER = -1          # an unknown/other status, level not reported numerically
@@ -41,12 +42,12 @@ _SUPPLY_TYPE_BY_CODE = {
 class ParsedSupplyLevel:
     """Result of normalizing a raw (level, max_capacity) supply pair."""
 
-    level_pct: float | None  # 0..100, or None when genuinely unknown
+    level_pct: Optional[float]  # 0..100, or None when genuinely unknown
     known: bool              # False for unknown/other sentinels
-    note: str | None = None  # human hint, e.g. "some remaining"
+    note: Optional[str] = None  # human hint, e.g. "some remaining"
 
 
-def parse_supply_level(raw_level: int | None, max_capacity: int | None) -> ParsedSupplyLevel:
+def parse_supply_level(raw_level: Optional[int], max_capacity: Optional[int]) -> ParsedSupplyLevel:
     """Convert SNMP supply level + max capacity into a 0–100 percentage.
 
     Handles the RFC 3805 sentinels so a printer reporting "-3" (some remaining)
@@ -74,7 +75,7 @@ def parse_supply_level(raw_level: int | None, max_capacity: int | None) -> Parse
     return ParsedSupplyLevel(level_pct=round(pct, 1), known=True)
 
 
-def normalize_color(description: str | None, colorant: str | None = None) -> str | None:
+def normalize_color(description: Optional[str], colorant: Optional[str] = None) -> Optional[str]:
     """Best-effort color from a colorant value or the supply description text."""
     for source in (colorant, description):
         if not source:
@@ -88,7 +89,7 @@ def normalize_color(description: str | None, colorant: str | None = None) -> str
     return None
 
 
-def supply_type_from_code(code: int | None) -> str:
+def supply_type_from_code(code: Optional[int]) -> str:
     """Map a prtMarkerSuppliesType code to our SupplyType string (default 'other')."""
     if code is None:
         return "other"

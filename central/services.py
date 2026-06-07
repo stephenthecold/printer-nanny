@@ -40,11 +40,58 @@ def upsert_supply(db: Session, printer: m.Printer, supply: s.SupplyIn) -> m.Supp
         db.add(existing)
     existing.description = supply.description
     existing.level_pct = supply.level_pct
+    existing.status_note = supply.status_note
     existing.current = supply.current
     existing.max_capacity = supply.max_capacity
     existing.unit = supply.unit
     existing.updated_at = _now()
     return existing
+
+
+def _reconcile_events(db: Session, printer: m.Printer, incoming, ts) -> None:
+    """Keep one open PrinterEvent per active condition; resolve conditions that cleared.
+
+    SNMP polling re-reports the same error bits every cycle. Without reconciliation
+    the events table grows unbounded and the matching alert never auto-resolves
+    (it filters on resolved_at IS NULL). We dedup snmp_alert events by code: update
+    the existing open row, insert new ones, and resolve open rows whose condition is
+    no longer present in this reading.
+    """
+    open_snmp = list(
+        db.scalars(
+            select(m.PrinterEvent).where(
+                m.PrinterEvent.printer_id == printer.id,
+                m.PrinterEvent.source == m.EventSource.snmp_alert,
+                m.PrinterEvent.resolved_at.is_(None),
+            )
+        )
+    )
+    open_by_code = {ev.code: ev for ev in open_snmp}
+    current_codes = {e.code for e in incoming if e.source == m.EventSource.snmp_alert}
+
+    # Resolve conditions that have cleared.
+    for ev in open_snmp:
+        if ev.code not in current_codes:
+            ev.resolved_at = ts
+
+    for event in incoming:
+        if event.source == m.EventSource.snmp_alert and event.code in open_by_code:
+            ev = open_by_code[event.code]  # refresh the standing condition in place
+            ev.ts = ts
+            ev.severity = event.severity
+            ev.message = event.message
+            ev.resolved_at = None
+        else:
+            db.add(
+                m.PrinterEvent(
+                    printer_id=printer.id,
+                    ts=ts,
+                    code=event.code,
+                    severity=event.severity,
+                    source=event.source,
+                    message=event.message,
+                )
+            )
 
 
 def apply_reading(db: Session, site_id: int, reading: s.ReadingIn) -> Optional[m.Printer]:
@@ -86,17 +133,7 @@ def apply_reading(db: Session, site_id: int, reading: s.ReadingIn) -> Optional[m
         )
     )
 
-    for event in reading.events:
-        db.add(
-            m.PrinterEvent(
-                printer_id=printer.id,
-                ts=ts,
-                code=event.code,
-                severity=event.severity,
-                source=event.source,
-                message=event.message,
-            )
-        )
+    _reconcile_events(db, printer, reading.events, ts)
     return printer
 
 

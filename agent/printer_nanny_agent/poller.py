@@ -21,9 +21,6 @@ _VENDORS = [
     "Ricoh", "Kyocera", "Epson", "Samsung", "Dell", "OKI", "Sharp", "Toshiba",
 ]
 
-# hrPrinterStatus values that mean the device is operating normally.
-_OK_PRINTER_STATUS = {"3", "4", "5"}  # idle, printing, warmup
-
 
 def _to_int(value: Optional[str]) -> Optional[int]:
     if value is None:
@@ -82,37 +79,36 @@ def parse_error_bits(value: Optional[str]) -> List[int]:
 
 def build_supplies(walks: Dict[str, Dict[str, str]]) -> List[dict]:
     """Assemble supply dicts from the walked marker-supply tables, keyed by index."""
-    descriptions = walks.get(oids.PRT_MARKER_SUPPLIES_DESCRIPTION, {})
-    types = walks.get(oids.PRT_MARKER_SUPPLIES_TYPE, {})
-    maxes = walks.get(oids.PRT_MARKER_SUPPLIES_MAX_CAPACITY, {})
-    levels = walks.get(oids.PRT_MARKER_SUPPLIES_LEVEL, {})
 
-    # Index supplies by their OID suffix so the parallel tables line up.
-    by_suffix: Dict[str, dict] = {}
-    for full_oid, desc in descriptions.items():
-        suffix = _oid_suffix(full_oid, oids.PRT_MARKER_SUPPLIES_DESCRIPTION)
-        by_suffix[suffix] = {"description": desc}
+    def _match(base: str) -> Dict[str, str]:
+        return {_oid_suffix(o, base): v for o, v in walks.get(base, {}).items()}
 
-    def _match(table: Dict[str, str], base: str):
-        return {_oid_suffix(o, base): v for o, v in table.items()}
+    desc_by_suffix = _match(oids.PRT_MARKER_SUPPLIES_DESCRIPTION)
+    type_by_suffix = _match(oids.PRT_MARKER_SUPPLIES_TYPE)
+    max_by_suffix = _match(oids.PRT_MARKER_SUPPLIES_MAX_CAPACITY)
+    level_by_suffix = _match(oids.PRT_MARKER_SUPPLIES_LEVEL)
 
-    type_by_suffix = _match(types, oids.PRT_MARKER_SUPPLIES_TYPE)
-    max_by_suffix = _match(maxes, oids.PRT_MARKER_SUPPLIES_MAX_CAPACITY)
-    level_by_suffix = _match(levels, oids.PRT_MARKER_SUPPLIES_LEVEL)
+    # Union of every index seen in any table — some devices report a level row
+    # without a matching description (don't silently drop those supplies).
+    suffixes = set(desc_by_suffix) | set(type_by_suffix) | set(max_by_suffix) | set(level_by_suffix)
 
     supplies: List[dict] = []
-    for suffix, entry in by_suffix.items():
-        desc = entry["description"]
+    for suffix in sorted(suffixes):
+        desc = desc_by_suffix.get(suffix)
         raw_level = _to_int(level_by_suffix.get(suffix))
         max_cap = _to_int(max_by_suffix.get(suffix))
         type_code = _to_int(type_by_suffix.get(suffix))
         parsed = parse_supply_level(raw_level, max_cap)
+        # When the device reports a sentinel instead of a number (e.g. Brother
+        # toner = "some remaining"), surface that coarse state as a note.
+        note = parsed.note if parsed.level_pct is None else None
         supplies.append(
             {
                 "type": supply_type_from_code(type_code),
                 "color": normalize_color(desc),
                 "description": desc,
                 "level_pct": parsed.level_pct,
+                "status_note": note,
                 "current": raw_level if (raw_level is not None and raw_level >= 0) else None,
                 "max_capacity": max_cap if (max_cap is not None and max_cap >= 0) else None,
             }
@@ -137,31 +133,35 @@ def build_reading(
 
     error_bits = parse_error_bits(scalars.get(oids.HR_PRINTER_DETECTED_ERROR_STATE))
     events: List[dict] = []
-    has_critical = False
+    has_critical = has_warning = False
     for bit in error_bits:
         label = oids.ERROR_STATE_BITS.get(bit)
         if not label:
             continue
-        critical = bit in oids.CRITICAL_ERROR_BITS
-        has_critical = has_critical or critical
+        if bit in oids.CRITICAL_ERROR_BITS:
+            severity, has_critical = "critical", True
+        elif bit in oids.INFO_ERROR_BITS:
+            severity = "info"  # e.g. power-save "offline" — recorded, not alarmed
+        else:
+            severity, has_warning = "warning", True
         events.append(
             {
                 "code": label.replace(" ", "-"),
-                "severity": "critical" if critical else "warning",
+                "severity": severity,
                 "source": "snmp_alert",
                 "message": label.capitalize(),
             }
         )
 
-    printer_status = scalars.get(oids.HR_PRINTER_STATUS)
+    # We successfully polled the device, so it is reachable: a clean read is "ok"
+    # regardless of hrPrinterStatus (which some printers report as other/unknown
+    # while idle). Only real error/warning bits change that.
     if has_critical:
         status = "error"
-    elif events:
+    elif has_warning:
         status = "warning"
-    elif printer_status in _OK_PRINTER_STATUS:
-        status = "ok"
     else:
-        status = "unknown"
+        status = "ok"
 
     return {
         "ip": ip,

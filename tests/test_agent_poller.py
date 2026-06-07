@@ -71,3 +71,40 @@ async def test_poll_printer_with_fake_backend():
     reading = await poll_printer(backend, "10.0.0.5", SnmpParams())
     assert reading["model"] == "HP LaserJet M404"
     assert reading["supplies"][0]["color"] == "black"
+
+
+def test_offline_bit_does_not_flag_error_on_reachable_printer():
+    # 0x02 = detected-error bit 6 ("offline") — real Brother behavior while idle.
+    # A device we just polled is reachable, so this must be info, not a critical error.
+    device = canned_printer(error_state="0x02")
+    reading = build_reading("10.0.0.8", device["scalars"], device["walks"])
+    assert reading["status"] == "ok"
+    assert all(e["severity"] != "critical" for e in reading["events"])
+    assert any(e["code"] == "offline" and e["severity"] == "info" for e in reading["events"])
+
+
+def test_status_ok_when_reachable_and_clean_regardless_of_printer_status():
+    device = canned_printer(error_state="0x0000")
+    device["scalars"][oids.HR_PRINTER_STATUS] = "1"  # other(1) — Brother idle
+    reading = build_reading("10.0.0.9", device["scalars"], device["walks"])
+    assert reading["status"] == "ok"
+
+
+def test_build_supplies_includes_level_row_without_description():
+    lv = oids.PRT_MARKER_SUPPLIES_LEVEL
+    mx = oids.PRT_MARKER_SUPPLIES_MAX_CAPACITY
+    # A device that reports a level but no description row must not be dropped.
+    walks = {lv: {f"{lv}.1.1": "500"}, mx: {f"{mx}.1.1": "1000"}}
+    supplies = build_supplies(walks)
+    assert len(supplies) == 1
+    assert supplies[0]["level_pct"] == 50.0
+    assert supplies[0]["description"] is None
+
+
+def test_supply_status_note_for_sentinel_toner():
+    d = oids.PRT_MARKER_SUPPLIES_DESCRIPTION
+    lv = oids.PRT_MARKER_SUPPLIES_LEVEL
+    walks = {d: {f"{d}.1.1": "Black Toner Cartridge"}, lv: {f"{lv}.1.1": "-3"}}
+    sup = build_supplies(walks)[0]
+    assert sup["level_pct"] is None
+    assert sup["status_note"] == "some remaining"
