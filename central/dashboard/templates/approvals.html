@@ -2,7 +2,10 @@
 {% block title %}Approvals · Printer Nanny{% endblock %}
 {% block body %}
 <h1 class="text-2xl font-semibold mb-1">Pending discovery</h1>
-<p class="text-sm text-slate-500 mb-4">Devices agents found on their subnets. Approve to start monitoring, or ignore.</p>
+<p class="text-sm text-slate-500 mb-4">
+  Devices agents found on their subnets. Quick-approve to start monitoring with the
+  defaults, <em>Review</em> to set location / SNMP / asset tag first, or Ignore.
+</p>
 
 <div class="bg-white rounded-lg shadow overflow-hidden">
   <table class="w-full text-sm">
@@ -15,9 +18,11 @@
         <td class="px-4 py-2 tabular-nums">{{ p.ip }}</td>
         <td class="py-2">{{ p.hostname or '—' }} <span class="text-slate-400">{{ p.brand or '' }} {{ p.model or '' }}</span></td>
         <td class="py-2 text-slate-400">{{ p.mac or '—' }}</td>
-        <td class="py-2 text-right pr-4">
+        <td class="py-2 text-right pr-4 space-x-1">
+          <a href="/manage/printers/{{ p.id }}/edit?from_approvals=1"
+             class="bg-sky-600 text-white rounded px-2 py-1 text-xs">Review</a>
           <button hx-post="/approvals/{{ p.id }}/approve" hx-target="#pending-{{ p.id }}" hx-swap="outerHTML"
-                  class="bg-green-600 text-white rounded px-2 py-1 text-xs">Approve</button>
+                  class="bg-green-600 text-white rounded px-2 py-1 text-xs">Quick approve</button>
           <button hx-post="/approvals/{{ p.id }}/ignore" hx-target="#pending-{{ p.id }}" hx-swap="outerHTML"
                   class="bg-slate-300 text-slate-700 rounded px-2 py-1 text-xs">Ignore</button>
         </td>

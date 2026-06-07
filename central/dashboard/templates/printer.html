@@ -2,10 +2,46 @@
 {% from "base.html" import status_badge, level_bar %}
 {% block title %}{{ printer_label(printer) }} · Printer Nanny{% endblock %}
 {% block body %}
-<div class="flex items-center gap-3 mb-4">
+{% set can_manage = user and user.role.value in ('admin', 'tech') %}
+{% set is_pending = printer.discovery_state.value == 'pending' %}
+{% set is_ignored = printer.discovery_state.value == 'ignored' %}
+<div class="flex items-center gap-3 mb-4 flex-wrap">
   <a href="/clients/{{ printer.client_id }}" class="text-sm text-sky-700 hover:underline">← Client</a>
   <h1 class="text-2xl font-semibold">{{ printer.model or printer.hostname or 'Printer' }}</h1>
   {{ status_badge(printer.status) }}
+  <span class="text-xs px-2 py-0.5 rounded
+    {{ 'bg-amber-100 text-amber-800' if is_pending
+       else ('bg-slate-200 text-slate-700' if is_ignored else 'bg-emerald-100 text-emerald-800') }}">
+    {{ printer.discovery_state.value }}
+  </span>
+  {% if can_manage %}
+  <div class="ml-auto flex items-center gap-2">
+    <form method="post" action="/manage/printers/{{ printer.id }}/poll" class="inline">
+      <button class="bg-sky-600 text-white rounded px-2.5 py-1 text-xs">Poll now</button>
+    </form>
+    <a href="/manage/printers/{{ printer.id }}/edit" class="bg-slate-700 text-white rounded px-2.5 py-1 text-xs">Edit</a>
+    {% if is_pending %}
+    <form method="post" action="/manage/printers/{{ printer.id }}/approve" class="inline">
+      <button class="bg-emerald-600 text-white rounded px-2.5 py-1 text-xs">Approve</button>
+    </form>
+    {% elif not is_ignored %}
+    <form method="post" action="/manage/printers/{{ printer.id }}/ignore" class="inline"
+          onsubmit="return confirm('Stop monitoring {{ printer.ip }}? Agents will no longer poll it.')">
+      <button class="bg-amber-600 text-white rounded px-2.5 py-1 text-xs">Stop monitoring</button>
+    </form>
+    {% else %}
+    <form method="post" action="/manage/printers/{{ printer.id }}/approve" class="inline">
+      <button class="bg-emerald-600 text-white rounded px-2.5 py-1 text-xs">Resume monitoring</button>
+    </form>
+    {% endif %}
+    {% if user.role.value == 'admin' %}
+    <form method="post" action="/manage/printers/{{ printer.id }}/delete" class="inline"
+          onsubmit="return confirm('Delete printer {{ printer.ip }} and all its history? This cannot be undone.')">
+      <button class="bg-red-600 text-white rounded px-2.5 py-1 text-xs">Delete</button>
+    </form>
+    {% endif %}
+  </div>
+  {% endif %}
 </div>
 
 <div class="grid md:grid-cols-3 gap-4 mb-6 text-sm">
@@ -14,7 +50,13 @@
     <div class="mt-1">{{ printer.brand or '—' }} {{ printer.model or '' }}</div>
     <div class="text-slate-500">IP {{ printer.ip }} · {{ printer.location or 'no location' }}</div>
     <div class="text-slate-500">S/N {{ printer.serial or '—' }}</div>
-    <div class="text-slate-500">Last seen {{ printer.last_seen.strftime('%Y-%m-%d %H:%M') if printer.last_seen else 'never' }}</div>
+    {% if printer.asset_tag %}<div class="text-slate-500">Asset {{ printer.asset_tag }}</div>{% endif %}
+    {% if printer.tags %}
+    <div class="mt-1 flex flex-wrap gap-1">
+      {% for t in printer.tags %}<span class="text-xs px-1.5 py-0.5 rounded bg-sky-100 text-sky-800">{{ t }}</span>{% endfor %}
+    </div>
+    {% endif %}
+    <div class="text-slate-500 mt-1">Last seen {{ printer.last_seen.strftime('%Y-%m-%d %H:%M') if printer.last_seen else 'never' }}</div>
   </div>
   <div class="bg-white rounded-lg shadow p-4">
     <div class="text-slate-500 text-xs">Page count</div>
@@ -37,6 +79,13 @@
     {% else %}<div class="text-slate-400">No supply data.</div>{% endfor %}
   </div>
 </div>
+
+{% if printer.notes %}
+<section class="bg-white rounded-lg shadow p-4 mb-6">
+  <div class="text-xs text-slate-500 mb-1">Notes</div>
+  <p class="text-sm whitespace-pre-wrap">{{ printer.notes }}</p>
+</section>
+{% endif %}
 
 <div class="grid md:grid-cols-2 gap-6">
   <section class="bg-white rounded-lg shadow p-4">

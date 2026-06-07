@@ -180,6 +180,9 @@ class PrinterIn(BaseModel):
     location: Optional[str] = None
     snmp_version: str = "2c"
     snmp_community: Optional[str] = "public"
+    notes: Optional[str] = None
+    asset_tag: Optional[str] = None
+    tags: Optional[list[str]] = None
 
 
 class PrinterOut(ORMModel):
@@ -196,6 +199,9 @@ class PrinterOut(ORMModel):
     discovery_state: m.DiscoveryState
     page_count: Optional[int] = None
     last_seen: Optional[datetime] = None
+    notes: Optional[str] = None
+    asset_tag: Optional[str] = None
+    tags: Optional[list[str]] = None
 
 
 class MaintenanceRecordIn(BaseModel):
