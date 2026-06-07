@@ -75,10 +75,10 @@ SPECS: List[Spec] = [
     Spec("oidc.default_role", "str", "Single sign-on (OIDC)", "Role for new SSO users", "tech"),
     # Agent install (used to build the one-line install command shown on the Agents page)
     Spec("agent.pip_source", "str", "Agent install", "pip install source",
-         "git+https://github.com/your-org/printer-nanny.git#subdirectory=agent",
+         "git+https://github.com/stephenthecold/printer-nanny.git#subdirectory=agent",
          "Where install-agent.sh pip-installs the agent from — set to your repo after publishing"),
     Spec("agent.docker_image", "str", "Agent install", "Docker image",
-         "ghcr.io/your-org/printer-nanny-agent:latest",
+         "ghcr.io/stephenthecold/printer-nanny-agent:latest",
          "Image used by the Docker install option"),
 ]
 

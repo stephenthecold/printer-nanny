@@ -21,7 +21,7 @@ printer-nanny-agent = "printer_nanny_agent.cli:main"
 
 # TODO: update the org/repo slug once published to GitHub.
 [project.urls]
-Repository = "https://github.com/your-org/printer-nanny"
+Repository = "https://github.com/stephenthecold/printer-nanny"
 
 [build-system]
 requires = ["setuptools>=68"]

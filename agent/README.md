@@ -47,7 +47,7 @@ curl -fsSL https://CENTRAL/install-agent.sh | sudo bash -s -- \
 # there is no prebuilt public image yet):
 docker run -d --restart=always --network host --name printer-nanny-agent \
   -e PN_CENTRAL_URL=https://CENTRAL -e PN_AGENT_ID=12 -e PN_API_KEY=pn_xxxxx \
-  ghcr.io/your-org/printer-nanny-agent
+  ghcr.io/stephenthecold/printer-nanny-agent
 ```
 
 The installer ([`../deploy/install-agent.sh`](../deploy/install-agent.sh), served
@@ -75,7 +75,7 @@ host:
 ## Install — manual / dev
 ```bash
 # Standalone (e.g. on a site box, from your published repo):
-pip install "git+https://github.com/your-org/printer-nanny.git#subdirectory=agent"
+pip install "git+https://github.com/stephenthecold/printer-nanny.git#subdirectory=agent"
 # or from the monorepo for dev: pip install -e ".[agent]"
 
 # Config via env vars (no file), flags, or a TOML file — precedence: flags > env > file.
