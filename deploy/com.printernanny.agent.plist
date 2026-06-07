@@ -1,0 +1,40 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  macOS launchd sample for running the agent persistently on a Mac (the Linux
+  equivalent is deploy/printer-nanny-agent.service). Fill in the agent id/key
+  from enrollment, then:
+
+    cp deploy/com.printernanny.agent.plist ~/Library/LaunchAgents/
+    # edit the paths + PN_AGENT_ID / PN_API_KEY below
+    launchctl load ~/Library/LaunchAgents/com.printernanny.agent.plist
+
+  KeepAlive restarts it if it exits; logs go to /tmp/printer-nanny-agent.*.log.
+-->
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.printernanny.agent</string>
+    <key>ProgramArguments</key>
+    <array>
+        <string>/ABSOLUTE/PATH/printer-nanny/.venv/bin/printer-nanny-agent</string>
+        <string>run</string>
+    </array>
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>PN_CENTRAL_URL</key>
+        <string>http://localhost:8080</string>
+        <key>PN_AGENT_ID</key>
+        <string>REPLACE_WITH_AGENT_ID</string>
+        <key>PN_API_KEY</key>
+        <string>REPLACE_WITH_API_KEY</string>
+    </dict>
+    <key>RunAtLoad</key>
+    <true/>
+    <key>KeepAlive</key>
+    <true/>
+    <key>StandardOutPath</key>
+    <string>/tmp/printer-nanny-agent.out.log</string>
+    <key>StandardErrorPath</key>
+    <string>/tmp/printer-nanny-agent.err.log</string>
+</dict>
+</plist>

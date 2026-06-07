@@ -63,6 +63,11 @@ printer), multi-subnet, agent-collected.
 - `python -m central.worker.run` — run the background worker loop.
 - `docker compose up` — full stack (Postgres + api + worker + dashboard + Caddy).
 - `alembic upgrade head` — apply migrations (Postgres).
+- `python -m central.enroll --client … --site … --agent … --subnet … --json` —
+  mint an agent + key server-side (used by setup scripts / `docker compose exec`).
+- `scripts/setup-local-agent.sh` — turnkey: auto-detect subnet, enroll (key
+  auto-generated), and run one agent cycle against the local LAN. Note: SNMP to
+  LAN peers needs an unsandboxed shell.
 - `pytest` — run tests.
 
 ## Status
