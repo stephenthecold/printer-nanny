@@ -87,6 +87,28 @@ async def _effective_config(client: CentralClient, config: AgentConfig) -> Agent
         return config
 
 
+async def poll_one_target(
+    client: CentralClient, backend: SnmpBackend, config: AgentConfig, ip: str
+) -> dict:
+    """Poll one printer by IP and push its reading. Used by the poll_printer command.
+
+    Looks the target up in /targets so the per-printer SNMP creds are honored;
+    falls back to the agent's defaults if the IP isn't in the approved list
+    (e.g. the operator clicked Poll-now on a printer they just unignored).
+    """
+    targets = await client.get_targets()
+    target = next((t for t in targets if t.get("ip") == ip), {"ip": ip})
+    try:
+        reading = await poll_printer(backend, ip, _params_for_target(target, config))
+    except SnmpError as exc:
+        log.warning("poll_printer failed for %s: %s", ip, exc)
+        return {"polled": 1, "applied": 0, "unreachable": 1}
+    result = await client.post_readings([reading])
+    applied = result.get("applied", 0)
+    log.info("poll_printer %s → applied=%d", ip, applied)
+    return {"polled": 1, "applied": applied, "unreachable": 0}
+
+
 async def handle_commands(
     client: CentralClient, backend: SnmpBackend, config: AgentConfig, commands: List[dict]
 ) -> None:
@@ -97,6 +119,13 @@ async def handle_commands(
             await discover_all(client, backend, config)
         elif ctype == "poll_now":
             await poll_targets(client, backend, config)
+        elif ctype == "poll_printer":
+            payload = cmd.get("payload") or {}
+            ip = payload.get("ip")
+            if ip:
+                await poll_one_target(client, backend, config, ip)
+            else:
+                log.warning("poll_printer command #%s missing 'ip' in payload", cmd.get("id"))
         elif ctype == "update_config":
             # Config is file-managed; log and rely on the operator/automation to apply.
             log.info("update_config requested (payload: %s) — apply via config file", cmd.get("payload"))

@@ -20,6 +20,12 @@ from central.dashboard import _keystore
 from central.db import get_db
 from central.security import generate_api_key, hash_api_key
 
+
+def _split_tags(raw: str) -> Optional[list[str]]:
+    """Parse a comma-separated tag input into a clean list (None if empty)."""
+    tags = [t.strip() for t in (raw or "").split(",") if t.strip()]
+    return tags or None
+
 router = APIRouter(prefix="/manage", tags=["manage"])
 _templates = Jinja2Templates(directory=str(Path(__file__).parent / "templates"))
 
@@ -179,7 +185,11 @@ def printer_new(
 
 
 @router.get("/printers/{printer_id}/edit", response_class=HTMLResponse)
-def printer_edit(printer_id: int, request: Request, db: Session = Depends(get_db)):
+def printer_edit(
+    printer_id: int, request: Request,
+    from_approvals: int = 0,
+    db: Session = Depends(get_db),
+):
     user = _manager(request, db)
     if user is None:
         return _redirect("/login")
@@ -190,7 +200,8 @@ def printer_edit(printer_id: int, request: Request, db: Session = Depends(get_db
     return _templates.TemplateResponse(
         request, "printer_form.html",
         {"user": user, "client": client, "sites": client.sites,
-         "printer": printer, "selected_site_id": printer.site_id},
+         "printer": printer, "selected_site_id": printer.site_id,
+         "from_approvals": bool(from_approvals)},
     )
 
 
@@ -201,6 +212,7 @@ def printer_create(
     hostname: str = Form(""), brand: str = Form(""), model: str = Form(""),
     serial: str = Form(""), location: str = Form(""),
     snmp_version: str = Form("2c"), snmp_community: str = Form("public"),
+    asset_tag: str = Form(""), tags: str = Form(""), notes: str = Form(""),
     db: Session = Depends(get_db),
 ):
     if _manager(request, db) is None:
@@ -211,6 +223,9 @@ def printer_create(
         model=model.strip() or None, serial=serial.strip() or None,
         location=location.strip() or None, snmp_version=snmp_version,
         snmp_community=snmp_community.strip() or "public",
+        asset_tag=asset_tag.strip() or None,
+        tags=_split_tags(tags),
+        notes=notes.strip() or None,
         discovery_state=m.DiscoveryState.approved,
     )
     db.add(printer)
@@ -225,8 +240,12 @@ def printer_update(
     site_id: int = Form(...), ip: str = Form(...), hostname: str = Form(""),
     brand: str = Form(""), model: str = Form(""), serial: str = Form(""),
     location: str = Form(""), snmp_version: str = Form("2c"),
-    snmp_community: str = Form("public"), db: Session = Depends(get_db),
+    snmp_community: str = Form("public"),
+    asset_tag: str = Form(""), tags: str = Form(""), notes: str = Form(""),
+    approve: str = Form(""),
+    db: Session = Depends(get_db),
 ):
+    """Save printer edits. If ``approve=1`` and the printer is pending, also approve it."""
     if _manager(request, db) is None:
         return _redirect("/login")
     printer = db.get(m.Printer, printer_id)
@@ -240,8 +259,19 @@ def printer_update(
         printer.location = location.strip() or None
         printer.snmp_version = snmp_version
         printer.snmp_community = snmp_community.strip() or "public"
+        printer.asset_tag = asset_tag.strip() or None
+        printer.tags = _split_tags(tags)
+        printer.notes = notes.strip() or None
+        approved_now = False
+        if approve and printer.discovery_state != m.DiscoveryState.approved:
+            printer.discovery_state = m.DiscoveryState.approved
+            approved_now = True
         db.commit()
-        _flash(request, "Printer updated.")
+        _flash(request, "Printer approved." if approved_now else "Printer updated.")
+        # After approval (typically reached from /approvals), bounce back there
+        # so the operator can keep working through the queue.
+        if approved_now:
+            return _redirect("/approvals")
         return _redirect(f"/manage/clients/{printer.client_id}")
     return _redirect("/manage")
 
@@ -257,6 +287,66 @@ def printer_delete(printer_id: int, request: Request, db: Session = Depends(get_
     db.commit()
     _flash(request, "Printer deleted.")
     return _redirect(f"/manage/clients/{client_id}")
+
+
+@router.post("/printers/{printer_id}/ignore")
+def printer_ignore(printer_id: int, request: Request, db: Session = Depends(get_db)):
+    """Move a printer back to the ignored state so the agent stops polling it."""
+    if _manager(request, db) is None:
+        return _redirect("/login")
+    printer = db.get(m.Printer, printer_id)
+    if printer:
+        printer.discovery_state = m.DiscoveryState.ignored
+        db.commit()
+        _flash(request, f"Stopped monitoring printer {printer.ip}.")
+        return _redirect(f"/manage/clients/{printer.client_id}")
+    return _redirect("/manage")
+
+
+@router.post("/printers/{printer_id}/approve")
+def printer_approve(printer_id: int, request: Request, db: Session = Depends(get_db)):
+    """One-click approve from the detail page (no field edits)."""
+    if _manager(request, db) is None:
+        return _redirect("/login")
+    printer = db.get(m.Printer, printer_id)
+    if printer:
+        printer.discovery_state = m.DiscoveryState.approved
+        db.commit()
+        _flash(request, f"Printer {printer.ip} approved.")
+        return _redirect(f"/printers/{printer.id}")
+    return _redirect("/manage")
+
+
+@router.post("/printers/{printer_id}/poll")
+def printer_poll_now(printer_id: int, request: Request, db: Session = Depends(get_db)):
+    """Enqueue an immediate poll for one printer on its owning agent.
+
+    The agent picks the command up on its next heartbeat and polls just this IP,
+    so an operator can refresh a single device without waiting for the normal
+    cycle. Falls back to any agent at the printer's site if no discoverer is set.
+    """
+    if _manager(request, db) is None:
+        return _redirect("/login")
+    printer = db.get(m.Printer, printer_id)
+    if printer is None:
+        return _redirect("/manage")
+
+    agent_id = printer.discovered_by_agent_id
+    if agent_id is None:
+        agent = db.scalar(select(m.Agent).where(m.Agent.site_id == printer.site_id))
+        agent_id = agent.id if agent else None
+    if agent_id is None:
+        _flash(request, "No agent is assigned to this site — cannot poll.")
+        return _redirect(f"/printers/{printer.id}")
+
+    db.add(m.Command(
+        agent_id=agent_id,
+        type=m.CommandType.poll_printer,
+        payload={"printer_id": printer.id, "ip": printer.ip},
+    ))
+    db.commit()
+    _flash(request, "Poll queued. The agent will refresh this printer on its next heartbeat.")
+    return _redirect(f"/printers/{printer.id}")
 
 
 # --------------------------------------------------------------------------- #

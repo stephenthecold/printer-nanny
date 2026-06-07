@@ -125,6 +125,7 @@ class ChannelType(str, enum.Enum):
 class CommandType(str, enum.Enum):
     rescan = "rescan"
     poll_now = "poll_now"
+    poll_printer = "poll_printer"  # payload: {"ip": "..."} or {"printer_id": N}
     update_config = "update_config"
 
 
@@ -242,6 +243,11 @@ class Printer(Base):
     )
     page_count: Mapped[Optional[int]] = mapped_column(Integer, default=None)
     last_seen: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), default=None)
+    # Operator-managed metadata: free-text notes, an asset/lease/inventory tag,
+    # and a list of short labels (e.g. "lease", "vip", "color").
+    notes: Mapped[Optional[str]] = mapped_column(Text, default=None)
+    asset_tag: Mapped[Optional[str]] = mapped_column(String(120), default=None)
+    tags: Mapped[Optional[list]] = mapped_column(JSON, default=None)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
 
     client: Mapped[Client] = relationship(back_populates="printers")
