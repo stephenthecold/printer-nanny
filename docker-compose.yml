@@ -25,6 +25,10 @@ services:
       FREESCOUT_API_KEY: ${FREESCOUT_API_KEY:-}
       SMTP_HOST: ${SMTP_HOST:-mailhog}
       SMTP_PORT: ${SMTP_PORT:-1025}
+    # Exposed on the host so an external reverse proxy (your own Caddy / Nginx /
+    # Traefik) can point at it. The bundled `caddy` service below is opt-in.
+    ports:
+      - "${API_PORT:-8000}:8000"
     depends_on:
       db:
         condition: service_healthy
@@ -56,10 +60,16 @@ services:
     ports:
       - "8025:8025"
 
+  # Optional bundled reverse proxy. Opt-in (`docker compose --profile caddy up -d`).
+  # Skip this if you already run Caddy / Nginx / Traefik on the host — just point
+  # your existing proxy at http://<docker-host>:${API_PORT:-8000}. The bundled
+  # Caddyfile is a dev-friendly :80 → api:8000 with no TLS; set a hostname in it
+  # to have Caddy provision certs automatically.
   caddy:
     image: caddy:2-alpine
+    profiles: ["caddy"]
     ports:
-      - "8080:80"
+      - "${CADDY_PORT:-8080}:80"
     volumes:
       - ./deploy/Caddyfile:/etc/caddy/Caddyfile:ro
     depends_on:

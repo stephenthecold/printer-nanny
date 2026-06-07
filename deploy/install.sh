@@ -2,15 +2,19 @@
 # Printer Nanny — one-line Docker Compose installer.
 #
 # Pulled from a checkout:
-#   bash deploy/install.sh [--demo] [--branch main] [--dir printer-nanny]
+#   bash deploy/install.sh [--demo] [--with-caddy] [--branch main] [--dir printer-nanny]
 #
 # Pulled from the network (this is the advertised one-liner):
 #   curl -fsSL https://raw.githubusercontent.com/stephenthecold/printer-nanny/main/deploy/install.sh | bash
 #
+# By default the API binds to host port 8000 so your existing reverse proxy
+# (Caddy / Nginx / Traefik) can point at it. Pass --with-caddy to include the
+# bundled Caddy on :8080 instead.
+#
 # What it does, idempotently:
 #   1. Clones (or updates) the repo into ./printer-nanny (skipped if already in a checkout).
 #   2. Generates .env with a strong SECRET_KEY if it doesn't exist.
-#   3. Runs `docker compose up -d --build`.
+#   3. Runs `docker compose up -d --build` (with --profile caddy if --with-caddy).
 #   4. Waits for the API to answer /healthz.
 #   5. With --demo, runs the destructive demo seed AFTER confirming the user wants it.
 #
@@ -22,22 +26,34 @@ REPO_URL="${PRINTER_NANNY_REPO:-https://github.com/stephenthecold/printer-nanny.
 BRANCH="${PRINTER_NANNY_BRANCH:-main}"
 INSTALL_DIR=""
 DEMO=0
-PORT=8080
+WITH_CADDY=0
+PORT=""              # host port we poll /healthz on; defaults below
 BUILD_FLAG="--build"
+COMPOSE_PROFILES=""  # appended as --profile X flags
 
 while [ $# -gt 0 ]; do
   case "$1" in
     --demo)        DEMO=1; shift ;;
+    --with-caddy)  WITH_CADDY=1; shift ;;
     --dir)         INSTALL_DIR="$2"; shift 2 ;;
     --branch)      BRANCH="$2"; shift 2 ;;
     --repo-url)    REPO_URL="$2"; shift 2 ;;
     --port)        PORT="$2"; shift 2 ;;
     --no-build)    BUILD_FLAG=""; shift ;;
     -h|--help)
-      sed -n '2,18{/^#/{s/^# \{0,1\}//;p;}}' "$0"; exit 0 ;;
+      sed -n '2,22{/^#/{s/^# \{0,1\}//;p;}}' "$0"; exit 0 ;;
     *) echo "unknown option: $1" >&2; exit 2 ;;
   esac
 done
+
+# When --with-caddy, enable the optional `caddy` profile and (unless overridden)
+# poll the proxy on :8080. Otherwise poll the API directly on :8000.
+if [ "$WITH_CADDY" -eq 1 ]; then
+  COMPOSE_PROFILES="--profile caddy"
+  : "${PORT:=8080}"
+else
+  : "${PORT:=8000}"
+fi
 
 die()  { echo "error: $*" >&2; exit 1; }
 need() { command -v "$1" >/dev/null 2>&1 || die "'$1' not found in PATH"; }
@@ -84,8 +100,8 @@ else
   echo "==> .env already present; leaving it alone"
 fi
 
-echo "==> docker compose up -d $BUILD_FLAG"
-docker compose up -d $BUILD_FLAG
+echo "==> docker compose ${COMPOSE_PROFILES} up -d $BUILD_FLAG"
+docker compose $COMPOSE_PROFILES up -d $BUILD_FLAG
 
 echo "==> waiting for the API on http://localhost:${PORT}/healthz"
 DEADLINE=$(( $(date +%s) + 180 ))
@@ -110,9 +126,14 @@ if [ "$DEMO" -eq 1 ]; then
   docker compose exec -T api python -m central.seed
 fi
 
+if [ "$WITH_CADDY" -eq 1 ]; then
+  ENTRY="http://localhost:${PORT}  (bundled Caddy)"
+else
+  ENTRY="http://localhost:${PORT}  (API directly — point your reverse proxy here)"
+fi
 cat <<EOF
 
-  Printer Nanny is up at http://localhost:${PORT}
+  Printer Nanny is up: ${ENTRY}
   Login: admin / admin   ← change this password immediately
                            (Settings → Users, or /manage)
 
