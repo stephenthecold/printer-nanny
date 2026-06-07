@@ -33,19 +33,40 @@ and `SECRET_KEY` live in the environment.
 - **Pluggable auth** — local login plus optional OIDC/SSO (Entra, Okta, Google,
   Keycloak, …), configured from Settings.
 
-## Quick start — Docker (Postgres, full stack)
+## Quick start — Docker (one-liner)
 
 ```bash
-cp .env.example .env          # set SECRET_KEY (DATABASE_URL is preset for Postgres)
-docker compose up -d --build
-# optional demo data + admin/admin login. WARNING: drops & recreates all tables —
-# demo only, never run against real data.
-docker compose exec api python -m central.seed
-# open http://localhost:8080   (login: admin / admin)
+curl -fsSL https://raw.githubusercontent.com/stephenthecold/printer-nanny/main/deploy/install.sh | bash
 ```
+
+That clones the repo into `./printer-nanny`, generates a `.env` with a strong
+`SECRET_KEY`, brings the full stack up with `docker compose up -d --build`, and
+waits for the API. Open <http://localhost:8080> and log in with **`admin` /
+`admin`** — change that password immediately.
+
+Re-running the installer is safe: it pulls the latest code, leaves your `.env`
+and data alone, and just rebuilds/restarts. To wipe and re-seed with demo data
+(destructive), add `--demo`.
 
 The stack: Postgres + API + worker + dashboard behind Caddy (`:8080`), plus
 MailHog (`:8025`) so demo alert email is visible.
+
+<details>
+<summary>Manual steps (what the installer does under the hood)</summary>
+
+```bash
+git clone https://github.com/stephenthecold/printer-nanny.git
+cd printer-nanny
+echo "SECRET_KEY=$(openssl rand -base64 48)" > .env
+docker compose up -d --build
+# optional: drop & re-seed with demo clients/printers
+docker compose exec api python -m central.seed
+```
+
+The api container runs migrations and the idempotent `python -m central.seed
+--init` on every start — that's what creates the initial `admin`/`tech` users
+and default alert rules on a fresh database without touching an existing one.
+</details>
 
 ## Quick start — local (SQLite, no Docker)
 
