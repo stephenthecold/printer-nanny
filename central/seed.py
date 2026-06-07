@@ -46,6 +46,47 @@ def _supplies_for(model: str, low: bool) -> list[dict]:
     return out
 
 
+def _default_alert_rules() -> list:
+    """The three global alert rules — useful in both demo and minimal seeds."""
+    return [
+        m.AlertRule(
+            name="Low supply (<10%)", scope=m.AlertScope.global_,
+            condition_type=m.AlertConditionType.supply_below, threshold=10,
+            severity=m.EventSeverity.warning,
+        ),
+        m.AlertRule(
+            name="Printer errors", scope=m.AlertScope.global_,
+            condition_type=m.AlertConditionType.error_severity,
+            severity=m.EventSeverity.critical,
+        ),
+        m.AlertRule(
+            name="Agent offline (>30 min)", scope=m.AlertScope.global_,
+            condition_type=m.AlertConditionType.offline_minutes, threshold=30,
+            severity=m.EventSeverity.warning,
+        ),
+    ]
+
+
+def seed_minimal() -> None:
+    """Clean slate for real-equipment testing: admin/tech users + alert rules only.
+
+    No demo clients/printers and no email channel enabled (so there's no alert
+    noise until you configure things). Add real clients/agents via the UI or
+    `python -m central.enroll`.
+    """
+    print("Dropping and recreating tables (minimal: no demo data)…")
+    Base.metadata.drop_all(bind=engine)
+    Base.metadata.create_all(bind=engine)
+    db = SessionLocal()
+    db.add(m.User(username="admin", password_hash=hash_password("admin"), role=m.UserRole.admin))
+    db.add(m.User(username="tech", password_hash=hash_password("tech"), role=m.UserRole.tech))
+    db.add_all(_default_alert_rules())
+    db.commit()
+    db.close()
+    print("Clean slate ready. Log in as admin / admin "
+          "(Docker: http://localhost:8080, local dev: http://localhost:8000).")
+
+
 def seed() -> None:
     print("Dropping and recreating tables…")
     Base.metadata.drop_all(bind=engine)
@@ -236,30 +277,7 @@ def seed() -> None:
 
     # Alert rules: low supply <10%, any error, agent offline >30 min.
     # Channels come from Settings (active_channels), so no per-rule channel_ids.
-    db.add_all(
-        [
-            m.AlertRule(
-                name="Low supply (<10%)",
-                scope=m.AlertScope.global_,
-                condition_type=m.AlertConditionType.supply_below,
-                threshold=10,
-                severity=m.EventSeverity.warning,
-            ),
-            m.AlertRule(
-                name="Printer errors",
-                scope=m.AlertScope.global_,
-                condition_type=m.AlertConditionType.error_severity,
-                severity=m.EventSeverity.critical,
-            ),
-            m.AlertRule(
-                name="Agent offline (>30 min)",
-                scope=m.AlertScope.global_,
-                condition_type=m.AlertConditionType.offline_minutes,
-                threshold=30,
-                severity=m.EventSeverity.warning,
-            ),
-        ]
-    )
+    db.add_all(_default_alert_rules())
 
     db.commit()
     counts = {
@@ -275,4 +293,9 @@ def seed() -> None:
 
 
 if __name__ == "__main__":
-    seed()
+    import sys
+
+    if "--minimal" in sys.argv:
+        seed_minimal()
+    else:
+        seed()

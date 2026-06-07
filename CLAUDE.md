@@ -65,9 +65,13 @@ printer), multi-subnet, agent-collected.
 - `alembic upgrade head` — apply migrations (Postgres).
 - `python -m central.enroll --client … --site … --agent … --subnet … --json` —
   mint an agent + key server-side (used by setup scripts / `docker compose exec`).
-- `scripts/setup-local-agent.sh` — turnkey: auto-detect subnet, enroll (key
-  auto-generated), and run one agent cycle against the local LAN. Note: SNMP to
-  LAN peers needs an unsandboxed shell.
+- `python -m central.seed --minimal` — clean slate (admin/tech + alert rules,
+  no demo data) for real-equipment testing.
+- Local agent (same box as central): `scripts/setup-local-agent.sh` (one-shot) or
+  `scripts/install-local-agent-macos.sh` (persistent launchd). Docker Desktop
+  containers can't reach the LAN, so the local agent runs on the host; on Linux
+  the optional `agent` compose profile runs it host-networked. SNMP to LAN peers
+  needs an unsandboxed shell.
 - `pytest` — run tests.
 
 ## Status

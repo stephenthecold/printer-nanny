@@ -56,6 +56,22 @@ SNMP, and intervals are managed in the central UI and fetched at runtime — the
 local file/env holds only the central URL + key. Lost the key? **Rotate key** on
 the agent in the UI for a fresh command.
 
+### Run on the same machine as the central stack
+
+A printer agent must reach the LAN, and **Docker Desktop containers cannot** (they
+run in a VM). So when central runs in Docker on macOS/Windows, run the agent on the
+host:
+
+- **macOS** — persistent via launchd, key auto-generated:
+  `scripts/install-local-agent-macos.sh` (uninstall with `--uninstall`).
+- **One-shot trial** — `scripts/setup-local-agent.sh` (enroll + a single cycle).
+- **Linux with central in Docker** — the agent can run as a container on the host
+  network:
+  ```bash
+  docker compose exec api python -m central.enroll --subnet 10.0.3.0/24 --json
+  PN_AGENT_ID=.. PN_API_KEY=.. docker compose --profile agent up -d agent
+  ```
+
 ## Install — manual / dev
 ```bash
 # Standalone (e.g. on a site box, from your published repo):

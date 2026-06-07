@@ -64,5 +64,26 @@ services:
     depends_on:
       - api
 
+  # Optional built-in site agent (opt-in: `docker compose --profile agent up -d`).
+  # LINUX ONLY for real SNMP — network_mode: host lets it reach LAN printers. On
+  # Docker Desktop (macOS/Windows) containers run in a VM and can't see your LAN;
+  # there, run the agent on the host instead (scripts/install-local-agent-macos.sh
+  # or deploy/printer-nanny-agent.service). Enroll first to get the id/key:
+  #   docker compose exec api python -m central.enroll --subnet <cidr> --json
+  #   PN_AGENT_ID=.. PN_API_KEY=.. docker compose --profile agent up -d agent
+  agent:
+    build:
+      context: .
+      dockerfile: deploy/agent.Dockerfile
+    profiles: ["agent"]
+    network_mode: host
+    environment:
+      # Empty defaults so the normal `docker compose up` (without --profile agent)
+      # never errors; the agent fails loudly at runtime if these aren't set.
+      PN_CENTRAL_URL: ${PN_CENTRAL_URL:-http://localhost:8080}
+      PN_AGENT_ID: ${PN_AGENT_ID:-}
+      PN_API_KEY: ${PN_API_KEY:-}
+    restart: always
+
 volumes:
   pgdata:

@@ -5,6 +5,15 @@ from __future__ import annotations
 import pytest
 
 from printer_nanny_agent.config import load_config, merge_remote, parse_config
+from printer_nanny_agent.runner import _due
+
+
+def test_due_runs_first_cycle_regardless_of_clock():
+    # last=None → due now, even when the monotonic clock value is small.
+    assert _due(None, 300, 5.0) is True
+    # Not due until the interval elapses.
+    assert _due(100.0, 300, 200.0) is False
+    assert _due(100.0, 300, 400.0) is True
 
 
 def _valid() -> dict:

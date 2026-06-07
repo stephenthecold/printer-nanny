@@ -21,6 +21,12 @@ log = logging.getLogger("printer_nanny_agent.runner")
 _POLL_CONCURRENCY = 16
 
 
+def _due(last: Optional[float], interval: float, now: float) -> bool:
+    """True if an action is due. last=None means 'never run' → due immediately,
+    independent of the monotonic clock's epoch (not zero-based on all platforms)."""
+    return last is None or (now - last) >= interval
+
+
 def _params_for_target(target: dict, config: AgentConfig) -> SnmpParams:
     base = config.snmp
     return SnmpParams(
@@ -123,8 +129,10 @@ async def run_forever(config: AgentConfig, backend: Optional[SnmpBackend] = None
     client = CentralClient(
         config.central_url, config.agent_id, config.api_key, verify_tls=config.verify_tls
     )
-    last_poll = 0.0
-    last_discovery = 0.0
+    # None = "due now" so the first cycle always polls + discovers, regardless of
+    # the monotonic clock's epoch (which is not zero-based on every platform).
+    last_poll = None
+    last_discovery = None
     effective = config
     log.info("agent %d started → %s", config.agent_id, config.central_url)
     try:
@@ -136,10 +144,10 @@ async def run_forever(config: AgentConfig, backend: Optional[SnmpBackend] = None
                 effective = await _effective_config(client, config)
                 commands = await client.get_commands()
                 await handle_commands(client, backend, effective, commands)
-                if now - last_poll >= effective.poll_interval_seconds:
+                if _due(last_poll, effective.poll_interval_seconds, now):
                     await poll_targets(client, backend, effective)
                     last_poll = now
-                if now - last_discovery >= effective.discovery_interval_seconds:
+                if _due(last_discovery, effective.discovery_interval_seconds, now):
                     await discover_all(client, backend, effective)
                     last_discovery = now
             except Exception:  # noqa: BLE001 - keep the agent alive across transient errors
