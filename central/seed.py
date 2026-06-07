@@ -67,6 +67,31 @@ def _default_alert_rules() -> list:
     ]
 
 
+def seed_init() -> None:
+    """Idempotent first-run bootstrap. Safe to call on every container start.
+
+    Creates admin/tech users and default alert rules ONLY if the users table is
+    empty. Never drops anything. Run after Alembic has brought the schema to head
+    (the api service does that just before invoking this).
+    """
+    db = SessionLocal()
+    try:
+        if db.query(m.User).count() > 0:
+            return  # already initialised — leave existing users/rules alone
+        print("==> first-run bootstrap: creating admin/tech users + default alert rules")
+        db.add(m.User(
+            username="admin", password_hash=hash_password("admin"), role=m.UserRole.admin
+        ))
+        db.add(m.User(
+            username="tech", password_hash=hash_password("tech"), role=m.UserRole.tech
+        ))
+        db.add_all(_default_alert_rules())
+        db.commit()
+        print("    login: admin / admin  (change this password immediately)")
+    finally:
+        db.close()
+
+
 def seed_minimal() -> None:
     """Clean slate for real-equipment testing: admin/tech users + alert rules only.
 
@@ -295,7 +320,9 @@ def seed() -> None:
 if __name__ == "__main__":
     import sys
 
-    if "--minimal" in sys.argv:
+    if "--init" in sys.argv:
+        seed_init()
+    elif "--minimal" in sys.argv:
         seed_minimal()
     else:
         seed()

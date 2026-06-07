@@ -28,9 +28,10 @@ services:
     depends_on:
       db:
         condition: service_healthy
-    # Apply migrations, then serve.
+    # Apply migrations, bootstrap admin user on first run (idempotent), then serve.
     command: >
       sh -c "alembic upgrade head &&
+             python -m central.seed --init &&
              uvicorn central.main:app --host 0.0.0.0 --port 8000"
 
   worker:
