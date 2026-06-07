@@ -1,0 +1,46 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        # 3.9 proves the runtime-compat floor; 3.12 is the Docker runtime.
+        python-version: ["3.9", "3.12"]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+      - name: Install
+        run: |
+          python -m pip install --upgrade pip
+          pip install -e ".[dev,agent]"
+      - name: Lint (ruff)
+        run: ruff check central agent tests scripts migrations
+      - name: Test (pytest)
+        run: pytest -q
+      - name: Migrations apply + reverse (SQLite)
+        run: |
+          DATABASE_URL="sqlite:///./_ci.sqlite3" alembic upgrade head
+          DATABASE_URL="sqlite:///./_ci.sqlite3" alembic downgrade base
+
+  agent-standalone:
+    # The agent package must install on its own, with no central dependency.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: |
+          python -m pip install --upgrade pip
+          pip install ./agent
+          printer-nanny-agent --version
+          python -c "import printer_nanny_agent.poller, printer_nanny_agent.runner"
