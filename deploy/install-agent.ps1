@@ -239,8 +239,10 @@ if (($PipSource -like 'git+*') -and -not (Get-Command git -ErrorAction SilentlyC
 }
 
 Write-Host "==> installing printer-nanny-agent (pip source: $PipSource)"
-& $pip install --quiet --upgrade pip
-if ($LASTEXITCODE -ne 0) { throw "pip self-upgrade failed (exit $LASTEXITCODE)" }
+# Skip `pip install --upgrade pip`: on Windows pip.exe is a launcher held open
+# while executing and can't replace itself ("ERROR: To modify pip, please run
+# the following command: python.exe -m pip install --upgrade pip"). Whatever
+# pip ships with Python 3.10+ installs the agent fine; no upgrade needed.
 # --force-reinstall on the agent itself so a same-version upgrade still replaces
 # code on disk; --no-deps keeps httpx/pysnmp from being rebuilt each time.
 & $pip install --quiet --upgrade --force-reinstall --no-deps $PipSource
