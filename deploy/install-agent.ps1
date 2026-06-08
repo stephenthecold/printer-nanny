@@ -219,13 +219,38 @@ if (-not (Test-Path $venvPython)) {
 $pip = Join-Path $venv "Scripts\pip.exe"
 $agentExe = Join-Path $venv "Scripts\printer-nanny-agent.exe"
 
+# --- Ensure git is on PATH (pip needs it for `git+https://` PipSource) ---
+# Server 2022 doesn't ship git; without this, every pip install line above
+# silently fails with "Cannot find command 'git'" and the agent never installs.
+if (($PipSource -like 'git+*') -and -not (Get-Command git -ErrorAction SilentlyContinue)) {
+    Write-Host "==> git not found; auto-installing via winget"
+    if (-not (Get-Command winget -ErrorAction SilentlyContinue)) {
+        throw "git is required for pip source '$PipSource' but winget is unavailable. Install Git for Windows from https://git-scm.com/download/win and re-run."
+    }
+    & winget install Git.Git -e --silent --accept-source-agreements --accept-package-agreements
+    if ($LASTEXITCODE -ne 0 -and $LASTEXITCODE -ne -1978335135) {
+        throw "winget install Git.Git failed (exit $LASTEXITCODE)."
+    }
+    $env:Path = [Environment]::GetEnvironmentVariable("Path", "Machine") + ";" +
+                [Environment]::GetEnvironmentVariable("Path", "User")
+    if (-not (Get-Command git -ErrorAction SilentlyContinue)) {
+        throw "git auto-install reported success but git is still not on PATH. Open a NEW elevated PowerShell window and re-run."
+    }
+}
+
 Write-Host "==> installing printer-nanny-agent (pip source: $PipSource)"
 & $pip install --quiet --upgrade pip
+if ($LASTEXITCODE -ne 0) { throw "pip self-upgrade failed (exit $LASTEXITCODE)" }
 # --force-reinstall on the agent itself so a same-version upgrade still replaces
 # code on disk; --no-deps keeps httpx/pysnmp from being rebuilt each time.
 & $pip install --quiet --upgrade --force-reinstall --no-deps $PipSource
+if ($LASTEXITCODE -ne 0) { throw "pip install $PipSource failed (exit $LASTEXITCODE). If the pip output above mentions 'Cannot find command git', git auto-install did not take effect; open a NEW elevated PowerShell and re-run." }
 # Re-install once more without force, to pull deps if they were missing on first run.
 & $pip install --quiet --upgrade $PipSource
+if ($LASTEXITCODE -ne 0) { throw "pip install (deps pass) failed (exit $LASTEXITCODE)" }
+if (-not (Test-Path $agentExe)) {
+    throw "pip install completed without error but $agentExe does not exist. PipSource may not register the printer-nanny-agent console script."
+}
 
 # --- Write config ---
 $cfgPath = Join-Path $ConfigDir "agent.toml"
@@ -252,17 +277,34 @@ Set-Acl -Path $cfgPath -AclObject $acl
 Write-Host "==> wrote $cfgPath (restricted to SYSTEM + Administrators)"
 
 # --- Ensure NSSM is present ---
+# Pulled from the central server (which mirrors it from nssm.cc once and caches
+# locally), NOT from nssm.cc directly - nssm.cc returns 503 intermittently and
+# the architecture promise is that agents reach only central. Central handles
+# upstream outages by serving its cached copy.
 $nssm = Join-Path $InstallDir "nssm.exe"
 if (-not (Test-Path $nssm)) {
-    Write-Host "==> downloading NSSM (Windows service wrapper) ..."
-    $nssmZip = Join-Path $env:TEMP "nssm-2.24.zip"
-    $nssmDir = Join-Path $env:TEMP "nssm-pn"
-    Invoke-WebRequest -Uri "https://nssm.cc/release/nssm-2.24.zip" -OutFile $nssmZip -UseBasicParsing
-    if (Test-Path $nssmDir) { Remove-Item -Recurse -Force $nssmDir }
-    Expand-Archive -Path $nssmZip -DestinationPath $nssmDir -Force
-    $arch = if ([Environment]::Is64BitOperatingSystem) { "win64" } else { "win32" }
-    Copy-Item (Join-Path $nssmDir "nssm-2.24\$arch\nssm.exe") $nssm -Force
-    Remove-Item -Recurse -Force $nssmDir, $nssmZip
+    Write-Host "==> downloading NSSM from central (Windows service wrapper)"
+    $arch = if ([Environment]::Is64BitOperatingSystem) { "x64" } else { "x86" }
+    $nssmUrl = "$CentralUrl/install-agent-nssm.exe?arch=$arch"
+    $lastErr = $null
+    foreach ($attempt in 1..3) {
+        try {
+            Invoke-WebRequest -Uri $nssmUrl -OutFile $nssm -UseBasicParsing
+            $lastErr = $null
+            break
+        } catch {
+            $lastErr = $_
+            Write-Host "    attempt $attempt failed: $($_.Exception.Message)"
+            Start-Sleep -Seconds (2 * $attempt)
+        }
+    }
+    if ($lastErr) {
+        throw "NSSM download from $nssmUrl failed after 3 attempts: $($lastErr.Exception.Message). If central just started, it may not have populated its NSSM cache yet -- check central's logs for 'populating NSSM cache' or 'nssm mirror download failed'."
+    }
+    if ((Get-Item $nssm).Length -lt 50000) {
+        Remove-Item -Force $nssm
+        throw "NSSM download returned a suspiciously small file (likely an HTML error). Check $nssmUrl in a browser."
+    }
 }
 
 # --- Run selftest before registering the service ---
