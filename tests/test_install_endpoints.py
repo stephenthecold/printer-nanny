@@ -1,4 +1,4 @@
-"""Public installer endpoints — served unauthenticated so curl/iwr can fetch them."""
+"""Public installer endpoints - served unauthenticated so curl/iwr can fetch them."""
 
 from __future__ import annotations
 
@@ -15,7 +15,7 @@ def test_install_agent_sh_served():
     assert "#!/usr/bin/env bash" in r.text
     assert "Printer Nanny" in r.text
     # Auto-installs python3-venv via the available package manager rather than
-    # bailing with a "you need to apt install …" hint. Operators should never
+    # bailing with a "you need to apt install ..." hint. Operators should never
     # need to know the package name.
     assert "apt-get" in r.text
     assert "dnf" in r.text
@@ -34,13 +34,29 @@ def test_install_agent_ps1_served():
     assert "nssm" in r.text.lower()  # NSSM is what wraps the service
     # The PS1 must mention the required Python version so the error is searchable.
     assert "Python 3.10" in r.text
-    # Must probe Python via PEP 514 registry, not just PATH — winget --silent
+    # Must probe Python via PEP 514 registry, not just PATH - winget --silent
     # installs leave PATH unrefreshed in the current shell, and an operator with
     # Python correctly installed should NOT see "Python not found".
     assert "HKLM:\\SOFTWARE\\Python\\PythonCore" in r.text
     # PN_PYTHON_EXE escape hatch for non-standard install locations.
     assert "PN_PYTHON_EXE" in r.text
-    # Auto-installs Python via winget when missing rather than throwing — the
+    # Auto-installs Python via winget when missing rather than throwing - the
     # whole point of the install one-liner is the operator doesn't need to do
     # a prerequisite step first.
     assert "winget install Python.Python.3.12" in r.text
+
+
+def test_install_scripts_are_ascii_only():
+    """PowerShell 5.1 reads .ps1 files as Windows-1252 by default when there's
+    no BOM, so a UTF-8 em-dash decodes as garbage and breaks the parser at every
+    comment line that uses it (real failure reported on Server 2022). Strip
+    non-ASCII from both installers so encoding can never break parsing again,
+    regardless of how the file is transferred, saved, or re-encoded."""
+    cli = TestClient(app)
+    for path in ("/install-agent.sh", "/install-agent.ps1"):
+        r = cli.get(path)
+        assert r.status_code == 200, path
+        bad = sorted({c for c in r.text if ord(c) > 127})
+        assert not bad, (
+            f"{path} contains non-ASCII chars that will break PowerShell 5.1: {bad!r}"
+        )
