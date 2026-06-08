@@ -22,7 +22,7 @@ _POLL_CONCURRENCY = 16
 
 
 def _due(last: Optional[float], interval: float, now: float) -> bool:
-    """True if an action is due. last=None means 'never run' → due immediately,
+    """True if an action is due. last=None means 'never run' -> due immediately,
     independent of the monotonic clock's epoch (not zero-based on all platforms)."""
     return last is None or (now - last) >= interval
 
@@ -105,7 +105,7 @@ async def poll_one_target(
         return {"polled": 1, "applied": 0, "unreachable": 1}
     result = await client.post_readings([reading])
     applied = result.get("applied", 0)
-    log.info("poll_printer %s → applied=%d", ip, applied)
+    log.info("poll_printer %s -> applied=%d", ip, applied)
     return {"polled": 1, "applied": applied, "unreachable": 0}
 
 
@@ -128,7 +128,15 @@ async def handle_commands(
                 log.warning("poll_printer command #%s missing 'ip' in payload", cmd.get("id"))
         elif ctype == "update_config":
             # Config is file-managed; log and rely on the operator/automation to apply.
-            log.info("update_config requested (payload: %s) — apply via config file", cmd.get("payload"))
+            log.info("update_config requested (payload: %s) -- apply via config file", cmd.get("payload"))
+        elif ctype == "update_agent":
+            # Self-update: pip install the new agent package then exit so the
+            # service manager (systemd / NSSM) restarts us against the
+            # freshly-installed code. Imported lazily so unit tests that don't
+            # exercise update don't pull in subprocess/asyncio machinery.
+            from printer_nanny_agent.updater import perform_self_update
+            payload = cmd.get("payload") or {}
+            await perform_self_update(payload.get("pip_source"))
         else:
             log.warning("unknown command type: %s", ctype)
 
@@ -163,7 +171,7 @@ async def run_forever(config: AgentConfig, backend: Optional[SnmpBackend] = None
     last_poll = None
     last_discovery = None
     effective = config
-    log.info("agent %d started → %s", config.agent_id, config.central_url)
+    log.info("agent %d started -> %s", config.agent_id, config.central_url)
     try:
         while True:
             now = time.monotonic()
