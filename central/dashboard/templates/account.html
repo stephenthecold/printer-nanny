@@ -1,0 +1,40 @@
+{% extends "base.html" %}
+{% block title %}My account · {{ app.name or 'Printer Nanny' }}{% endblock %}
+{% block body %}
+<h1 class="text-2xl font-semibold mb-4">My account</h1>
+
+{% if error %}
+<div class="mb-4 rounded bg-red-50 border border-red-200 text-red-700 text-sm px-3 py-2">{{ error }}</div>
+{% endif %}
+
+<div class="grid md:grid-cols-2 gap-6">
+  <section class="bg-white rounded-lg shadow p-5">
+    <h2 class="font-semibold mb-3">Profile</h2>
+    <dl class="text-sm space-y-1">
+      <div class="flex gap-2"><dt class="text-slate-500 w-32">Username</dt><dd>{{ user.username }}</dd></div>
+      <div class="flex gap-2"><dt class="text-slate-500 w-32">Email</dt><dd>{{ user.email or '—' }}</dd></div>
+      <div class="flex gap-2"><dt class="text-slate-500 w-32">Role</dt><dd>{{ user.role.value }}</dd></div>
+      <div class="flex gap-2"><dt class="text-slate-500 w-32">Auth</dt><dd>{{ user.auth_provider }}</dd></div>
+    </dl>
+  </section>
+
+  <section class="bg-white rounded-lg shadow p-5">
+    <h2 class="font-semibold mb-3">Change password</h2>
+    {% if user.auth_provider == 'local' and user.password_hash %}
+    <form method="post" action="/account/password" class="space-y-2">
+      <input name="current_password" type="password" placeholder="Current password" required
+             class="w-full border rounded px-3 py-2 text-sm" />
+      <input name="new_password" type="password" placeholder="New password (min 8 chars)" required
+             class="w-full border rounded px-3 py-2 text-sm" />
+      <input name="confirm_password" type="password" placeholder="Confirm new password" required
+             class="w-full border rounded px-3 py-2 text-sm" />
+      <button class="bg-slate-900 text-white rounded px-4 py-2 text-sm font-medium">Change password</button>
+    </form>
+    {% else %}
+    <p class="text-sm text-slate-500">
+      You signed in via SSO — change your password with your identity provider.
+    </p>
+    {% endif %}
+  </section>
+</div>
+{% endblock %}

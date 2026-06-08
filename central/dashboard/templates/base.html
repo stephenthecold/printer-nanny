@@ -7,28 +7,47 @@
   <script src="https://cdn.tailwindcss.com"></script>
   <script src="https://unpkg.com/htmx.org@1.9.12"></script>
 </head>
-<body class="h-full text-slate-800">
+<body class="h-full text-slate-800 flex flex-col">
 {% if user %}
-<nav class="bg-slate-900 text-slate-100">
+<nav class="text-slate-100" style="background-color: {{ app.primary_color or '#0f172a' }};">
   <div class="max-w-7xl mx-auto px-4 flex items-center gap-6 h-14">
-    <a href="/" class="font-semibold text-lg">🖨️ Printer&nbsp;Nanny</a>
+    <a href="/" class="font-semibold text-lg flex items-center gap-2">
+      {% if app.logo_url %}<img src="{{ app.logo_url }}" alt="" class="h-7 w-auto" />
+      {% else %}🖨️{% endif %}
+      <span>{{ app.name or 'Printer Nanny' }}</span>
+    </a>
     <a href="/" class="hover:text-white/80 text-sm">Overview</a>
     <a href="/manage" class="hover:text-white/80 text-sm">Manage</a>
     <a href="/manage/agents" class="hover:text-white/80 text-sm">Agents</a>
     <a href="/approvals" class="hover:text-white/80 text-sm">Approvals</a>
     <a href="/alerts" class="hover:text-white/80 text-sm">Alerts</a>
-    {% if user.role.value == 'admin' %}<a href="/settings" class="hover:text-white/80 text-sm">Settings</a>{% endif %}
-    <span class="ml-auto text-sm text-slate-400">{{ user.username }} ({{ user.role.value }})</span>
+    {% if user.role.value == 'admin' %}
+    <a href="/manage/users" class="hover:text-white/80 text-sm">Users</a>
+    <a href="/settings" class="hover:text-white/80 text-sm">Settings</a>
+    {% endif %}
+    <a href="/account" class="ml-auto text-sm text-slate-300 hover:text-white">{{ user.username }} ({{ user.role.value }})</a>
     <a href="/logout" class="text-sm text-slate-300 hover:text-white">Logout</a>
   </div>
 </nav>
 {% endif %}
-<main class="max-w-7xl mx-auto px-4 py-6">
+<main class="max-w-7xl mx-auto px-4 py-6 flex-1 w-full">
   {% if flash %}
   <div class="mb-4 rounded bg-emerald-50 border border-emerald-200 text-emerald-800 text-sm px-3 py-2">{{ flash }}</div>
   {% endif %}
   {% block body %}{% endblock %}
 </main>
+{# 'app is defined' keeps this safe when base.html is loaded as a module
+   for {% from "base.html" import ... %} elsewhere — module imports don't carry context. #}
+{% if app is defined and (app.support_email or app.footer_text) %}
+<footer class="border-t bg-white text-xs text-slate-500">
+  <div class="max-w-7xl mx-auto px-4 py-3 flex items-center gap-4 flex-wrap">
+    {% if app.footer_text %}<span>{{ app.footer_text }}</span>{% endif %}
+    {% if app.support_email %}
+    <span class="ml-auto">Support: <a href="mailto:{{ app.support_email }}" class="text-sky-700 hover:underline">{{ app.support_email }}</a></span>
+    {% endif %}
+  </div>
+</footer>
+{% endif %}
 </body>
 </html>
 

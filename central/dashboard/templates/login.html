@@ -1,8 +1,12 @@
 {% extends "base.html" %}
-{% block title %}Sign in · Printer Nanny{% endblock %}
+{% block title %}Sign in · {{ app.name or 'Printer Nanny' }}{% endblock %}
 {% block body %}
 <div class="max-w-sm mx-auto mt-16 bg-white rounded-lg shadow p-6">
-  <h1 class="text-xl font-semibold mb-1">🖨️ Printer Nanny</h1>
+  <h1 class="text-xl font-semibold mb-1 flex items-center gap-2">
+    {% if app.logo_url %}<img src="{{ app.logo_url }}" alt="" class="h-7 w-auto" />
+    {% else %}🖨️{% endif %}
+    <span>{{ app.name or 'Printer Nanny' }}</span>
+  </h1>
   <p class="text-sm text-slate-500 mb-5">Sign in to the fleet console</p>
   {% if error %}<p class="text-sm text-red-600 mb-3">{{ error }}</p>{% endif %}
   {% if sso_error %}<p class="text-sm text-amber-600 mb-3">SSO sign-in failed: {{ sso_error }}</p>{% endif %}
@@ -17,6 +21,10 @@
            class="w-full border rounded px-3 py-2 text-sm" />
     <button class="w-full bg-slate-900 text-white rounded py-2 text-sm font-medium">Sign in</button>
   </form>
-  <p class="text-xs text-slate-400 mt-4">Demo login: admin / admin</p>
 </div>
+{% if app.support_email %}
+<p class="text-center text-xs text-slate-400 mt-3">
+  Trouble signing in? <a href="mailto:{{ app.support_email }}" class="text-sky-700 hover:underline">{{ app.support_email }}</a>
+</p>
+{% endif %}
 {% endblock %}

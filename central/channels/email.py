@@ -21,7 +21,8 @@ class EmailChannel(NotificationChannel):
 
     def build_message(self, note: Notification) -> EmailMessage:
         msg = EmailMessage()
-        msg["Subject"] = f"[Printer Nanny][{note.severity.upper()}] {note.title}"
+        app_name = self.setting("app.name", "Printer Nanny") or "Printer Nanny"
+        msg["Subject"] = f"[{app_name}][{note.severity.upper()}] {note.title}"
         msg["From"] = self.config.get("from") or self.setting("smtp.from")
         msg["To"] = ", ".join(self._recipients())
         lines = [note.body, ""]

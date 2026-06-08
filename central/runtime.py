@@ -32,6 +32,17 @@ class Spec:
 
 
 SPECS: List[Spec] = [
+    # Branding / white-label (Settings page auto-renders this section)
+    Spec("app.name", "str", "Branding", "App name", "Printer Nanny",
+         "Replaces 'Printer Nanny' in the nav, login page, and alert email subjects"),
+    Spec("app.logo_url", "str", "Branding", "Logo URL", "",
+         "Optional URL to a logo image; falls back to the 🖨️ emoji"),
+    Spec("app.primary_color", "str", "Branding", "Primary color", "#0f172a",
+         "CSS color used for the top nav bar (e.g. #0f172a, rgb(15,23,42))"),
+    Spec("app.support_email", "str", "Branding", "Support email", "",
+         "Shown in the footer to all roles (especially client_readonly)"),
+    Spec("app.footer_text", "str", "Branding", "Footer text", "",
+         "Optional line of text shown in the footer alongside the support email"),
     # Email (SMTP)
     Spec("email.enabled", "bool", "Email (SMTP)", "Send email on alerts", False),
     Spec("email.default_recipients", "str", "Email (SMTP)", "Alert recipients",
@@ -139,6 +150,20 @@ def save_settings(db: Session, form: Dict[str, Any]) -> None:
         else:
             row.value = value
     db.commit()
+
+
+def app_branding(db: Session) -> Dict[str, Any]:
+    """White-label settings for templates: ``{"name", "logo_url", "primary_color", …}``.
+
+    Single query per render so the nav, login page, and footer can stay
+    operator-controlled without each template knowing about ``runtime``.
+    """
+    full = load_settings(db)
+    return {
+        key.split(".", 1)[1]: value
+        for key, value in full.items()
+        if key.startswith("app.")
+    }
 
 
 def masked_for_form(values: Dict[str, Any]) -> Dict[str, Any]:

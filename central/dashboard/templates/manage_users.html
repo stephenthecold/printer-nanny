@@ -1,0 +1,69 @@
+{% extends "base.html" %}
+{% block title %}Users · {{ app.name or 'Printer Nanny' }}{% endblock %}
+{% block body %}
+<h1 class="text-2xl font-semibold mb-4">Users</h1>
+
+<div class="grid md:grid-cols-3 gap-6">
+  <section class="md:col-span-2 bg-white rounded-lg shadow overflow-hidden">
+    <table class="w-full text-sm">
+      <thead class="text-left text-slate-500 bg-slate-50">
+        <tr>
+          <th class="px-4 py-2">Username</th>
+          <th class="py-2">Email</th>
+          <th class="py-2">Role</th>
+          <th class="py-2">Client</th>
+          <th class="py-2">Auth</th>
+          <th class="py-2 text-right pr-4"></th>
+        </tr>
+      </thead>
+      <tbody>
+      {% for u in users %}
+        <tr class="border-t">
+          <td class="px-4 py-2 font-medium">{{ u.username }}</td>
+          <td class="py-2 text-slate-500">{{ u.email or '—' }}</td>
+          <td class="py-2">
+            {% set badges = {'admin':'bg-red-100 text-red-800','tech':'bg-sky-100 text-sky-800','client_readonly':'bg-slate-200 text-slate-700'} %}
+            <span class="px-2 py-0.5 rounded text-xs font-medium {{ badges.get(u.role.value, 'bg-slate-100') }}">{{ u.role.value }}</span>
+          </td>
+          <td class="py-2 text-slate-500">
+            {% if u.role.value == 'client_readonly' and u.client_id %}
+              {% for c in clients if c.id == u.client_id %}{{ c.name }}{% endfor %}
+            {% else %}—{% endif %}
+          </td>
+          <td class="py-2 text-slate-500">{{ u.auth_provider }}</td>
+          <td class="py-2 text-right pr-4 space-x-2">
+            <a href="/manage/users/{{ u.id }}/edit" class="text-xs text-sky-700 hover:underline">Edit</a>
+            {% if u.id != user.id %}
+            <form method="post" action="/manage/users/{{ u.id }}/delete" class="inline"
+                  onsubmit="return confirm('Delete user {{ u.username }}?')">
+              <button class="text-xs text-red-600 hover:underline">Delete</button>
+            </form>
+            {% endif %}
+          </td>
+        </tr>
+      {% else %}
+        <tr><td class="px-4 py-3 text-slate-400" colspan="6">No users — seed data should have created an admin.</td></tr>
+      {% endfor %}
+      </tbody>
+    </table>
+  </section>
+
+  <section class="bg-white rounded-lg shadow p-4 h-fit">
+    <h2 class="font-semibold mb-3">Add user</h2>
+    <form method="post" action="/manage/users" class="space-y-2">
+      <input name="username" placeholder="Username" required class="w-full border rounded px-3 py-2 text-sm" />
+      <input name="email" type="email" placeholder="Email (optional)" class="w-full border rounded px-3 py-2 text-sm" />
+      <select name="role" class="w-full border rounded px-3 py-2 text-sm">
+        {% for r in roles %}<option value="{{ r }}" {% if r == 'tech' %}selected{% endif %}>{{ r }}</option>{% endfor %}
+      </select>
+      <select name="client_id" class="w-full border rounded px-3 py-2 text-sm">
+        <option value="">— Client (required for client_readonly) —</option>
+        {% for c in clients %}<option value="{{ c.id }}">{{ c.name }}</option>{% endfor %}
+      </select>
+      <input name="password" type="password" placeholder="Initial password (blank = SSO-only)"
+             class="w-full border rounded px-3 py-2 text-sm" />
+      <button class="w-full bg-slate-900 text-white rounded py-2 text-sm font-medium">Add user</button>
+    </form>
+  </section>
+</div>
+{% endblock %}
