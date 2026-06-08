@@ -14,6 +14,13 @@ def test_install_agent_sh_served():
     assert r.headers["content-type"].startswith("text/x-shellscript")
     assert "#!/usr/bin/env bash" in r.text
     assert "Printer Nanny" in r.text
+    # Auto-installs python3-venv via the available package manager rather than
+    # bailing with a "you need to apt install …" hint. Operators should never
+    # need to know the package name.
+    assert "apt-get" in r.text
+    assert "dnf" in r.text
+    assert "yum" in r.text
+    assert "python3-venv" in r.text
 
 
 def test_install_agent_ps1_served():
@@ -33,3 +40,7 @@ def test_install_agent_ps1_served():
     assert "HKLM:\\SOFTWARE\\Python\\PythonCore" in r.text
     # PN_PYTHON_EXE escape hatch for non-standard install locations.
     assert "PN_PYTHON_EXE" in r.text
+    # Auto-installs Python via winget when missing rather than throwing — the
+    # whole point of the install one-liner is the operator doesn't need to do
+    # a prerequisite step first.
+    assert "winget install Python.Python.3.12" in r.text

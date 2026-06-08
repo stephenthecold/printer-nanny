@@ -85,23 +85,36 @@ Write-Host "    agent   : #$AgentId"
 Write-Host "    install : $InstallDir"
 
 # --- Locate Python 3.10+ ---
-# winget's --silent install doesn't always update PATH in the current PowerShell
+# winget's --silent install doesn't refresh PATH in the current PowerShell
 # session, so probing `python` / `py` first will miss a perfectly good install.
 # PEP 514 says every Python registers itself in HKLM\SOFTWARE\Python\PythonCore
 # (or HKCU/WOW6432Node for per-user / 32-bit installs); that's the canonical
 # lookup and works regardless of PATH. Common install dirs are a final fallback.
+#
+# Returns a hashtable @{ Exe = "<path or command>"; PreArgs = @(...); Version = "X.Y" }.
+# PreArgs is empty for direct python.exe paths and @('-3') for the py launcher.
+function _ProbeVersion([string]$exe, [string[]]$preArgs) {
+    try {
+        $verRaw = & $exe @preArgs --version 2>&1
+        if ($verRaw -match 'Python\s+(\d+)\.(\d+)') {
+            $maj = [int]$Matches[1]; $min = [int]$Matches[2]
+            if ($maj -gt 3 -or ($maj -eq 3 -and $min -ge 10)) {
+                return @{ Exe = $exe; PreArgs = $preArgs; Version = "$maj.$min" }
+            }
+        }
+    } catch { }
+    return $null
+}
+
 function Find-Python {
     # Tier 1: PATH (cheapest when it works).
-    foreach ($candidate in @(@('py','-3'), @('python'), @('python3'))) {
-        try {
-            $verRaw = & $candidate[0] @($candidate[1..($candidate.Length-1)]) --version 2>&1
-            if ($verRaw -match 'Python\s+(\d+)\.(\d+)') {
-                $maj = [int]$Matches[1]; $min = [int]$Matches[2]
-                if ($maj -gt 3 -or ($maj -eq 3 -and $min -ge 10)) {
-                    return @{ Cmd = $candidate; Version = "$maj.$min" }
-                }
-            }
-        } catch { continue }
+    foreach ($entry in @(
+        @{ Exe = 'py'; PreArgs = @('-3') },
+        @{ Exe = 'python'; PreArgs = @() },
+        @{ Exe = 'python3'; PreArgs = @() }
+    )) {
+        $hit = _ProbeVersion $entry.Exe $entry.PreArgs
+        if ($hit) { return $hit }
     }
     # Tier 2: PEP 514 registry lookup — newest version first.
     $regBases = @(
@@ -129,7 +142,7 @@ function Find-Python {
     }
     if ($found.Count -gt 0) {
         $best = $found | Sort-Object -Property Maj, Min -Descending | Select-Object -First 1
-        return @{ Cmd = @($best.Exe); Version = $best.Version }
+        return @{ Exe = $best.Exe; PreArgs = @(); Version = $best.Version }
     }
     # Tier 3: well-known install paths as a last-ditch probe.
     foreach ($ver in @('312','311','310')) {
@@ -138,10 +151,8 @@ function Find-Python {
             "${env:ProgramFiles}\Python$ver\python.exe"
         )) {
             if (Test-Path $p) {
-                $verRaw = & $p --version 2>&1
-                if ($verRaw -match 'Python\s+(\d+)\.(\d+)') {
-                    return @{ Cmd = @($p); Version = "$($Matches[1]).$($Matches[2])" }
-                }
+                $hit = _ProbeVersion $p @()
+                if ($hit) { return $hit }
             }
         }
     }
@@ -152,25 +163,41 @@ if ($PythonExe) {
     if (-not (Test-Path $PythonExe)) { throw "PythonExe path does not exist: $PythonExe" }
     $verRaw = & $PythonExe --version 2>&1
     if ($verRaw -notmatch 'Python\s+(\d+)\.(\d+)') { throw "PythonExe is not a Python executable: $PythonExe" }
-    $py = @{ Cmd = @($PythonExe); Version = "$($Matches[1]).$($Matches[2])" }
+    $py = @{ Exe = $PythonExe; PreArgs = @(); Version = "$($Matches[1]).$($Matches[2])" }
 } else {
     $py = Find-Python
 }
 if (-not $py) {
-    throw @"
-Python 3.10+ is required and was not found (PATH, PEP 514 registry, and the
-standard install dirs were all checked).
-
-  1. winget install Python.Python.3.12 -e --silent
-  2. CLOSE this PowerShell window and open a NEW elevated one — winget --silent
-     does not refresh PATH in the existing session.
-  3. Re-run the install-agent.ps1 command.
-
-If Python is already installed but in a non-standard location, pass:
-    -PythonExe 'C:\path\to\python.exe'
+    Write-Host "==> Python 3.10+ not found; auto-installing via winget"
+    $winget = Get-Command winget -ErrorAction SilentlyContinue
+    if (-not $winget) {
+        throw @"
+Python 3.10+ was not found and winget is not available on this machine.
+Install Python 3.12 manually from https://www.python.org/downloads/windows/
+(check 'Add Python to PATH' during install), then re-run this script.
 "@
+    }
+    & winget install Python.Python.3.12 -e --silent --accept-source-agreements --accept-package-agreements
+    # winget returns 0 on fresh install, 0x8A150061 (-1978335135) when already installed and up to date.
+    if ($LASTEXITCODE -ne 0 -and $LASTEXITCODE -ne -1978335135) {
+        throw "winget install Python failed (exit $LASTEXITCODE). Install Python 3.12 manually from https://www.python.org/downloads/windows/"
+    }
+    # winget --silent doesn't refresh PATH in the current session — pull the
+    # updated machine + user PATH from the registry so we can find python.exe
+    # without forcing the operator to open a new shell.
+    $env:Path = [Environment]::GetEnvironmentVariable("Path", "Machine") + ";" +
+                [Environment]::GetEnvironmentVariable("Path", "User")
+    $py = Find-Python
+    if (-not $py) {
+        throw @"
+winget reported success but Python is still not findable.
+Open a NEW elevated PowerShell window (so PATH refreshes) and re-run the install command,
+or pass -PythonExe with the full path to python.exe.
+"@
+    }
 }
-Write-Host "==> using Python $($py.Version): $($py.Cmd -join ' ')"
+}
+Write-Host "==> using Python $($py.Version): $($py.Exe) $($py.PreArgs -join ' ')"
 
 # --- Create install dir + venv ---
 New-Item -ItemType Directory -Force -Path $InstallDir | Out-Null
@@ -183,7 +210,11 @@ if (-not (Test-Path $venvPython)) {
         Write-Host "    .venv exists but python is missing — recreating"
         Remove-Item -Recurse -Force $venv
     }
-    & $py.Cmd[0] @($py.Cmd[1..($py.Cmd.Length-1)]) -m venv $venv
+    # Splat PreArgs (empty array splats to nothing — no array-slice footgun).
+    & $py.Exe @($py.PreArgs) -m venv $venv
+    if ($LASTEXITCODE -ne 0 -or -not (Test-Path $venvPython)) {
+        throw "venv creation failed (exit $LASTEXITCODE). The Python at $($py.Exe) may be missing the venv module."
+    }
 }
 
 $pip = Join-Path $venv "Scripts\pip.exe"
