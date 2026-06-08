@@ -14,6 +14,8 @@ from printer_nanny_agent.snmp_parse import (
     supply_type_from_code,
 )
 from printer_nanny_agent.snmp import SnmpBackend, SnmpError, SnmpParams
+# Import providers package for its registry side-effect (Brother registers itself).
+from printer_nanny_agent.providers import run_providers
 
 # Vendor keywords matched (case-insensitively) in sysDescr / printer name.
 _VENDORS = [
@@ -239,7 +241,9 @@ async def poll_printer(backend: SnmpBackend, ip: str, params: SnmpParams) -> dic
 
     Raises SnmpError if the device doesn't answer the scalar GET.
     """
-    scalars = await backend.get(ip, _SCALAR_OIDS, params)
+    # sysObjectID is fetched alongside the standard scalars so vendor providers
+    # can detect by enterprise number without a second GET round-trip.
+    scalars = await backend.get(ip, _SCALAR_OIDS + [oids.SYS_OBJECT_ID], params)
     supply_walks: Dict[str, Dict[str, str]] = {}
     for base in _SUPPLY_BASES:
         try:
@@ -252,4 +256,5 @@ async def poll_printer(backend: SnmpBackend, ip: str, params: SnmpParams) -> dic
             alert_walks[base] = await backend.walk(ip, base, params)
         except SnmpError:
             alert_walks[base] = {}
-    return build_reading(ip, scalars, supply_walks, alert_walk=alert_walks)
+    reading = build_reading(ip, scalars, supply_walks, alert_walk=alert_walks)
+    return await run_providers(backend, ip, params, reading, scalars.get(oids.SYS_OBJECT_ID))

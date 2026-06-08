@@ -27,8 +27,12 @@ Repository = "https://github.com/stephenthecold/printer-nanny"
 requires = ["setuptools>=68"]
 build-backend = "setuptools.build_meta"
 
-[tool.setuptools]
-packages = ["printer_nanny_agent"]
+# Use find so future subpackages (providers/, etc.) get picked up
+# automatically -- the previous explicit packages=["printer_nanny_agent"]
+# silently dropped any subpackage, which broke when the providers/ plugin
+# layer landed.
+[tool.setuptools.packages.find]
+include = ["printer_nanny_agent*"]
 
 [tool.setuptools.package-data]
 printer_nanny_agent = ["agent.example.toml"]
