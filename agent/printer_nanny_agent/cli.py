@@ -3,6 +3,7 @@
   printer-nanny-agent run [--once]      # main loop (or one cycle)
   printer-nanny-agent poll <ip>         # poll one printer over SNMP, print JSON
   printer-nanny-agent discover          # sweep configured subnets, print devices
+  printer-nanny-agent probe <ip>        # raw SNMP probe of one host (diagnostics)
   printer-nanny-agent selftest          # verify connectivity to central
 """
 
@@ -15,12 +16,13 @@ import logging
 import sys
 from typing import Optional
 
-from printer_nanny_agent import __version__
+from printer_nanny_agent import __version__, oids
 from printer_nanny_agent.client import CentralClient
 from printer_nanny_agent.config import AgentConfig, load_config
 from printer_nanny_agent.discovery import discover_subnet
 from printer_nanny_agent.poller import poll_printer
 from printer_nanny_agent.runner import run_forever, run_once
+from printer_nanny_agent.snmp import SnmpError
 
 
 def _setup_logging(verbose: bool) -> None:
@@ -59,6 +61,46 @@ async def _cmd_discover(config: AgentConfig) -> int:
         await backend.close()
 
 
+async def _cmd_probe(config: AgentConfig, ip: str) -> int:
+    """Dump raw SNMP responses for one host — the diagnostic operators paste into
+    a support thread when "discovery finds nothing" turns out to be specific to
+    a printer that doesn't expose the OIDs we expect."""
+    backend = _backend()
+    p = config.snmp
+    print(
+        f"probing {ip}  community={p.community!r}  v{p.version}  "
+        f"port={p.port}  timeout={p.timeout}s  retries={p.retries}"
+    )
+    try:
+        try:
+            ident = await backend.get(
+                ip, [oids.SYS_DESCR, oids.SYS_NAME, oids.SYS_OBJECT_ID], p
+            )
+        except SnmpError as exc:
+            print(f"  identity GET failed: {exc}", file=sys.stderr)
+            return 1
+        for oid in (oids.SYS_DESCR, oids.SYS_NAME, oids.SYS_OBJECT_ID):
+            print(f"  GET  {oid}\n         = {ident.get(oid)!r}")
+        for label, base in (
+            ("prtGeneralPrinterName", oids.PRT_GENERAL_PRINTER_NAME_BASE),
+            ("prtGeneralSerialNumber", oids.PRT_GENERAL_SERIAL_NUMBER_BASE),
+            ("hrDeviceDescr", oids.HR_DEVICE_DESCR_BASE),
+        ):
+            try:
+                rows = await backend.walk(ip, base, p)
+            except SnmpError as exc:
+                print(f"  WALK {label}: error {exc}")
+                continue
+            if not rows:
+                print(f"  WALK {label}: (empty — this printer does not expose it)")
+                continue
+            for oid, value in rows.items():
+                print(f"  WALK {label}  {oid}\n         = {value!r}")
+        return 0
+    finally:
+        await backend.close()
+
+
 async def _cmd_selftest(config: AgentConfig) -> int:
     client = CentralClient(
         config.central_url, config.agent_id, config.api_key, verify_tls=config.verify_tls
@@ -92,6 +134,10 @@ def main(argv: Optional[list] = None) -> int:
     poll_p = sub.add_parser("poll", help="poll one printer and print its reading")
     poll_p.add_argument("ip")
     sub.add_parser("discover", help="sweep configured subnets and print devices")
+    probe_p = sub.add_parser(
+        "probe", help="dump raw SNMP responses for one host (diagnostics)"
+    )
+    probe_p.add_argument("ip")
     sub.add_parser("selftest", help="check connectivity to the central server")
 
     args = parser.parse_args(argv)
@@ -120,6 +166,8 @@ def main(argv: Optional[list] = None) -> int:
         return asyncio.run(_cmd_poll(config, args.ip))
     if args.command == "discover":
         return asyncio.run(_cmd_discover(config))
+    if args.command == "probe":
+        return asyncio.run(_cmd_probe(config, args.ip))
     if args.command == "selftest":
         return asyncio.run(_cmd_selftest(config))
     return 2
