@@ -25,10 +25,15 @@ services:
       FREESCOUT_API_KEY: ${FREESCOUT_API_KEY:-}
       SMTP_HOST: ${SMTP_HOST:-mailhog}
       SMTP_PORT: ${SMTP_PORT:-1025}
+      # Cache for the NSSM mirror (and other agent install artifacts). Persisted
+      # so the upstream download only happens once per central server.
+      PN_CACHE_DIR: /var/lib/printer-nanny/cache
     # Exposed on the host so an external reverse proxy (your own Caddy / Nginx /
     # Traefik) can point at it. The bundled `caddy` service below is opt-in.
     ports:
       - "${API_PORT:-8000}:8000"
+    volumes:
+      - installer_cache:/var/lib/printer-nanny/cache
     depends_on:
       db:
         condition: service_healthy
@@ -103,3 +108,4 @@ volumes:
   pgdata:
   caddy_data:
   caddy_config:
+  installer_cache:
