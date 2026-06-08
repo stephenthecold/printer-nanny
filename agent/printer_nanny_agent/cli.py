@@ -62,7 +62,7 @@ async def _cmd_discover(config: AgentConfig) -> int:
 
 
 async def _cmd_probe(config: AgentConfig, ip: str) -> int:
-    """Dump raw SNMP responses for one host — the diagnostic operators paste into
+    """Dump raw SNMP responses for one host -- the diagnostic operators paste into
     a support thread when "discovery finds nothing" turns out to be specific to
     a printer that doesn't expose the OIDs we expect."""
     backend = _backend()
@@ -92,10 +92,44 @@ async def _cmd_probe(config: AgentConfig, ip: str) -> int:
                 print(f"  WALK {label}: error {exc}")
                 continue
             if not rows:
-                print(f"  WALK {label}: (empty — this printer does not expose it)")
+                print(f"  WALK {label}: (empty -- this printer does not expose it)")
                 continue
             for oid, value in rows.items():
                 print(f"  WALK {label}  {oid}\n         = {value!r}")
+        # Vendor-specific private MIB dump. Standard Printer-MIB reports many
+        # printers' toner level as -3 (some remaining) because the cartridge has
+        # no continuous sensor; the real percentages live under the vendor's
+        # private enterprise OID. Walk that subtree so we can build a
+        # vendor-specific parser from what THIS printer actually exposes.
+        sys_oid = ident.get(oids.SYS_OBJECT_ID) or ""
+        # pysnmp pretty-prints "SNMPv2-SMI::enterprises.2435.2.3.9.1"; pull the
+        # enterprise number so we don't have to guess the rendered form.
+        for vendor_prefix, (vendor_name, mib_root) in (
+            ("2435", ("Brother", "1.3.6.1.4.1.2435.2.3.9")),
+            ("11.",  ("HP",      "1.3.6.1.4.1.11.2.3.9.4.2.1.5")),
+            ("641",  ("Lexmark", "1.3.6.1.4.1.641.2.1")),
+            ("1602", ("Canon",   "1.3.6.1.4.1.1602.1.11.1.3")),
+            ("1347", ("Kyocera", "1.3.6.1.4.1.1347.43")),
+            ("367",  ("Ricoh",   "1.3.6.1.4.1.367.3.2.1.2.24")),
+            ("236",  ("Samsung", "1.3.6.1.4.1.236.11.5.11")),
+            ("253",  ("Xerox",   "1.3.6.1.4.1.253.8.53.13")),
+        ):
+            # Match on enterprises.<vendor>. so HP (11) doesn't gobble Brother (2435).
+            if f"enterprises.{vendor_prefix}" not in sys_oid and \
+               f".1.3.6.1.4.1.{vendor_prefix}" not in sys_oid:
+                continue
+            print(f"\n  -- {vendor_name} private MIB ({mib_root}) --")
+            try:
+                rows = await backend.walk(ip, mib_root, p)
+            except SnmpError as exc:
+                print(f"  WALK {vendor_name}: error {exc}")
+                break
+            if not rows:
+                print(f"  WALK {vendor_name}: (empty)")
+                break
+            for oid, value in rows.items():
+                print(f"  {oid} = {value!r}")
+            break
         return 0
     finally:
         await backend.close()
@@ -107,10 +141,10 @@ async def _cmd_selftest(config: AgentConfig) -> int:
     )
     try:
         result = await client.heartbeat(__version__)
-        print(f"OK — central reachable, agent '{result.get('name')}' (id {config.agent_id})")
+        print(f"OK -- central reachable, agent '{result.get('name')}' (id {config.agent_id})")
         return 0
     except Exception as exc:  # noqa: BLE001
-        print(f"FAILED — {type(exc).__name__}: {exc}", file=sys.stderr)
+        print(f"FAILED -- {type(exc).__name__}: {exc}", file=sys.stderr)
         return 1
     finally:
         await client.aclose()
@@ -119,7 +153,7 @@ async def _cmd_selftest(config: AgentConfig) -> int:
 def main(argv: Optional[list] = None) -> int:
     parser = argparse.ArgumentParser(prog="printer-nanny-agent")
     parser.add_argument("--config", help="path to agent.toml (optional)")
-    # Config can come entirely from flags/env — no file needed (used by the installer).
+    # Config can come entirely from flags/env -- no file needed (used by the installer).
     parser.add_argument("--central-url", help="central server base URL (or $PN_CENTRAL_URL)")
     parser.add_argument("--agent-id", type=int, help="agent id (or $PN_AGENT_ID)")
     parser.add_argument("--api-key", help="agent API key (or $PN_API_KEY)")
