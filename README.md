@@ -123,6 +123,31 @@ server {
 }
 ```
 
+## Security: keep agent ↔ central traffic on TLS
+
+Agents push readings and pull commands over the public API on every heartbeat,
+so **always front the central server with HTTPS** — either via the bundled
+Caddy + Let's Encrypt (`--proxy bundled` during install) or your own reverse
+proxy with a real cert.
+
+- The agent installer call should use the **HTTPS** URL:
+  ```bash
+  curl -fsSL https://printers.msp.example.com/install-agent.sh | sudo bash -s -- \
+      --central-url https://printers.msp.example.com --agent-id 12 --api-key pn_xxxxx
+  ```
+- The agent's `--verify-tls true` default rejects self-signed / invalid certs
+  unless explicitly turned off. **Don't pass `--verify-tls false`** unless
+  you're testing against a local dev cert — the API key is the only secret
+  protecting the ingest endpoint, and a downgrade to plain HTTP leaks it.
+- The central app honors `X-Forwarded-Proto` from the reverse proxy via
+  `ProxyHeadersMiddleware`, so the install command rendered on
+  `/manage/agents` automatically uses `https://` when you access the
+  dashboard via TLS.
+- For extra safety pin **Settings → Branding → Public URL** to your
+  canonical HTTPS hostname (e.g. `https://printers.msp.example.com`). The
+  Agents page then renders that hostname regardless of how the dashboard
+  itself was reached.
+
 ## Quick start — local (SQLite, no Docker)
 
 ```bash

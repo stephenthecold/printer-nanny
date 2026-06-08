@@ -45,6 +45,17 @@ case "$PIP_SOURCE" in
   *your-org*) die "pip source still points at the 'your-org' placeholder. Pass --pip-source with your real repo, or set it in the central UI (Settings → Agent install)." ;;
 esac
 command -v "$PYTHON_BIN" >/dev/null 2>&1 || die "$PYTHON_BIN not found; install Python 3.9+"
+# Debian 12 / Ubuntu 24.04 split `ensurepip` into its own apt package and the
+# venv create silently leaves an empty .venv/ behind that breaks every later run.
+# Catch it up-front with a clear hint instead of failing on `.venv/bin/pip`.
+if ! "$PYTHON_BIN" -c "import ensurepip" >/dev/null 2>&1; then
+  PKG="$(basename "$PYTHON_BIN" | grep -oE '[0-9]+\.[0-9]+' | head -1)"
+  HINT="python3-venv"
+  [ -n "$PKG" ] && HINT="python${PKG}-venv (or python3-venv)"
+  die "Python venv support is missing: 'import ensurepip' failed.
+        Install it first:  sudo apt install -y $HINT
+        Then re-run this script."
+fi
 
 echo "==> Printer Nanny agent installer"
 echo "    central : $CENTRAL_URL"
@@ -58,10 +69,18 @@ if ! id "$SERVICE_USER" >/dev/null 2>&1; then
     || useradd --system --shell /bin/false "$SERVICE_USER"
 fi
 
-# venv + agent.
+# venv + agent. If a previous run left a broken .venv/ behind (e.g. missing
+# python3-venv at the time), `pip` won't be there — wipe and recreate instead
+# of looping forever on the same partial directory.
 echo "==> installing agent into $INSTALL_DIR (pip source: $PIP_SOURCE)"
 mkdir -p "$INSTALL_DIR"
-[ -d "$INSTALL_DIR/.venv" ] || "$PYTHON_BIN" -m venv "$INSTALL_DIR/.venv"
+if [ ! -x "$INSTALL_DIR/.venv/bin/pip" ]; then
+  if [ -d "$INSTALL_DIR/.venv" ]; then
+    echo "    .venv exists but pip is missing — recreating"
+    rm -rf "$INSTALL_DIR/.venv"
+  fi
+  "$PYTHON_BIN" -m venv "$INSTALL_DIR/.venv"
+fi
 "$INSTALL_DIR/.venv/bin/pip" install --quiet --upgrade pip
 "$INSTALL_DIR/.venv/bin/pip" install --quiet --upgrade "$PIP_SOURCE"
 

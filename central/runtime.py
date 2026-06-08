@@ -36,7 +36,11 @@ SPECS: List[Spec] = [
     Spec("app.name", "str", "Branding", "App name", "Printer Nanny",
          "Replaces 'Printer Nanny' in the nav, login page, and alert email subjects"),
     Spec("app.logo_url", "str", "Branding", "Logo URL", "",
-         "Optional URL to a logo image; falls back to the 🖨️ emoji"),
+         "External URL, or leave blank and upload one under SETTINGS → Branding below."
+         " Falls back to the 🖨️ emoji."),
+    Spec("app.public_url", "str", "Branding", "Public URL", "",
+         "e.g. https://printers.msp.example.com. Used for the agent install command "
+         "shown on /manage/agents — leave blank and the request URL is used."),
     Spec("app.primary_color", "str", "Branding", "Primary color", "#0f172a",
          "CSS color used for the top nav bar (e.g. #0f172a, rgb(15,23,42))"),
     Spec("app.support_email", "str", "Branding", "Support email", "",
