@@ -108,3 +108,45 @@ def test_supply_status_note_for_sentinel_toner():
     sup = build_supplies(walks)[0]
     assert sup["level_pct"] is None
     assert sup["status_note"] == "some remaining"
+
+
+def test_alert_table_message_replaces_generic_service_requested_bit():
+    """When prtAlertTable has a specific message ('Replace fuser ...') AND
+    hrPrinterDetectedErrorState has the generic 'service requested' bit set,
+    we use the specific message and drop the generic one -- otherwise the UI
+    shows the same problem twice in different words."""
+    scalars = {
+        oids.SYS_DESCR: "Lexmark Whatever",
+        oids.HR_PRINTER_DETECTED_ERROR_STATE: "0x0100",  # bit 7: service requested
+    }
+    alert_walk = {
+        oids.PRT_ALERT_DESCRIPTION: {
+            f"{oids.PRT_ALERT_DESCRIPTION}.1.1": "Replace fuser. ~3500 pages remaining.",
+        },
+        oids.PRT_ALERT_SEVERITY_LEVEL: {
+            f"{oids.PRT_ALERT_SEVERITY_LEVEL}.1.1": "3",  # 3 = critical
+        },
+    }
+    reading = build_reading("10.0.0.1", scalars, supply_walks={}, alert_walk=alert_walk)
+    messages = [e["message"] for e in reading["events"]]
+    assert "Replace fuser. ~3500 pages remaining." in messages
+    # Generic bit-7 label must NOT be in events because the prtAlertTable
+    # message covers the same condition with more useful text.
+    assert "Service requested" not in messages
+    assert reading["status"] == "error"
+
+
+def test_alert_table_warning_severity():
+    """prtAlertSeverityLevel = 4 maps to a warning event, not critical."""
+    scalars = {oids.SYS_DESCR: "HP whatever", oids.HR_PRINTER_DETECTED_ERROR_STATE: ""}
+    alert_walk = {
+        oids.PRT_ALERT_DESCRIPTION: {
+            f"{oids.PRT_ALERT_DESCRIPTION}.1.2": "Yellow toner low.",
+        },
+        oids.PRT_ALERT_SEVERITY_LEVEL: {
+            f"{oids.PRT_ALERT_SEVERITY_LEVEL}.1.2": "4",
+        },
+    }
+    reading = build_reading("10.0.0.1", scalars, supply_walks={}, alert_walk=alert_walk)
+    assert reading["events"][0]["severity"] == "warning"
+    assert reading["status"] == "warning"

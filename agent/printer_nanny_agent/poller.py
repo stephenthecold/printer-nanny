@@ -88,7 +88,7 @@ def build_supplies(walks: Dict[str, Dict[str, str]]) -> List[dict]:
     max_by_suffix = _match(oids.PRT_MARKER_SUPPLIES_MAX_CAPACITY)
     level_by_suffix = _match(oids.PRT_MARKER_SUPPLIES_LEVEL)
 
-    # Union of every index seen in any table — some devices report a level row
+    # Union of every index seen in any table -- some devices report a level row
     # without a matching description (don't silently drop those supplies).
     suffixes = set(desc_by_suffix) | set(type_by_suffix) | set(max_by_suffix) | set(level_by_suffix)
 
@@ -131,17 +131,51 @@ def build_reading(
 
     supplies = build_supplies(supply_walks)
 
-    error_bits = parse_error_bits(scalars.get(oids.HR_PRINTER_DETECTED_ERROR_STATE))
+    # Two complementary sources of error info:
+    # (a) hrPrinterDetectedErrorState bits -- coarse buckets ("service requested")
+    # (b) prtAlertTable -- vendor's own message ("Replace fuser. ~5000 pages left.")
+    # Walk (b) and use those messages when available; the bits alone are too
+    # vague to tell an operator what's actually wrong.
     events: List[dict] = []
     has_critical = has_warning = False
+
+    alert_descriptions = (alert_walk or {}).get(oids.PRT_ALERT_DESCRIPTION, {})
+    alert_severities = (alert_walk or {}).get(oids.PRT_ALERT_SEVERITY_LEVEL, {})
+    for full_oid, message in alert_descriptions.items():
+        if not message:
+            continue
+        suffix = _oid_suffix(full_oid, oids.PRT_ALERT_DESCRIPTION)
+        sev_code = _to_int(alert_severities.get(oids.PRT_ALERT_SEVERITY_LEVEL + suffix))
+        # RFC 3805 prtAlertSeverityLevel: 3=critical, 4=warning(unary), 5=warning(binary).
+        if sev_code == 3:
+            severity, has_critical = "critical", True
+        elif sev_code in (4, 5):
+            severity, has_warning = "warning", True
+        else:
+            severity = "info"
+        events.append(
+            {
+                "code": "prt-alert" + suffix.replace(".", "-"),
+                "severity": severity,
+                "source": "snmp_alert",
+                "message": message.strip(),
+            }
+        )
+
+    error_bits = parse_error_bits(scalars.get(oids.HR_PRINTER_DETECTED_ERROR_STATE))
     for bit in error_bits:
         label = oids.ERROR_STATE_BITS.get(bit)
         if not label:
             continue
+        # Skip critical bits already covered by a richer prtAlertTable message --
+        # avoids "Service requested" sitting next to "Replace fuser" saying the
+        # same thing in different words.
+        if alert_descriptions and bit in oids.CRITICAL_ERROR_BITS:
+            continue
         if bit in oids.CRITICAL_ERROR_BITS:
             severity, has_critical = "critical", True
         elif bit in oids.INFO_ERROR_BITS:
-            severity = "info"  # e.g. power-save "offline" — recorded, not alarmed
+            severity = "info"  # e.g. power-save "offline" -- recorded, not alarmed
         else:
             severity, has_warning = "warning", True
         events.append(
@@ -194,6 +228,11 @@ _SUPPLY_BASES = [
     oids.PRT_MARKER_SUPPLIES_LEVEL,
 ]
 
+_ALERT_BASES = [
+    oids.PRT_ALERT_SEVERITY_LEVEL,
+    oids.PRT_ALERT_DESCRIPTION,
+]
+
 
 async def poll_printer(backend: SnmpBackend, ip: str, params: SnmpParams) -> dict:
     """Fetch all OIDs for one printer and return the reading payload.
@@ -207,4 +246,10 @@ async def poll_printer(backend: SnmpBackend, ip: str, params: SnmpParams) -> dic
             supply_walks[base] = await backend.walk(ip, base, params)
         except SnmpError:
             supply_walks[base] = {}
-    return build_reading(ip, scalars, supply_walks)
+    alert_walks: Dict[str, Dict[str, str]] = {}
+    for base in _ALERT_BASES:
+        try:
+            alert_walks[base] = await backend.walk(ip, base, params)
+        except SnmpError:
+            alert_walks[base] = {}
+    return build_reading(ip, scalars, supply_walks, alert_walk=alert_walks)
