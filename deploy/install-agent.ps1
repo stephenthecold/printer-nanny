@@ -196,7 +196,6 @@ or pass -PythonExe with the full path to python.exe.
 "@
     }
 }
-}
 Write-Host "==> using Python $($py.Version): $($py.Exe) $($py.PreArgs -join ' ')"
 
 # --- Create install dir + venv ---

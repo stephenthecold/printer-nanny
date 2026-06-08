@@ -47,7 +47,10 @@ curl -fsSL https://CENTRAL/install-agent.sh | sudo bash -s -- \
 ```powershell
 # Windows Server (in an elevated PowerShell — Run as Administrator):
 $env:PN_CENTRAL_URL="https://CENTRAL"; $env:PN_AGENT_ID="12"; $env:PN_API_KEY="pn_xxxxx"
-iwr -useb https://CENTRAL/install-agent.ps1 | iex
+Set-ExecutionPolicy -Scope Process Bypass -Force
+$p = "$env:TEMP\install-pn-agent.ps1"
+iwr -useb https://CENTRAL/install-agent.ps1 -OutFile $p
+& $p
 ```
 
 ```bash
