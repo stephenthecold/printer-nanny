@@ -35,6 +35,7 @@ param(
     [string]$InstallDir = "$env:ProgramData\PrinterNanny\agent",
     [string]$ConfigDir = "$env:ProgramData\PrinterNanny",
     [string]$ServiceName = "PrinterNannyAgent",
+    [string]$PythonExe = $env:PN_PYTHON_EXE,
     [switch]$NoVerifyTls,
     [switch]$Uninstall
 )
@@ -84,7 +85,13 @@ Write-Host "    agent   : #$AgentId"
 Write-Host "    install : $InstallDir"
 
 # --- Locate Python 3.10+ ---
+# winget's --silent install doesn't always update PATH in the current PowerShell
+# session, so probing `python` / `py` first will miss a perfectly good install.
+# PEP 514 says every Python registers itself in HKLM\SOFTWARE\Python\PythonCore
+# (or HKCU/WOW6432Node for per-user / 32-bit installs); that's the canonical
+# lookup and works regardless of PATH. Common install dirs are a final fallback.
 function Find-Python {
+    # Tier 1: PATH (cheapest when it works).
     foreach ($candidate in @(@('py','-3'), @('python'), @('python3'))) {
         try {
             $verRaw = & $candidate[0] @($candidate[1..($candidate.Length-1)]) --version 2>&1
@@ -96,19 +103,71 @@ function Find-Python {
             }
         } catch { continue }
     }
+    # Tier 2: PEP 514 registry lookup — newest version first.
+    $regBases = @(
+        "HKLM:\SOFTWARE\Python\PythonCore",
+        "HKCU:\SOFTWARE\Python\PythonCore",
+        "HKLM:\SOFTWARE\WOW6432Node\Python\PythonCore"
+    )
+    $found = @()
+    foreach ($regBase in $regBases) {
+        if (-not (Test-Path $regBase)) { continue }
+        foreach ($sub in (Get-ChildItem $regBase -ErrorAction SilentlyContinue)) {
+            $verKey = $sub.PSChildName
+            if ($verKey -notmatch '^(\d+)\.(\d+)$') { continue }
+            $maj = [int]$Matches[1]; $min = [int]$Matches[2]
+            if ($maj -lt 3 -or ($maj -eq 3 -and $min -lt 10)) { continue }
+            $ipKey = "$regBase\$verKey\InstallPath"
+            $installPath = (Get-ItemProperty -Path $ipKey -Name "(default)" -ErrorAction SilentlyContinue)."(default)"
+            if ($installPath) {
+                $pyExe = Join-Path $installPath "python.exe"
+                if (Test-Path $pyExe) {
+                    $found += [pscustomobject]@{ Version = "$maj.$min"; Maj = $maj; Min = $min; Exe = $pyExe }
+                }
+            }
+        }
+    }
+    if ($found.Count -gt 0) {
+        $best = $found | Sort-Object -Property Maj, Min -Descending | Select-Object -First 1
+        return @{ Cmd = @($best.Exe); Version = $best.Version }
+    }
+    # Tier 3: well-known install paths as a last-ditch probe.
+    foreach ($ver in @('312','311','310')) {
+        foreach ($p in @(
+            "$env:LocalAppData\Programs\Python\Python$ver\python.exe",
+            "${env:ProgramFiles}\Python$ver\python.exe"
+        )) {
+            if (Test-Path $p) {
+                $verRaw = & $p --version 2>&1
+                if ($verRaw -match 'Python\s+(\d+)\.(\d+)') {
+                    return @{ Cmd = @($p); Version = "$($Matches[1]).$($Matches[2])" }
+                }
+            }
+        }
+    }
     return $null
 }
 
-$py = Find-Python
+if ($PythonExe) {
+    if (-not (Test-Path $PythonExe)) { throw "PythonExe path does not exist: $PythonExe" }
+    $verRaw = & $PythonExe --version 2>&1
+    if ($verRaw -notmatch 'Python\s+(\d+)\.(\d+)') { throw "PythonExe is not a Python executable: $PythonExe" }
+    $py = @{ Cmd = @($PythonExe); Version = "$($Matches[1]).$($Matches[2])" }
+} else {
+    $py = Find-Python
+}
 if (-not $py) {
     throw @"
-Python 3.10+ is required and was not found.
-Install it then re-run this script:
+Python 3.10+ is required and was not found (PATH, PEP 514 registry, and the
+standard install dirs were all checked).
 
-  winget install Python.Python.3.12 -e --silent
+  1. winget install Python.Python.3.12 -e --silent
+  2. CLOSE this PowerShell window and open a NEW elevated one — winget --silent
+     does not refresh PATH in the existing session.
+  3. Re-run the install-agent.ps1 command.
 
-or download from https://www.python.org/downloads/windows/ — make sure
-'Add Python to PATH' is checked during install.
+If Python is already installed but in a non-standard location, pass:
+    -PythonExe 'C:\path\to\python.exe'
 "@
 }
 Write-Host "==> using Python $($py.Version): $($py.Cmd -join ' ')"
