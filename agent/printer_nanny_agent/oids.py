@@ -1,17 +1,28 @@
 """SNMP OID constants (RFC 3805 Printer MIB + Host Resources MIB).
 
 Mirrors central/snmp.md. Scalar OIDs include the trailing instance index where
-fixed; table base OIDs are walked.
+fixed; table base OIDs are walked. Table rows on real printers can be indexed
+by anything (often 1, but also 2/5/10/65535 depending on hrDeviceIndex), so
+discovery walks the table bases rather than GETting a .1-instance.
 """
 
 from __future__ import annotations
 
 # --- Identity (scalars) ---
 SYS_DESCR = "1.3.6.1.2.1.1.1.0"
+SYS_OBJECT_ID = "1.3.6.1.2.1.1.2.0"
 SYS_NAME = "1.3.6.1.2.1.1.5.0"
 PRT_GENERAL_PRINTER_NAME = "1.3.6.1.2.1.43.5.1.1.16.1"
 PRT_GENERAL_SERIAL_NUMBER = "1.3.6.1.2.1.43.5.1.1.17.1"
 HR_DEVICE_DESCR = "1.3.6.1.2.1.25.3.2.1.3.1"
+
+# --- Identity (table bases — walked during discovery) ---
+PRT_GENERAL_PRINTER_NAME_BASE = "1.3.6.1.2.1.43.5.1.1.16"
+PRT_GENERAL_SERIAL_NUMBER_BASE = "1.3.6.1.2.1.43.5.1.1.17"
+HR_DEVICE_DESCR_BASE = "1.3.6.1.2.1.25.3.2.1.3"
+HR_DEVICE_TYPE_BASE = "1.3.6.1.2.1.25.3.2.1.2"
+# Well-known hrDeviceType object identity that marks a row as "this is a printer".
+HR_DEVICE_TYPE_PRINTER = "1.3.6.1.2.1.25.3.1.5"
 
 # --- Page count (scalar) ---
 PRT_MARKER_LIFE_COUNT = "1.3.6.1.2.1.43.10.2.1.4.1.1"

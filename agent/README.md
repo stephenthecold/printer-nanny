@@ -83,8 +83,52 @@ PN_CENTRAL_URL=https://CENTRAL PN_AGENT_ID=12 PN_API_KEY=pn_xxx printer-nanny-ag
 printer-nanny-agent --central-url https://CENTRAL --agent-id 12 --api-key pn_xxx selftest
 printer-nanny-agent --config /etc/printer-nanny/agent.toml poll 10.10.0.20   # one printer -> JSON
 printer-nanny-agent --config ... discover                                    # sweep -> JSON
+printer-nanny-agent --config ... probe 10.10.0.20                            # raw SNMP dump for one IP
 printer-nanny-agent --config ... run --once                                  # single cycle
 ```
+
+## Diagnosing "discovery finds nothing"
+
+If the agent runs cleanly but no devices appear under **Approvals**, two
+commands will tell you which layer is at fault.
+
+**1. Run one cycle in verbose mode** and watch the per-host discovery log:
+
+```bash
+sudo systemctl stop printer-nanny-agent
+sudo -u printer-nanny /opt/printer-nanny-agent/.venv/bin/printer-nanny-agent \
+    --config /etc/printer-nanny/agent.toml -v run --once
+```
+
+Each subnet logs `discovering CIDR (N hosts, community='public' v2c …)` and at
+the end `discovered X printer(s) on CIDR (probed=N, SNMP-responded=R, errors=E)`.
+- `responded=0` → SNMP is being blocked by the firewall, or no device on that
+  subnet answers UDP/161 with the configured community.
+- `responded > 0, X = 0` → SNMP works, but neither the Printer-MIB nor a known
+  vendor name appears in `sysDescr`. Either the printer has SNMP disabled, has
+  a custom community string, or it isn't a printer the matcher recognizes.
+
+**2. Probe one printer you know is on the LAN** — bypasses discovery and dumps
+everything the agent sees on that IP:
+
+```bash
+printer-nanny-agent --config ... probe 10.10.0.20
+```
+
+Output you should expect from a healthy printer:
+
+```text
+probing 10.10.0.20  community='public'  v2c  port=161  timeout=2.0s  retries=1
+  GET  1.3.6.1.2.1.1.1.0
+         = 'Brother HL-L8350CDW series, …'
+  WALK prtGeneralPrinterName  1.3.6.1.2.1.43.5.1.1.16.1
+         = 'Brother HL-L8350CDW'
+```
+
+If `identity GET failed: … No SNMP response`, the printer either has SNMP off,
+uses a non-default community string (set it under **Settings → SNMP** or as a
+per-subnet override on the Agents page), or is behind a firewall blocking
+UDP/161 between the agent and the printer.
 
 ## End-to-end demo (no real printers)
 With the central server running and seeded, [`../scripts/e2e_agent_demo.py`](../scripts/e2e_agent_demo.py)
