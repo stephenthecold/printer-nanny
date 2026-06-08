@@ -53,6 +53,23 @@ SPECS: List[Spec] = [
     Spec("smtp.password", "secret", "Email (SMTP)", "SMTP password", _env.smtp_password),
     Spec("smtp.from", "str", "Email (SMTP)", "From address", _env.smtp_from),
     Spec("smtp.use_tls", "bool", "Email (SMTP)", "Use STARTTLS", _env.smtp_use_tls),
+    # OAuth SMTP (modern auth) — Gmail or Microsoft 365 via XOAUTH2. With
+    # smtp.auth_type=basic, the smtp.password field is used. With oauth_google
+    # or oauth_microsoft, the consent flow stores a refresh token and the
+    # channel refreshes the access token on demand.
+    Spec("smtp.auth_type", "str", "Email (SMTP)", "Auth type", "basic",
+         "basic | oauth_google | oauth_microsoft. Run the consent flow under "
+         "the Connect buttons below after switching to an OAuth provider."),
+    Spec("smtp.oauth_client_id", "str", "Email (SMTP)", "OAuth client ID", "",
+         "App registration / Cloud Console client ID for SMTP outbound"),
+    Spec("smtp.oauth_client_secret", "secret", "Email (SMTP)", "OAuth client secret", ""),
+    Spec("smtp.oauth_tenant_id", "str", "Email (SMTP)", "OAuth tenant (Microsoft only)", "common",
+         "Use 'common' for multi-tenant, or your Entra tenant GUID"),
+    Spec("smtp.oauth_refresh_token", "secret", "Email (SMTP)", "OAuth refresh token", "",
+         "Persisted by the Connect flow — clear and reconnect if it stops working"),
+    Spec("smtp.oauth_access_token", "secret", "Email (SMTP)", "OAuth access token (cached)", ""),
+    Spec("smtp.oauth_access_token_expires_at", "int", "Email (SMTP)",
+         "OAuth access token expiry (unix ts)", 0),
     # FreeScout (ticketing)
     Spec("freescout.enabled", "bool", "FreeScout", "Open a ticket on alerts", False),
     Spec("freescout.base_url", "str", "FreeScout", "Base URL", _env.freescout_base_url,

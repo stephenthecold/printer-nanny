@@ -1,8 +1,14 @@
 {% extends "base.html" %}
-{% block title %}Settings · Printer Nanny{% endblock %}
+{% block title %}Settings · {{ app.name or 'Printer Nanny' }}{% endblock %}
 {% block body %}
 <h1 class="text-2xl font-semibold mb-1">Settings</h1>
 <p class="text-sm text-slate-500 mb-4">Operator-managed config — stored in the database, no env vars needed. Only DATABASE_URL and SECRET_KEY live in the environment.</p>
+
+{% if smtp_oauth_error %}
+<div class="mb-4 rounded bg-red-50 border border-red-200 text-red-700 text-sm px-3 py-2">
+  SMTP OAuth: {{ smtp_oauth_error }}
+</div>
+{% endif %}
 
 <form method="post" action="/settings" class="space-y-6 max-w-3xl">
   {% for section, fields in sections.items() %}
@@ -42,4 +48,33 @@
   <button class="border border-slate-300 bg-white rounded px-4 py-2 text-sm">Send test notification</button>
   <span class="text-xs text-slate-400 ml-2">Fires a test alert through every enabled channel (save first).</span>
 </form>
+
+<section class="bg-white rounded-lg shadow max-w-3xl mt-6">
+  <div class="px-4 py-3 border-b font-semibold">SMTP OAuth (modern auth)</div>
+  <div class="p-4 text-sm space-y-3">
+    <p class="text-slate-500">
+      Modern auth replaces SMTP app passwords for Gmail and Microsoft 365. Set
+      <code>smtp.auth_type</code> to <code>oauth_google</code> or <code>oauth_microsoft</code> above,
+      enter the OAuth client ID + secret, save, then click the Connect button to grant consent.
+    </p>
+    <p class="text-slate-500">
+      Add this redirect URI in the cloud console / app registration:
+      <code class="ml-1 bg-slate-100 rounded px-1 select-all">{{ smtp_oauth_redirect_uri }}</code>
+    </p>
+    <div class="text-slate-500">
+      Current: <code>{{ smtp_auth_type }}</code>
+      {% if smtp_has_refresh_token %}
+      · <span class="text-emerald-700">refresh token stored</span>
+      {% else %}
+      · <span class="text-amber-700">no refresh token yet</span>
+      {% endif %}
+    </div>
+    <div class="flex gap-2 pt-1">
+      <a href="/settings/smtp-oauth/start?provider=google"
+         class="bg-slate-700 text-white rounded px-3 py-2 text-xs font-medium">Connect Gmail</a>
+      <a href="/settings/smtp-oauth/start?provider=microsoft"
+         class="bg-slate-700 text-white rounded px-3 py-2 text-xs font-medium">Connect Microsoft 365</a>
+    </div>
+  </div>
+</section>
 {% endblock %}

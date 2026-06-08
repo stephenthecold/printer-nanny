@@ -5,7 +5,7 @@ from __future__ import annotations
 from fastapi import FastAPI
 from starlette.middleware.sessions import SessionMiddleware
 
-from central import auth_oidc
+from central import auth_oauth_smtp, auth_oidc
 from central.api import ingest, management, reporting
 from central.config import settings
 from central.dashboard import installer, manage, routes as dashboard, settings_routes
@@ -29,6 +29,7 @@ app.include_router(dashboard.router)
 app.include_router(manage.router)
 app.include_router(settings_routes.router)
 app.include_router(auth_oidc.router)
+app.include_router(auth_oauth_smtp.router)
 app.include_router(installer.router)
 
 
