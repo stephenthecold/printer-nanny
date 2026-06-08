@@ -9,7 +9,7 @@ from typing import Optional
 from fastapi import APIRouter, Depends, Form, Request
 from fastapi.responses import HTMLResponse, RedirectResponse
 from fastapi.templating import Jinja2Templates
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
 from central import models as m
@@ -187,7 +187,11 @@ def approvals(request: Request, db: Session = Depends(get_db)):
             .order_by(m.Printer.created_at.desc())
         )
     )
-    return _render(request, "approvals.html", db=db, user=user, pending=pending)
+    agents_by_id = {a.id: a for a in db.scalars(select(m.Agent))}
+    return _render(
+        request, "approvals.html", db=db, user=user,
+        pending=pending, agents_by_id=agents_by_id,
+    )
 
 
 @router.post("/approvals/{printer_id}/{action}", response_class=HTMLResponse)
@@ -288,6 +292,65 @@ def account_change_password(
     db.commit()
     request.session["account_flash"] = "Password changed."
     return RedirectResponse("/account", status_code=303)
+
+
+# --- Discovery (local network scan status + per-subnet rescan) ------------- #
+@router.get("/discovery", response_class=HTMLResponse)
+def discovery_status(request: Request, db: Session = Depends(get_db)):
+    """Per-agent, per-subnet view of local discovery activity.
+
+    Shows: each agent at each site, its enrolled subnets, when each one last
+    reported a discovery batch, how many devices were found, how many were new,
+    and how many are currently pending approval. A Rescan button enqueues a
+    ``CommandType.rescan`` for the agent (handled by ``agent.runner:96``).
+    """
+    user = _user(request, db)
+    if user is None:
+        return _login_redirect()
+    if user.role == m.UserRole.client_readonly:
+        return RedirectResponse("/", status_code=303)
+    agents = list(db.scalars(select(m.Agent).order_by(m.Agent.site_id, m.Agent.id)))
+    sites = {s.id: s for s in db.scalars(select(m.Site))}
+    clients = {c.id: c for c in db.scalars(select(m.Client))}
+    # Subnets keyed by agent_id so the template doesn't trigger N+1 lazy loads.
+    subnets_by_agent: dict[int, list[m.Subnet]] = {}
+    for sub in db.scalars(select(m.Subnet)):
+        if sub.agent_id is not None:
+            subnets_by_agent.setdefault(sub.agent_id, []).append(sub)
+    # Per-site pending count — Printer doesn't carry a subnet_id today, so we
+    # group by site (good enough at the MSP scale; per-subnet pending would need
+    # a Printer→Subnet FK we don't have yet).
+    pending_by_site = {
+        site_id: count
+        for site_id, count in db.execute(
+            select(m.Printer.site_id, func.count())
+            .where(m.Printer.discovery_state == m.DiscoveryState.pending)
+            .group_by(m.Printer.site_id)
+        ).all()
+    }
+    return _render(
+        request, "discovery.html", db=db, user=user,
+        agents=agents, sites=sites, clients=clients,
+        subnets_by_agent=subnets_by_agent,
+        pending_by_site=pending_by_site,
+        flash=request.session.pop("discovery_flash", None),
+    )
+
+
+@router.post("/discovery/agents/{agent_id}/rescan")
+def discovery_rescan(agent_id: int, request: Request, db: Session = Depends(get_db)):
+    user = _user(request, db)
+    if user is None or user.role == m.UserRole.client_readonly:
+        return _login_redirect() if user is None else RedirectResponse("/", status_code=303)
+    agent = db.get(m.Agent, agent_id)
+    if agent is None:
+        return RedirectResponse("/discovery", status_code=303)
+    db.add(m.Command(agent_id=agent.id, type=m.CommandType.rescan, payload=None))
+    db.commit()
+    request.session["discovery_flash"] = (
+        f"Rescan queued for {agent.name} — the agent will discover on its next heartbeat."
+    )
+    return RedirectResponse("/discovery", status_code=303)
 
 
 # --- helpers ---------------------------------------------------------------- #

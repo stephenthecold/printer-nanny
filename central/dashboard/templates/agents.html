@@ -56,9 +56,26 @@
       <div class="px-4 py-3">
         <div class="text-xs text-slate-500 mb-1">Subnets</div>
         {% for s in a.subnets %}
-        <div class="flex items-center justify-between text-sm py-1">
-          <span class="tabular-nums">{{ s.cidr }} <span class="text-slate-400 text-xs">· {{ s.snmp_community }} / v{{ s.snmp_version }}</span></span>
-          <form method="post" action="/manage/subnets/{{ s.id }}/delete" class="inline"><button class="text-xs text-red-600 hover:underline">remove</button></form>
+        <div class="text-sm py-1 border-t first:border-t-0">
+          <form method="post" action="/manage/subnets/{{ s.id }}" class="flex items-center gap-2 flex-wrap">
+            <span class="tabular-nums font-medium">{{ s.cidr }}</span>
+            <input name="label" value="{{ s.label or '' }}" placeholder="Label (e.g. VLAN 10)"
+                   class="border rounded px-2 py-1 text-xs flex-1 min-w-[140px]" />
+            <input name="snmp_community" value="{{ s.snmp_community }}"
+                   class="border rounded px-2 py-1 text-xs w-28" />
+            <select name="snmp_version" class="border rounded px-2 py-1 text-xs">
+              <option value="2c" {% if s.snmp_version == '2c' %}selected{% endif %}>v2c</option>
+              <option value="1" {% if s.snmp_version == '1' %}selected{% endif %}>v1</option>
+            </select>
+            {% if s.last_discovery_at %}
+            <span class="text-xs text-slate-400">last {{ s.last_discovery_at.strftime('%m-%d %H:%M') }}</span>
+            {% endif %}
+            <button class="text-xs bg-slate-700 text-white rounded px-2 py-1">Save</button>
+          </form>
+          <form method="post" action="/manage/subnets/{{ s.id }}/delete" class="inline ml-2"
+                onsubmit="return confirm('Remove subnet {{ s.cidr }}?')">
+            <button class="text-xs text-red-600 hover:underline">remove</button>
+          </form>
         </div>
         {% else %}
         <div class="text-sm text-slate-400">No subnets assigned.</div>

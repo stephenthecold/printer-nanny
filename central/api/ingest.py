@@ -55,10 +55,22 @@ def post_discovered(
 ):
     touch_heartbeat(agent)
     created, known = 0, 0
+    # Aggregate per-subnet counts so we can write each Subnet row once per batch
+    # instead of N times. Devices that don't carry a subnet_cidr (legacy agents)
+    # still contribute to created/known but skip the subnet-stats update.
+    per_subnet: dict[str, dict[str, int]] = {}
     for device in batch.devices:
         _, was_created = services.record_discovered(db, agent, device)
         created += int(was_created)
         known += int(not was_created)
+        if device.subnet_cidr:
+            bucket = per_subnet.setdefault(device.subnet_cidr, {"found": 0, "new": 0})
+            bucket["found"] += 1
+            bucket["new"] += int(was_created)
+    for cidr, counts in per_subnet.items():
+        services.update_subnet_discovery_stats(
+            db, agent.site_id, cidr, found=counts["found"], new=counts["new"]
+        )
     db.commit()
     return {"new_pending": created, "already_known": known}
 
