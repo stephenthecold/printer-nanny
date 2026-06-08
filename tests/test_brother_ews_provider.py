@@ -122,11 +122,49 @@ def test_parse_tonerremain_handles_reversed_attribute_order():
 
 
 def test_parse_tonerremain_clamps_to_100():
-    """If a firmware reports a height greater than the assumed max (newer
-    revs with a 30px gauge?) we clamp rather than emit >100%."""
+    """If a firmware reports a height greater than the assumed max we clamp
+    rather than emit >100%. (Without a surrounding inkLevel table tag the
+    parser falls back to color-laser max=11.)"""
     html = """<img class="tonerremain" alt="Black" height="30" />"""
     pcts = _parse_toner_percentages(html)
     assert pcts == {"black": 100}
+
+
+def test_parse_tonerremain_mono_layout_uses_max_100_hl_l2370dw():
+    """Real HL-L2370DW HTML: gauge sits inside <table id="inkLevelMono"> and
+    the bar max is 100px (1px per percent) instead of the color-laser 11px.
+    Pulled directly from Stephen's dump where Black=33."""
+    html = """
+    <div id="ink_level"><table id="inkLevelMono" summary="ink level">
+    <tr><th></th></tr>
+    <tr><td><img src="../common/images/black.gif" alt="Black"
+                 class="tonerremain" height="33" /></td></tr>
+    <tr><th>BK</th></tr>
+    </table></div>
+    """
+    pcts = _parse_toner_percentages(html)
+    # 33 / 100 = 33%, which matches the printer's actual state (no toner-low
+    # alert, only "Replace Drum"). With the old hard-coded max=11 this came
+    # out as 100% even though the printer was clearly past half-life.
+    assert pcts == {"black": 33}
+
+
+def test_parse_tonerremain_color_layout_still_uses_max_11():
+    """The color-laser layout (inkLevel, no Mono suffix) keeps max=11. Verifies
+    the L8900 case didn't regress when we added the L2370 path."""
+    html = """
+    <div id="ink_level"><table id="inkLevel" summary="ink level">
+    <tr><th></th><th></th><th></th><th></th></tr>
+    <tr>
+      <td><img alt="Black"   class="tonerremain" height="5"  /></td>
+      <td><img alt="Cyan"    class="tonerremain" height="11" /></td>
+      <td><img alt="Magenta" class="tonerremain" height="11" /></td>
+      <td><img alt="Yellow"  class="tonerremain" height="11" /></td>
+    </tr>
+    </table></div>
+    """
+    pcts = _parse_toner_percentages(html)
+    assert pcts == {"black": 45, "cyan": 100, "magenta": 100, "yellow": 100}
 
 
 def test_parse_returns_empty_for_blank_input():

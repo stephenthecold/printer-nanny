@@ -91,8 +91,12 @@ _RE_IMG_FILENAME = re.compile(
 )
 
 # Pattern D: gauge image where height="N" IS the toner-remaining bar height
-# (no displayed percentage). MFC-L8900CDW class. Attribute order is highly
-# variable across firmware revs -- match either order of class/alt/height.
+# (no displayed percentage). Brother color lasers (MFC-L8900CDW class) render
+# their gauges in a 4-toner table with id="inkLevel" and max bar height 11px.
+# B&W lasers (HL-L2370DW class) render a single-toner gauge in a table with
+# id="inkLevelMono" and the bar uses a much larger range (max ~100px so 1px
+# per percent). We detect which table the gauges sit in and apply the right
+# max -- empirically these are the only two layouts Brother ships.
 _RE_TONERREMAIN_IMG = re.compile(
     r"""<img\b[^>]*\bclass\s*=\s*["'][^"']*\btonerremain\b[^"']*["'][^>]*>""",
     re.IGNORECASE,
@@ -102,11 +106,17 @@ _RE_TONERREMAIN_ATTRS = re.compile(
         (?:\bheight\s*=\s*["'](?P<height>\d+)["'])""",
     re.IGNORECASE | re.VERBOSE,
 )
-# Empirically the gauge max on the L8900CDW family is 11px ("full" gauges
-# all show height=11). Configurable if a future model is found to use a
-# different max -- right now this is the only Brother EWS that uses the
-# tonerremain gauge pattern, so a single constant is correct.
-_TONERREMAIN_MAX_PX = 11
+_RE_INK_LEVEL_TABLE = re.compile(
+    r"""<table\s+[^>]*\bid\s*=\s*["'](?P<id>inkLevelMono|inkLevel)["']""",
+    re.IGNORECASE | re.VERBOSE,
+)
+# Brother gauge max heights by table id, derived empirically from real EWS
+# dumps. Default to color/11 (the most common layout) when no id matches.
+_TONERREMAIN_MAX_BY_ID = {
+    "inkLevel": 11,       # color lasers (MFC-L8900CDW)
+    "inkLevelMono": 100,  # B&W lasers (HL-L2370DW)
+}
+_TONERREMAIN_DEFAULT_MAX = 11
 
 
 def _parse_toner_percentages(html: str) -> Dict[str, int]:
@@ -182,7 +192,13 @@ def _parse_toner_percentages(html: str) -> Dict[str, int]:
     if img_hits:
         return img_hits
 
-    # --- Pattern D: tonerremain gauge images (MFC-L8900CDW family) ---
+    # --- Pattern D: tonerremain gauge images ---
+    # Pick the max scale from the surrounding <table id="..."> -- 11 for the
+    # color-laser layout (inkLevel), 100 for the B&W layout (inkLevelMono).
+    # If neither id is present, default to 11 (color is the more common case).
+    table_id_match = _RE_INK_LEVEL_TABLE.search(html)
+    table_id = table_id_match.group("id") if table_id_match else None
+    gauge_max = _TONERREMAIN_MAX_BY_ID.get(table_id, _TONERREMAIN_DEFAULT_MAX)
     gauge_hits: Dict[str, int] = {}
     for tag_match in _RE_TONERREMAIN_IMG.finditer(html):
         tag = tag_match.group(0)
@@ -203,7 +219,7 @@ def _parse_toner_percentages(html: str) -> Dict[str, int]:
             continue
         # Clamp to max -- some firmwares pad with extra pixels above the bar
         # area (we'd otherwise get >100%).
-        pct = max(0, min(100, round(h * 100 / _TONERREMAIN_MAX_PX)))
+        pct = max(0, min(100, round(h * 100 / gauge_max)))
         gauge_hits[color] = pct
     if gauge_hits:
         return gauge_hits
