@@ -1,6 +1,6 @@
 """SQLAlchemy ORM models for the Printer Nanny central server.
 
-Hierarchy: Client → Site → (Subnet, Agent, Printer). Printers carry Supplies and
+Hierarchy: Client -> Site -> (Subnet, Agent, Printer). Printers carry Supplies and
 time-series Readings; PrinterEvents capture errors/status; Maintenance and Alert
 tables track service and notifications. Enums are stored as VARCHAR
 (native_enum=False) so the same models work on SQLite and Postgres.
@@ -137,7 +137,7 @@ class CommandStatus(str, enum.Enum):
 
 
 # --------------------------------------------------------------------------- #
-# Tenancy: Client → Site
+# Tenancy: Client -> Site
 # --------------------------------------------------------------------------- #
 class Client(Base):
     __tablename__ = "clients"
@@ -170,7 +170,7 @@ class Site(Base):
 
 
 # --------------------------------------------------------------------------- #
-# Collection: Agent → Subnet
+# Collection: Agent -> Subnet
 # --------------------------------------------------------------------------- #
 class Agent(Base):
     __tablename__ = "agents"
@@ -201,9 +201,14 @@ class Subnet(Base):
     )
     cidr: Mapped[str] = mapped_column(String(64))
     label: Mapped[Optional[str]] = mapped_column(String(200), default=None)
-    # SNMP creds for this subnet — pushed to the owning agent for discovery.
+    # SNMP creds for this subnet -- pushed to the owning agent for discovery.
     snmp_community: Mapped[str] = mapped_column(String(120), default="public")
     snmp_version: Mapped[str] = mapped_column(String(8), default="2c")
+    # Optional source IP / interface name the agent should bind SNMP packets to
+    # when sweeping this subnet. Lets one agent serve multiple clients whose
+    # internal RFC 1918 CIDRs overlap (each tunnel terminates at a different
+    # local IP / interface; bind-per-subnet routes packets to the right one).
+    bind_interface: Mapped[Optional[str]] = mapped_column(String(64), default=None)
     # Discovery status (updated by the ingest endpoint on each /discovered batch).
     last_discovery_at: Mapped[Optional[datetime]] = mapped_column(
         DateTime(timezone=True), default=None
@@ -219,7 +224,7 @@ class Subnet(Base):
 
 
 # --------------------------------------------------------------------------- #
-# Devices: Printer → Supply, Reading, Event
+# Devices: Printer -> Supply, Reading, Event
 # --------------------------------------------------------------------------- #
 class Printer(Base):
     __tablename__ = "printers"
@@ -468,8 +473,8 @@ class AppAsset(Base):
 
     Stored in the DB rather than the filesystem so it survives container
     rebuilds without an extra mount, and so it Just Works on both SQLite
-    (LargeBinary → BLOB) and Postgres (BYTEA). Cap individual rows at a few
-    hundred KB at the upload route — this isn't meant for large media.
+    (LargeBinary -> BLOB) and Postgres (BYTEA). Cap individual rows at a few
+    hundred KB at the upload route -- this isn't meant for large media.
     """
 
     __tablename__ = "app_assets"

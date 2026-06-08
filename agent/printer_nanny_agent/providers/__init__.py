@@ -83,5 +83,8 @@ async def run_providers(
 
 # Import side-effect: every provider module that wants to be registered
 # imports `register` and calls it at module load. Built-in providers are
-# loaded here so they're always available.
+# loaded here so they're always available. Order matters -- BrotherProvider
+# (SNMP) seeds the bucket-state UI hints; BrotherEwsProvider (HTTP scrape)
+# runs after and overrides them with real percentages when scraping works.
 from printer_nanny_agent.providers import brother  # noqa: E402,F401
+from printer_nanny_agent.providers import brother_ews  # noqa: E402,F401

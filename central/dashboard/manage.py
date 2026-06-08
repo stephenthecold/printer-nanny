@@ -1,6 +1,6 @@
 """Management UI: create/edit/delete clients, sites, printers, and enroll agents.
 
-Plain server-rendered forms (POST + redirect) — robust and JS-free. Viewing and
+Plain server-rendered forms (POST + redirect) -- robust and JS-free. Viewing and
 creating require any logged-in user; deletes require admin.
 """
 
@@ -39,7 +39,7 @@ def _user(request: Request, db: Session) -> Optional[m.User]:
 
 
 def _manager(request: Request, db: Session) -> Optional[m.User]:
-    """Management is for admin/tech only — client_readonly users get nothing here."""
+    """Management is for admin/tech only -- client_readonly users get nothing here."""
     user = _user(request, db)
     return user if (user is not None and user.role in _MANAGER_ROLES) else None
 
@@ -66,7 +66,7 @@ def _tpl(request: Request, template: str, db: Session, **ctx) -> HTMLResponse:
     """Local render helper that always injects ``app.*`` branding into context.
 
     Keeps every manage template (nav, login, footer) in sync with the operator's
-    Settings → Branding values without each callsite having to remember.
+    Settings -> Branding values without each callsite having to remember.
     """
     ctx.setdefault("app", app_branding(db))
     return _templates.TemplateResponse(request, template, ctx)
@@ -82,7 +82,7 @@ def manage_home(request: Request, db: Session = Depends(get_db)):
         return _redirect("/login")
     clients = list(db.scalars(select(m.Client).order_by(m.Client.name)))
     # All clients are exposed in a top-level "Add site" form, so we always need
-    # the full list — even when the operator just wants to click into a client.
+    # the full list -- even when the operator just wants to click into a client.
     return _tpl(
         request, "manage_clients.html", db,
         user=user, clients=clients, flash=_pop_flash(request),
@@ -355,7 +355,7 @@ def printer_poll_now(printer_id: int, request: Request, db: Session = Depends(ge
         agent = db.scalar(select(m.Agent).where(m.Agent.site_id == printer.site_id))
         agent_id = agent.id if agent else None
     if agent_id is None:
-        _flash(request, "No agent is assigned to this site — cannot poll.")
+        _flash(request, "No agent is assigned to this site -- cannot poll.")
         return _redirect(f"/printers/{printer.id}")
 
     db.add(m.Command(
@@ -449,15 +449,32 @@ def agent_delete(agent_id: int, request: Request, db: Session = Depends(get_db))
 def subnet_add(
     agent_id: int, request: Request, cidr: str = Form(...),
     snmp_community: str = Form("public"), snmp_version: str = Form("2c"),
+    bind_interface: str = Form(""),
+    site_id: str = Form(""),
     db: Session = Depends(get_db),
 ):
+    """Create a subnet and bind it to this agent.
+
+    By default the subnet lives at the agent's home site. Pass an explicit
+    ``site_id`` to create the subnet at a DIFFERENT site -- the multi-client
+    pattern where one HQ agent collects for several client sites whose
+    tunnels are terminated locally.
+    """
     if _manager(request, db) is None:
         return _redirect("/login")
     agent = db.get(m.Agent, agent_id)
     if agent and cidr.strip():
+        effective_site_id = agent.site_id
+        if site_id.strip():
+            try:
+                effective_site_id = int(site_id)
+            except ValueError:
+                pass
         db.add(m.Subnet(
-            site_id=agent.site_id, agent_id=agent.id, cidr=cidr.strip(),
-            snmp_community=snmp_community.strip() or "public", snmp_version=snmp_version,
+            site_id=effective_site_id, agent_id=agent.id, cidr=cidr.strip(),
+            snmp_community=snmp_community.strip() or "public",
+            snmp_version=snmp_version,
+            bind_interface=bind_interface.strip() or None,
         ))
         db.commit()
         _flash(request, f"Subnet {cidr} assigned.")
@@ -482,12 +499,17 @@ def subnet_update(
     label: str = Form(""),
     snmp_community: str = Form(""),
     snmp_version: str = Form(""),
+    bind_interface: str = Form(""),
+    agent_id: str = Form(""),
     db: Session = Depends(get_db),
 ):
-    """Edit a subnet's friendly label and (optionally) its SNMP creds.
+    """Edit a subnet's friendly label, SNMP creds, source-bind address, and
+    optionally reassign it to a different agent (potentially in a different
+    site -- one agent at HQ can collect for several client sites whose
+    tunnels are terminated there).
 
-    Empty SNMP fields are ignored so the inline label-edit form on the agents
-    page doesn't accidentally wipe creds when an operator just renames a subnet.
+    Empty fields are ignored so the inline label-edit form on the agents page
+    doesn't accidentally wipe other settings when an operator just renames.
     """
     if _manager(request, db) is None:
         return _redirect("/login")
@@ -498,6 +520,18 @@ def subnet_update(
             subnet.snmp_community = snmp_community.strip()
         if snmp_version.strip():
             subnet.snmp_version = snmp_version.strip()
+        # bind_interface: empty string clears it (one explicit interface ->
+        # OS default route); operator can intentionally remove it.
+        subnet.bind_interface = bind_interface.strip() or None
+        # agent_id: optional reassignment. Accept any agent regardless of
+        # site -- that's the whole point of the multi-client agent path.
+        if agent_id.strip():
+            try:
+                new_agent = db.get(m.Agent, int(agent_id))
+            except ValueError:
+                new_agent = None
+            if new_agent is not None:
+                subnet.agent_id = new_agent.id
         db.commit()
         _flash(request, f"Subnet {subnet.cidr} updated.")
     return _redirect("/manage/agents")
@@ -562,7 +596,7 @@ def user_create(
         _flash(request, f"Username '{username}' is already taken.")
         return _redirect("/manage/users")
     role_enum = _coerce_role(role)
-    # client_readonly users MUST be pinned to a client — otherwise they'd see
+    # client_readonly users MUST be pinned to a client -- otherwise they'd see
     # every client (defeating the role's purpose). Other roles ignore client_id.
     pinned_client_id: Optional[int] = None
     if client_id.strip():

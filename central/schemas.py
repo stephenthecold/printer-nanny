@@ -15,7 +15,7 @@ class ORMModel(BaseModel):
 
 
 # --------------------------------------------------------------------------- #
-# Ingest (agent → central)
+# Ingest (agent -> central)
 # --------------------------------------------------------------------------- #
 class HeartbeatIn(BaseModel):
     version: Optional[str] = None
@@ -93,6 +93,10 @@ class AgentSubnetConfig(BaseModel):
     cidr: str
     snmp_community: str = "public"
     snmp_version: str = "2c"
+    # Source IP / interface the agent should bind to when scanning this subnet.
+    # Lets one agent serve multiple clients with overlapping RFC 1918 CIDRs
+    # (each tunnel terminates at a unique local IP).
+    bind_interface: Optional[str] = None
 
 
 class AgentConfigOut(BaseModel):
