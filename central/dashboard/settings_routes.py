@@ -1,4 +1,4 @@
-"""Settings page — edit DB-backed runtime config (admin only)."""
+"""Settings page -- edit DB-backed runtime config (admin only)."""
 
 from __future__ import annotations
 
@@ -11,6 +11,7 @@ from datetime import datetime, timezone
 from fastapi import APIRouter, Depends, File, Request, UploadFile
 from fastapi.responses import HTMLResponse, RedirectResponse, Response
 from fastapi.templating import Jinja2Templates
+from sqlalchemy import inspect as sa_inspect
 from sqlalchemy.orm import Session
 
 from central import models as m
@@ -21,7 +22,7 @@ router = APIRouter(tags=["settings"])
 _templates = Jinja2Templates(directory=str(Path(__file__).parent / "templates"))
 
 LOGO_ASSET_NAME = "logo"
-LOGO_MAX_BYTES = 512 * 1024  # 512 KB — enough for a logo, blocks accidental DB bloat
+LOGO_MAX_BYTES = 512 * 1024  # 512 KB -- enough for a logo, blocks accidental DB bloat
 LOGO_ALLOWED_TYPES = {
     "image/png", "image/jpeg", "image/svg+xml", "image/webp", "image/gif",
 }
@@ -56,7 +57,14 @@ def settings_page(
     if user is None:
         return RedirectResponse("/login", status_code=303)
     values = runtime.load_settings(db)
-    has_uploaded_logo = db.get(m.AppAsset, LOGO_ASSET_NAME) is not None
+    # Guard the AppAsset lookup: migration 0007 creates the table, but if an
+    # operator restarted the api container before migrations finished (or
+    # before the new migration shipped), the table doesn't exist yet and the
+    # whole settings page 500s. Check the table is present first.
+    has_uploaded_logo = (
+        sa_inspect(db.get_bind()).has_table(m.AppAsset.__tablename__)
+        and db.get(m.AppAsset, LOGO_ASSET_NAME) is not None
+    )
     return _templates.TemplateResponse(
         request, "settings.html",
         {"user": user, "sections": _sections(values),
@@ -91,7 +99,7 @@ async def upload_logo(
 ):
     """Store an uploaded logo in app_assets and point app.logo_url at /branding/logo.
 
-    Operators don't need an external image host for one small file — let them
+    Operators don't need an external image host for one small file -- let them
     drop it in here and the dashboard / login page pick it up immediately.
     """
     user = _admin(request, db)
@@ -154,10 +162,14 @@ def delete_logo(request: Request, db: Session = Depends(get_db)):
 def serve_logo(db: Session = Depends(get_db)):
     """Public endpoint that returns the uploaded logo bytes.
 
-    Public by design — same exposure surface as a logo on the login page. Clients
+    Public by design -- same exposure surface as a logo on the login page. Clients
     cache it for an hour; uploads bump the URL via a cache-busting suffix on the
     settings page (no manual purge needed for the operator's own browser).
     """
+    # Same migration-not-applied guard as /settings: don't 500 a public endpoint
+    # because a table is missing on a freshly-restarted-without-migrations stack.
+    if not sa_inspect(db.get_bind()).has_table(m.AppAsset.__tablename__):
+        return Response(status_code=404)
     asset = db.get(m.AppAsset, LOGO_ASSET_NAME)
     if asset is None:
         return Response(status_code=404)
@@ -178,7 +190,7 @@ def settings_test(request: Request, db: Session = Depends(get_db)):
     channels = active_channels(runtime.load_settings(db))
     if not channels:
         request.session["flash"] = (
-            "No channels enabled — turn on Email and/or FreeScout above, then save first."
+            "No channels enabled -- turn on Email and/or FreeScout above, then save first."
         )
         return RedirectResponse("/settings", status_code=303)
     note = Notification(
@@ -193,5 +205,5 @@ def settings_test(request: Request, db: Session = Depends(get_db)):
     summary = "; ".join(
         f"{name}: {'OK' if res.ok else 'FAILED'} ({res.detail})" for name, res in results
     )
-    request.session["flash"] = f"Test sent — {summary}"
+    request.session["flash"] = f"Test sent -- {summary}"
     return RedirectResponse("/settings", status_code=303)

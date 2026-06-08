@@ -33,6 +33,28 @@ def http(db) -> TestClient:
     return client
 
 
+def test_settings_page_survives_missing_app_assets_table(http, db):
+    """An operator who upgraded code but didn't run migrations is missing the
+    app_assets table; /settings used to 500. It must now render normally and
+    just show 'no logo uploaded' instead of blowing up the whole page."""
+    db.execute(__import__("sqlalchemy").text("DROP TABLE IF EXISTS app_assets"))
+    db.commit()
+    resp = http.get("/settings")
+    assert resp.status_code == 200, resp.text[:500]
+    # The 'no logo uploaded' empty state should render (proves has_uploaded_logo
+    # came back False rather than throwing).
+    assert "No logo uploaded" in resp.text or "Logo" in resp.text
+
+
+def test_serve_logo_returns_404_when_table_missing(http, db):
+    """Public /branding/logo is hit by every dashboard page; it must 404
+    cleanly, not 500, when the app_assets table doesn't exist."""
+    db.execute(__import__("sqlalchemy").text("DROP TABLE IF EXISTS app_assets"))
+    db.commit()
+    resp = http.get("/branding/logo")
+    assert resp.status_code == 404
+
+
 def test_default_app_branding_includes_all_keys(db):
     branding = runtime.app_branding(db)
     # Keys are stored as `app.<x>` and exposed without the prefix in templates.
