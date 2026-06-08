@@ -11,6 +11,7 @@ import logging
 import sys
 from typing import Optional
 
+from central.config import settings
 from central.db import SessionLocal, create_all
 from central.worker import jobs
 
@@ -47,7 +48,12 @@ def main(argv: Optional[list] = None) -> int:
     args = parser.parse_args(argv)
 
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
-    create_all()  # safe no-op if tables already exist (SQLite dev convenience)
+    # SQLite dev convenience only. On Postgres, schema is owned by Alembic — if
+    # we create_all() here, we race the api container's `alembic upgrade head`
+    # at startup and the next additive migration crashes with a duplicate-table
+    # error (see #8 / migration 0007 follow-up).
+    if settings.is_sqlite:
+        create_all()
 
     if args.once:
         print(run_cycle())
