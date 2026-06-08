@@ -264,7 +264,13 @@ agent_id = $AgentId
 api_key = "$ApiKey"
 $tlsLine
 "@
-Set-Content -Path $cfgPath -Value $cfg -Encoding UTF8
+# Write WITHOUT a BOM. PS 5.1's `Set-Content -Encoding UTF8` writes UTF8-with-BOM,
+# but Python's tomllib reads bytes and chokes on a leading BOM with the unhelpful
+# "Invalid statement (at line 1, column 1)". UTF8NoBOM only exists in PS 6+, so
+# use the .NET API directly with a no-BOM UTF-8 encoder -- works on all PS
+# versions and is guaranteed BOM-free.
+$noBomUtf8 = New-Object System.Text.UTF8Encoding($false)
+[System.IO.File]::WriteAllText($cfgPath, $cfg, $noBomUtf8)
 
 # Restrict config to SYSTEM + Administrators only (api_key is a secret).
 $acl = Get-Acl $cfgPath

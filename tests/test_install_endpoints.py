@@ -55,6 +55,13 @@ def test_install_agent_ps1_served():
     # directly (the architecture promise is outbound-to-central only, and
     # nssm.cc returns 503 in real deployments).
     assert "install-agent-nssm.exe" in r.text
+    # agent.toml must be written WITHOUT a UTF-8 BOM. PS 5.1's `Set-Content
+    # -Encoding UTF8` writes a BOM that Python's tomllib rejects with "Invalid
+    # statement at line 1, column 1". Use the .NET API instead (UTF8NoBOM
+    # only exists on PS 6+). Asserting the marker keeps us from ever shipping
+    # `Set-Content -Encoding UTF8` for the toml again.
+    assert "UTF8Encoding($false)" in r.text
+    assert "WriteAllText" in r.text
     # Pip install must bail loudly on $LASTEXITCODE -- silent pip failures
     # left operators with a half-installed agent and no useful error.
     assert "pip install $PipSource failed" in r.text
