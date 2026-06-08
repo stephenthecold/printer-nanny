@@ -39,26 +39,49 @@ and `SECRET_KEY` live in the environment.
 curl -fsSL https://raw.githubusercontent.com/stephenthecold/printer-nanny/main/deploy/install.sh | bash
 ```
 
-That clones the repo into `./printer-nanny`, generates a `.env` with a strong
-`SECRET_KEY`, brings the stack up with `docker compose up -d --build`, and
-waits for the API. Open <http://localhost:8000> and log in with **`admin` /
-`admin`** — change that password immediately.
+The installer clones the repo into `./printer-nanny`, generates a `.env` with
+a strong `SECRET_KEY`, and walks you through how you want to terminate TLS:
 
-The API binds to host port `8000` by default so you can point your existing
-**Caddy / Nginx / Traefik** at it. If you'd rather use the bundled Caddy
-reverse proxy on `:8080`, add `--with-caddy`:
+| Mode | When to pick | Result |
+|---|---|---|
+| `external` (default) | You already run Caddy / Nginx / Traefik. | API exposed on `:8000` for your existing proxy. |
+| `bundled` | You want auto-TLS and have a public hostname. | Bundled Caddy on `:80`+`:443` with Let's Encrypt. |
+| `none` | LAN testing, no TLS needed. | Bundled Caddy on a plain HTTP port you pick. |
+
+Skip the prompts with flags for unattended installs:
 
 ```bash
-curl -fsSL .../install.sh | bash -s -- --with-caddy
+# Bundled Caddy + Let's Encrypt
+curl -fsSL .../install.sh | bash -s -- --proxy bundled \
+    --hostname printers.msp.example.com --acme-email ops@msp.example.com
+# Or plain HTTP for testing on a LAN
+curl -fsSL .../install.sh | bash -s -- --proxy none --http-port 8536
 ```
 
-Re-running the installer is safe: it pulls the latest code, leaves your `.env`
-and data alone, and just rebuilds/restarts. To wipe and re-seed with demo data
-(destructive), add `--demo`.
+Log in at the URL it prints with **`admin` / `admin`** — change that password
+immediately under `/manage`. The API runs migrations and bootstraps the admin
+user on every container start (idempotent), so a fresh DB is usable on first
+boot without touching a shell.
 
-The default stack: Postgres + API + worker + dashboard, plus MailHog (`:8025`)
-so demo alert email is visible. The bundled Caddy is opt-in via the `caddy`
-compose profile.
+### Updating
+
+```bash
+bash deploy/install.sh --update
+```
+
+Pulls the latest code, rebuilds the images (`--pull` so the Python / Postgres
+base layers refresh), and recreates only the changed containers. Your `.env`
+and Postgres data volume are preserved. Migrations run automatically as part
+of the api service's startup chain.
+
+### Demo data (destructive)
+
+```bash
+bash deploy/install.sh --demo
+```
+
+DROPS all tables and reseeds with fake clients/printers. Asks for `yes`
+confirmation before doing anything. Don't run this against a real instance.
 
 <details>
 <summary>Manual steps (what the installer does under the hood)</summary>
@@ -68,24 +91,22 @@ git clone https://github.com/stephenthecold/printer-nanny.git
 cd printer-nanny
 echo "SECRET_KEY=$(openssl rand -base64 48)" > .env
 docker compose up -d --build                  # API on :8000, BYO proxy
-# or, include the bundled Caddy on :8080:
+# or, include the bundled Caddy on :80 + :443:
 docker compose --profile caddy up -d --build
 # optional: drop & re-seed with demo clients/printers
 docker compose exec api python -m central.seed
 ```
 
-The api container runs migrations and the idempotent `python -m central.seed
---init` on every start — that's what creates the initial `admin`/`tech` users
-and default alert rules on a fresh database without touching an existing one.
-
-To change the host port, set `API_PORT` (or `CADDY_PORT` for the bundled Caddy)
-in `.env` before bringing the stack up.
+For the bundled Caddy path you'll also need a `deploy/Caddyfile` — copy
+`deploy/Caddyfile.template` and replace `__SITE__` with your hostname (or
+`:8080` for HTTP-only) and `__GLOBAL_OPTIONS__` with `email you@…` or
+`auto_https off`.
 </details>
 
 ### Point your own reverse proxy at it
 
-The API listens on `http://<docker-host>:${API_PORT:-8000}` with no TLS. A
-minimal Caddyfile entry on your host:
+If you picked `external` mode, the API listens on
+`http://<docker-host>:${API_PORT:-8000}` with no TLS. Minimal Caddyfile:
 
 ```Caddyfile
 printers.msp.example.com {
