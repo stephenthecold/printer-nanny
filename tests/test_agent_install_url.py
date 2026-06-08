@@ -70,3 +70,18 @@ def test_install_command_falls_back_to_request_when_no_proxy_headers(http, db):
     # The TestClient default base is http://testserver — that's what we expect
     # the install snippet to use when there are no proxy headers and no pin.
     assert "--central-url http://testserver" in resp.text
+
+
+def test_enroll_renders_windows_powershell_command(http, db):
+    """Enrolling a new agent must show a Windows PowerShell one-liner alongside
+    the Linux one — Windows Server is the canonical agent host for MSPs whose
+    Linux box can't reach the printer VLAN."""
+    runtime.save_settings(db, {"app.public_url": "https://printers.example.com"})
+    _enroll_agent(http, http.site_id)
+    resp = http.get("/manage/agents")
+    assert resp.status_code == 200
+    assert "install-agent.ps1" in resp.text
+    assert "iwr -useb" in resp.text
+    assert "$env:PN_CENTRAL_URL" in resp.text
+    assert "$env:PN_AGENT_ID" in resp.text
+    assert "$env:PN_API_KEY" in resp.text
