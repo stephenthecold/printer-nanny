@@ -85,3 +85,7 @@ def test_enroll_renders_windows_powershell_command(http, db):
     assert "$env:PN_CENTRAL_URL" in resp.text
     assert "$env:PN_AGENT_ID" in resp.text
     assert "$env:PN_API_KEY" in resp.text
+    # PipSource must be carried in via env var, because `iwr | iex` can't pass
+    # parameters to the executed script — without this the PS1 falls back to
+    # the 'your-org' placeholder and refuses to install.
+    assert "$env:PN_PIP_SOURCE" in resp.text
