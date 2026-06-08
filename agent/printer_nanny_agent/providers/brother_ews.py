@@ -15,11 +15,16 @@ If scraping fails for ANY reason (HTTP timeout, 401, unsupported firmware
 HTML layout, ...) the provider silently degrades to leave the SNMP buckets
 in place -- there is no operator-visible failure mode.
 
-Three HTML layout patterns are matched, covering ~2014-2026 Brother lasers:
+Four HTML layout patterns are matched, covering ~2014-2026 Brother lasers:
 
-  A) JavaScript array: `TonerInfo[i] = "85";` (most modern color lasers)
+  A) JavaScript array: `TonerInfo[i] = "85";` (some modern color lasers)
   B) Table rows with text percentages: `<td>Cyan</td><td>85%</td>`
   C) Inline gauge img names: `/img/Toner_C_85.gif` / `Toner_Y75.png`
+  D) `tonerremain` gauge images where height="N" IS the value, no displayed
+     percentage anywhere. This is what the MFC-L8900CDW (and other 2016+
+     business color lasers) actually do -- the height attribute on the gauge
+     img is the visible bar height; max is 11px for this model family. Less
+     precise than A/B/C, but it's the only signal these models give.
 """
 
 from __future__ import annotations
@@ -84,6 +89,24 @@ _RE_IMG_FILENAME = re.compile(
         \.(?:gif|png|jpg|svg)""",
     re.IGNORECASE | re.VERBOSE,
 )
+
+# Pattern D: gauge image where height="N" IS the toner-remaining bar height
+# (no displayed percentage). MFC-L8900CDW class. Attribute order is highly
+# variable across firmware revs -- match either order of class/alt/height.
+_RE_TONERREMAIN_IMG = re.compile(
+    r"""<img\b[^>]*\bclass\s*=\s*["'][^"']*\btonerremain\b[^"']*["'][^>]*>""",
+    re.IGNORECASE,
+)
+_RE_TONERREMAIN_ATTRS = re.compile(
+    r"""(?:\balt\s*=\s*["'](?P<alt>[^"']+)["']) |
+        (?:\bheight\s*=\s*["'](?P<height>\d+)["'])""",
+    re.IGNORECASE | re.VERBOSE,
+)
+# Empirically the gauge max on the L8900CDW family is 11px ("full" gauges
+# all show height=11). Configurable if a future model is found to use a
+# different max -- right now this is the only Brother EWS that uses the
+# tonerremain gauge pattern, so a single constant is correct.
+_TONERREMAIN_MAX_PX = 11
 
 
 def _parse_toner_percentages(html: str) -> Dict[str, int]:
@@ -158,6 +181,32 @@ def _parse_toner_percentages(html: str) -> Dict[str, int]:
             img_hits[color] = pct
     if img_hits:
         return img_hits
+
+    # --- Pattern D: tonerremain gauge images (MFC-L8900CDW family) ---
+    gauge_hits: Dict[str, int] = {}
+    for tag_match in _RE_TONERREMAIN_IMG.finditer(html):
+        tag = tag_match.group(0)
+        alt = height = None
+        for attr in _RE_TONERREMAIN_ATTRS.finditer(tag):
+            if attr.group("alt") is not None:
+                alt = attr.group("alt")
+            elif attr.group("height") is not None:
+                height = attr.group("height")
+        if not alt or height is None:
+            continue
+        color = _COLOR_CODES.get(alt.strip().upper())
+        if not color:
+            continue
+        try:
+            h = int(height)
+        except ValueError:
+            continue
+        # Clamp to max -- some firmwares pad with extra pixels above the bar
+        # area (we'd otherwise get >100%).
+        pct = max(0, min(100, round(h * 100 / _TONERREMAIN_MAX_PX)))
+        gauge_hits[color] = pct
+    if gauge_hits:
+        return gauge_hits
 
     return {}
 
