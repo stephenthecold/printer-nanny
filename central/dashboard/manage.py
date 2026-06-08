@@ -18,7 +18,8 @@ from sqlalchemy.orm import Session
 from central import models as m
 from central.dashboard import _keystore
 from central.db import get_db
-from central.security import generate_api_key, hash_api_key
+from central.runtime import app_branding
+from central.security import generate_api_key, hash_api_key, hash_password
 
 
 def _split_tags(raw: str) -> Optional[list[str]]:
@@ -43,6 +44,12 @@ def _manager(request: Request, db: Session) -> Optional[m.User]:
     return user if (user is not None and user.role in _MANAGER_ROLES) else None
 
 
+def _admin(request: Request, db: Session) -> Optional[m.User]:
+    """Admin-only routes (user management, white-label settings) use this."""
+    user = _user(request, db)
+    return user if (user is not None and user.role == m.UserRole.admin) else None
+
+
 def _redirect(path: str) -> RedirectResponse:
     return RedirectResponse(path, status_code=303)
 
@@ -55,6 +62,16 @@ def _pop_flash(request: Request) -> Optional[str]:
     return request.session.pop("flash", None)
 
 
+def _tpl(request: Request, template: str, db: Session, **ctx) -> HTMLResponse:
+    """Local render helper that always injects ``app.*`` branding into context.
+
+    Keeps every manage template (nav, login, footer) in sync with the operator's
+    Settings → Branding values without each callsite having to remember.
+    """
+    ctx.setdefault("app", app_branding(db))
+    return _templates.TemplateResponse(request, template, ctx)
+
+
 # --------------------------------------------------------------------------- #
 # Clients & sites
 # --------------------------------------------------------------------------- #
@@ -64,9 +81,11 @@ def manage_home(request: Request, db: Session = Depends(get_db)):
     if user is None:
         return _redirect("/login")
     clients = list(db.scalars(select(m.Client).order_by(m.Client.name)))
-    return _templates.TemplateResponse(
-        request, "manage_clients.html",
-        {"user": user, "clients": clients, "flash": _pop_flash(request)},
+    # All clients are exposed in a top-level "Add site" form, so we always need
+    # the full list — even when the operator just wants to click into a client.
+    return _tpl(
+        request, "manage_clients.html", db,
+        user=user, clients=clients, flash=_pop_flash(request),
     )
 
 
@@ -94,10 +113,10 @@ def client_manage(client_id: int, request: Request, db: Session = Depends(get_db
     printers = list(
         db.scalars(select(m.Printer).where(m.Printer.client_id == client_id).order_by(m.Printer.ip))
     )
-    return _templates.TemplateResponse(
-        request, "client_manage.html",
-        {"user": user, "client": client, "sites": client.sites,
-         "printers": printers, "flash": _pop_flash(request)},
+    return _tpl(
+        request, "client_manage.html", db,
+        user=user, client=client, sites=client.sites,
+        printers=printers, flash=_pop_flash(request),
     )
 
 
@@ -177,10 +196,10 @@ def printer_new(
     client = db.get(m.Client, client_id)
     if client is None:
         return _redirect("/manage")
-    return _templates.TemplateResponse(
-        request, "printer_form.html",
-        {"user": user, "client": client, "sites": client.sites,
-         "printer": None, "selected_site_id": site_id},
+    return _tpl(
+        request, "printer_form.html", db,
+        user=user, client=client, sites=client.sites,
+        printer=None, selected_site_id=site_id,
     )
 
 
@@ -197,11 +216,11 @@ def printer_edit(
     if printer is None:
         return _redirect("/manage")
     client = db.get(m.Client, printer.client_id)
-    return _templates.TemplateResponse(
-        request, "printer_form.html",
-        {"user": user, "client": client, "sites": client.sites,
-         "printer": printer, "selected_site_id": printer.site_id,
-         "from_approvals": bool(from_approvals)},
+    return _tpl(
+        request, "printer_form.html", db,
+        user=user, client=client, sites=client.sites,
+        printer=printer, selected_site_id=printer.site_id,
+        from_approvals=bool(from_approvals),
     )
 
 
@@ -362,14 +381,14 @@ def agents_home(request: Request, db: Session = Depends(get_db)):
     agents = list(db.scalars(select(m.Agent).order_by(m.Agent.id)))
     sites = list(db.scalars(select(m.Site).order_by(m.Site.name)))
     rt = load_settings(db)
-    return _templates.TemplateResponse(
-        request, "agents.html",
-        {"user": user, "agents": agents, "sites": sites,
-         "new_key": _keystore.pop(request.session.pop("new_agent_key_token", None)),
-         "central_url": str(request.base_url).rstrip("/"),
-         "pip_source": rt["agent.pip_source"],
-         "docker_image": rt["agent.docker_image"],
-         "flash": _pop_flash(request)},
+    return _tpl(
+        request, "agents.html", db,
+        user=user, agents=agents, sites=sites,
+        new_key=_keystore.pop(request.session.pop("new_agent_key_token", None)),
+        central_url=str(request.base_url).rstrip("/"),
+        pip_source=rt["agent.pip_source"],
+        docker_image=rt["agent.docker_image"],
+        flash=_pop_flash(request),
     )
 
 
@@ -451,3 +470,166 @@ def subnet_delete(subnet_id: int, request: Request, db: Session = Depends(get_db
         db.commit()
         _flash(request, "Subnet removed.")
     return _redirect("/manage/agents")
+
+
+# --------------------------------------------------------------------------- #
+# Users (admin only)
+# --------------------------------------------------------------------------- #
+def _coerce_role(raw: str) -> m.UserRole:
+    try:
+        return m.UserRole(raw)
+    except ValueError:
+        return m.UserRole.tech
+
+
+@router.get("/users", response_class=HTMLResponse)
+def users_home(request: Request, db: Session = Depends(get_db)):
+    if _admin(request, db) is None:
+        return _redirect("/login" if _user(request, db) is None else "/")
+    users = list(db.scalars(select(m.User).order_by(m.User.username)))
+    clients = list(db.scalars(select(m.Client).order_by(m.Client.name)))
+    return _tpl(
+        request, "manage_users.html", db,
+        user=_admin(request, db), users=users, clients=clients,
+        roles=[r.value for r in m.UserRole],
+        flash=_pop_flash(request),
+    )
+
+
+@router.get("/users/{user_id}/edit", response_class=HTMLResponse)
+def user_edit(user_id: int, request: Request, db: Session = Depends(get_db)):
+    if _admin(request, db) is None:
+        return _redirect("/login" if _user(request, db) is None else "/")
+    target = db.get(m.User, user_id)
+    if target is None:
+        return _redirect("/manage/users")
+    clients = list(db.scalars(select(m.Client).order_by(m.Client.name)))
+    return _tpl(
+        request, "user_form.html", db,
+        user=_admin(request, db), target=target, clients=clients,
+        roles=[r.value for r in m.UserRole],
+    )
+
+
+@router.post("/users")
+def user_create(
+    request: Request,
+    username: str = Form(...),
+    email: str = Form(""),
+    role: str = Form("tech"),
+    client_id: str = Form(""),
+    password: str = Form(""),
+    db: Session = Depends(get_db),
+):
+    if _admin(request, db) is None:
+        return _redirect("/login")
+    username = username.strip()
+    if not username:
+        _flash(request, "Username is required.")
+        return _redirect("/manage/users")
+    if db.scalar(select(m.User).where(m.User.username == username)) is not None:
+        _flash(request, f"Username '{username}' is already taken.")
+        return _redirect("/manage/users")
+    role_enum = _coerce_role(role)
+    # client_readonly users MUST be pinned to a client — otherwise they'd see
+    # every client (defeating the role's purpose). Other roles ignore client_id.
+    pinned_client_id: Optional[int] = None
+    if client_id.strip():
+        try:
+            pinned_client_id = int(client_id)
+        except ValueError:
+            pinned_client_id = None
+    if role_enum == m.UserRole.client_readonly and pinned_client_id is None:
+        _flash(request, "client_readonly users must be assigned to a client.")
+        return _redirect("/manage/users")
+    new_user = m.User(
+        username=username,
+        email=email.strip() or None,
+        password_hash=hash_password(password) if password else None,
+        role=role_enum,
+        client_id=pinned_client_id if role_enum == m.UserRole.client_readonly else None,
+        auth_provider="local" if password else "oidc",
+    )
+    db.add(new_user)
+    db.commit()
+    _flash(request, f"User '{username}' created.")
+    return _redirect("/manage/users")
+
+
+@router.post("/users/{user_id}")
+def user_update(
+    user_id: int, request: Request,
+    email: str = Form(""),
+    role: str = Form("tech"),
+    client_id: str = Form(""),
+    db: Session = Depends(get_db),
+):
+    actor = _admin(request, db)
+    if actor is None:
+        return _redirect("/login")
+    target = db.get(m.User, user_id)
+    if target is None:
+        return _redirect("/manage/users")
+    new_role = _coerce_role(role)
+    # Last-admin guard: refuse to demote the only remaining admin (lockout).
+    if (target.role == m.UserRole.admin and new_role != m.UserRole.admin
+            and db.query(m.User).filter_by(role=m.UserRole.admin).count() <= 1):
+        _flash(request, "Refused: this is the only admin. Promote another user first.")
+        return _redirect(f"/manage/users/{user_id}/edit")
+    pinned_client_id: Optional[int] = None
+    if client_id.strip():
+        try:
+            pinned_client_id = int(client_id)
+        except ValueError:
+            pinned_client_id = None
+    if new_role == m.UserRole.client_readonly and pinned_client_id is None:
+        _flash(request, "client_readonly users must be assigned to a client.")
+        return _redirect(f"/manage/users/{user_id}/edit")
+    target.email = email.strip() or None
+    target.role = new_role
+    target.client_id = pinned_client_id if new_role == m.UserRole.client_readonly else None
+    db.commit()
+    _flash(request, f"User '{target.username}' updated.")
+    return _redirect("/manage/users")
+
+
+@router.post("/users/{user_id}/reset-password")
+def user_reset_password(
+    user_id: int, request: Request,
+    new_password: str = Form(...),
+    db: Session = Depends(get_db),
+):
+    if _admin(request, db) is None:
+        return _redirect("/login")
+    target = db.get(m.User, user_id)
+    if target is None:
+        return _redirect("/manage/users")
+    if len(new_password) < 8:
+        _flash(request, "Password must be at least 8 characters.")
+        return _redirect(f"/manage/users/{user_id}/edit")
+    target.password_hash = hash_password(new_password)
+    target.auth_provider = "local"  # they can now sign in locally
+    db.commit()
+    _flash(request, f"Password reset for '{target.username}'.")
+    return _redirect("/manage/users")
+
+
+@router.post("/users/{user_id}/delete")
+def user_delete(user_id: int, request: Request, db: Session = Depends(get_db)):
+    actor = _admin(request, db)
+    if actor is None:
+        return _redirect("/login")
+    target = db.get(m.User, user_id)
+    if target is None:
+        return _redirect("/manage/users")
+    if actor.id == target.id:
+        _flash(request, "Refused: you can't delete the account you're logged in as.")
+        return _redirect("/manage/users")
+    if (target.role == m.UserRole.admin
+            and db.query(m.User).filter_by(role=m.UserRole.admin).count() <= 1):
+        _flash(request, "Refused: this is the only admin.")
+        return _redirect("/manage/users")
+    db.delete(target)
+    db.commit()
+    _flash(request, f"User '{target.username}' deleted.")
+    return _redirect("/manage/users")

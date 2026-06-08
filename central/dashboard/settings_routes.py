@@ -45,7 +45,9 @@ def settings_page(request: Request, db: Session = Depends(get_db)):
     return _templates.TemplateResponse(
         request, "settings.html",
         {"user": user, "sections": _sections(values),
-         "placeholder": runtime.SECRET_PLACEHOLDER, "flash": request.session.pop("flash", None)},
+         "placeholder": runtime.SECRET_PLACEHOLDER,
+         "app": runtime.app_branding(db),
+         "flash": request.session.pop("flash", None)},
     )
 
 

@@ -31,7 +31,8 @@ class FreeScoutChannel(NotificationChannel):
     def build_payload(self, note: Notification) -> dict:
         """Build the POST /api/conversations body. Pure function — unit tested."""
         customer_email = self.config.get("customer_email") or "alerts@printer-nanny.local"
-        customer_name = note.client_name or "Printer Nanny"
+        app_name = self.setting("app.name", "Printer Nanny") or "Printer Nanny"
+        customer_name = note.client_name or app_name
         body_lines = [note.body]
         if note.printer_label:
             body_lines.append(f"<br>Printer: {note.printer_label}")

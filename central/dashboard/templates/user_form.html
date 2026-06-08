@@ -1,0 +1,48 @@
+{% extends "base.html" %}
+{% block title %}Edit user · {{ app.name or 'Printer Nanny' }}{% endblock %}
+{% block body %}
+<div class="flex items-center gap-3 mb-4">
+  <a href="/manage/users" class="text-sm text-sky-700 hover:underline">← Users</a>
+  <h1 class="text-2xl font-semibold">Edit user: {{ target.username }}</h1>
+  <span class="text-xs px-2 py-0.5 rounded bg-slate-200 text-slate-700">{{ target.auth_provider }}</span>
+</div>
+
+<form method="post" action="/manage/users/{{ target.id }}" class="bg-white rounded-lg shadow p-5 max-w-lg space-y-3">
+  <label class="block">
+    <span class="text-xs text-slate-500">Email</span>
+    <input name="email" type="email" value="{{ target.email or '' }}"
+           class="w-full border rounded px-3 py-2 text-sm" />
+  </label>
+  <label class="block">
+    <span class="text-xs text-slate-500">Role</span>
+    <select name="role" class="w-full border rounded px-3 py-2 text-sm">
+      {% for r in roles %}
+      <option value="{{ r }}" {% if r == target.role.value %}selected{% endif %}>{{ r }}</option>
+      {% endfor %}
+    </select>
+  </label>
+  <label class="block">
+    <span class="text-xs text-slate-500">Client (only used when role is client_readonly)</span>
+    <select name="client_id" class="w-full border rounded px-3 py-2 text-sm">
+      <option value="">—</option>
+      {% for c in clients %}
+      <option value="{{ c.id }}" {% if target.client_id == c.id %}selected{% endif %}>{{ c.name }}</option>
+      {% endfor %}
+    </select>
+  </label>
+  <div class="flex gap-2">
+    <button class="bg-slate-900 text-white rounded px-4 py-2 text-sm font-medium">Save</button>
+    <a href="/manage/users" class="px-4 py-2 text-sm text-slate-600">Cancel</a>
+  </div>
+</form>
+
+<section class="bg-white rounded-lg shadow p-5 max-w-lg mt-6">
+  <h2 class="font-semibold mb-3">Reset password</h2>
+  <p class="text-xs text-slate-500 mb-2">Forces a new local password — the user can change it later from <code>/account</code>.</p>
+  <form method="post" action="/manage/users/{{ target.id }}/reset-password" class="space-y-2">
+    <input name="new_password" type="password" placeholder="New password (min 8 chars)" required
+           class="w-full border rounded px-3 py-2 text-sm" />
+    <button class="bg-amber-600 text-white rounded px-4 py-2 text-sm font-medium">Reset password</button>
+  </form>
+</section>
+{% endblock %}

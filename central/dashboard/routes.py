@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from datetime import datetime, timezone
 from pathlib import Path
+from typing import Optional
 
 from fastapi import APIRouter, Depends, Form, Request
 from fastapi.responses import HTMLResponse, RedirectResponse
@@ -14,7 +15,8 @@ from sqlalchemy.orm import Session
 from central import models as m
 from central import queries
 from central.db import get_db
-from central.security import verify_password
+from central.runtime import app_branding
+from central.security import hash_password, verify_password
 
 router = APIRouter(tags=["dashboard"])
 _templates = Jinja2Templates(directory=str(Path(__file__).parent / "templates"))
@@ -34,8 +36,13 @@ def _forbidden_client(user, client_id) -> bool:
     return user.role == m.UserRole.client_readonly and user.client_id != client_id
 
 
-def _render(request: Request, template: str, **ctx) -> HTMLResponse:
+def _render(
+    request: Request, template: str, db: Optional[Session] = None, **ctx
+) -> HTMLResponse:
     ctx.setdefault("user", ctx.get("user"))
+    # White-label branding injected into every render. Templates read ``app.name``,
+    # ``app.logo_url``, ``app.primary_color``, ``app.support_email``, ``app.footer_text``.
+    ctx.setdefault("app", app_branding(db) if db is not None else {})
     return _templates.TemplateResponse(request, template, ctx)
 
 
@@ -46,7 +53,7 @@ def login_form(request: Request, sso_error: str = "", db: Session = Depends(get_
 
     cfg = oidc_config(db)
     return _render(
-        request, "login.html", error=None,
+        request, "login.html", db=db, error=None,
         sso_enabled=oidc_enabled(db),
         sso_label=cfg.get("button_label") or "Sign in with SSO",
         sso_error=sso_error,
@@ -62,7 +69,7 @@ def login(
 ):
     user = db.scalar(select(m.User).where(m.User.username == username))
     if user is None or not verify_password(password, user.password_hash):
-        return _render(request, "login.html", error="Invalid credentials")
+        return _render(request, "login.html", db=db, error="Invalid credentials")
     request.session["user_id"] = user.id
     return RedirectResponse("/", status_code=303)
 
@@ -83,6 +90,7 @@ def overview(request: Request, db: Session = Depends(get_db)):
     return _render(
         request,
         "overview.html",
+        db=db,
         user=user,
         summary=queries.fleet_summary(db, client_filter),
         low=queries.low_supplies(db)[:10],
@@ -115,6 +123,7 @@ def client_detail(client_id: int, request: Request, db: Session = Depends(get_db
     return _render(
         request,
         "client.html",
+        db=db,
         user=user,
         client=client,
         sites=client.sites,
@@ -151,6 +160,7 @@ def printer_detail(printer_id: int, request: Request, db: Session = Depends(get_
     return _render(
         request,
         "printer.html",
+        db=db,
         user=user,
         printer=printer,
         supplies=printer.supplies,
@@ -177,7 +187,7 @@ def approvals(request: Request, db: Session = Depends(get_db)):
             .order_by(m.Printer.created_at.desc())
         )
     )
-    return _render(request, "approvals.html", user=user, pending=pending)
+    return _render(request, "approvals.html", db=db, user=user, pending=pending)
 
 
 @router.post("/approvals/{printer_id}/{action}", response_class=HTMLResponse)
@@ -214,7 +224,7 @@ def alerts_inbox(request: Request, db: Session = Depends(get_db)):
             .order_by(m.Alert.created_at.desc())
         )
     )
-    return _render(request, "alerts.html", user=user, alerts=rows)
+    return _render(request, "alerts.html", db=db, user=user, alerts=rows)
 
 
 @router.post("/alerts/{alert_id}/{action}", response_class=HTMLResponse)
@@ -233,6 +243,51 @@ def alert_action(alert_id: int, action: str, request: Request, db: Session = Dep
             alert.resolved_at = datetime.now(timezone.utc)
         db.commit()
     return HTMLResponse("")
+
+
+# --- My account: self-service profile + password change -------------------- #
+@router.get("/account", response_class=HTMLResponse)
+def account_view(request: Request, db: Session = Depends(get_db)):
+    user = _user(request, db)
+    if user is None:
+        return _login_redirect()
+    return _render(
+        request, "account.html", db=db, user=user,
+        flash=request.session.pop("account_flash", None),
+        error=request.session.pop("account_error", None),
+    )
+
+
+@router.post("/account/password")
+def account_change_password(
+    request: Request,
+    current_password: str = Form(...),
+    new_password: str = Form(...),
+    confirm_password: str = Form(...),
+    db: Session = Depends(get_db),
+):
+    user = _user(request, db)
+    if user is None:
+        return _login_redirect()
+    # SSO-only users have no local password to change.
+    if user.auth_provider != "local" or user.password_hash is None:
+        request.session["account_error"] = (
+            "Your account is managed by SSO — change your password with the identity provider."
+        )
+        return RedirectResponse("/account", status_code=303)
+    if not verify_password(current_password, user.password_hash):
+        request.session["account_error"] = "Current password is incorrect."
+        return RedirectResponse("/account", status_code=303)
+    if len(new_password) < 8:
+        request.session["account_error"] = "New password must be at least 8 characters."
+        return RedirectResponse("/account", status_code=303)
+    if new_password != confirm_password:
+        request.session["account_error"] = "New password and confirmation don't match."
+        return RedirectResponse("/account", status_code=303)
+    user.password_hash = hash_password(new_password)
+    db.commit()
+    request.session["account_flash"] = "Password changed."
+    return RedirectResponse("/account", status_code=303)
 
 
 # --- helpers ---------------------------------------------------------------- #
