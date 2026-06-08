@@ -431,6 +431,71 @@ def agent_rotate_key(agent_id: int, request: Request, db: Session = Depends(get_
     return _redirect("/manage/agents")
 
 
+@router.post("/agents/{agent_id}/update")
+def agent_update_command(agent_id: int, request: Request, db: Session = Depends(get_db)):
+    """Queue an update_agent command. The agent picks it up on its next
+    heartbeat (~60s), pip-installs the configured agent.pip_source, then exits
+    so the service manager restarts it against the new code.
+
+    Operator-driven only: there's no automatic rolling-update story yet (the
+    design doc lists "secure auto-update path eventually" -- this is the
+    eventually). A confirmation dialog is in the template.
+    """
+    if _manager(request, db) is None:
+        return _redirect("/login")
+    agent = db.get(m.Agent, agent_id)
+    if agent is None:
+        _flash(request, "Agent not found.")
+        return _redirect("/manage/agents")
+    from central.runtime import load_settings
+    rt = load_settings(db)
+    pip_source = str(rt.get("agent.pip_source") or "").strip()
+    if not pip_source or "your-org" in pip_source:
+        _flash(
+            request,
+            "Set Settings -> Agent install -> Pip source to your real repo "
+            "before pushing updates; the placeholder won't install.",
+        )
+        return _redirect("/manage/agents")
+    db.add(m.Command(
+        agent_id=agent.id,
+        type=m.CommandType.update_agent,
+        payload={"pip_source": pip_source},
+    ))
+    db.commit()
+    _flash(request, f"Update queued for '{agent.name}' (picks up on next heartbeat).")
+    return _redirect("/manage/agents")
+
+
+@router.post("/agents/update-all")
+def agents_update_all(request: Request, db: Session = Depends(get_db)):
+    """Queue update_agent for every enrolled agent. Admin only -- one command
+    per agent so a single failure doesn't cascade."""
+    user = _manager(request, db)
+    if user is None or user.role != m.UserRole.admin:
+        _flash(request, "Only admins can mass-update agents.")
+        return _redirect("/manage/agents")
+    from central.runtime import load_settings
+    rt = load_settings(db)
+    pip_source = str(rt.get("agent.pip_source") or "").strip()
+    if not pip_source or "your-org" in pip_source:
+        _flash(
+            request,
+            "Set Settings -> Agent install -> Pip source to your real repo first.",
+        )
+        return _redirect("/manage/agents")
+    agents = list(db.scalars(select(m.Agent)))
+    for agent in agents:
+        db.add(m.Command(
+            agent_id=agent.id,
+            type=m.CommandType.update_agent,
+            payload={"pip_source": pip_source},
+        ))
+    db.commit()
+    _flash(request, f"Update queued for {len(agents)} agent(s).")
+    return _redirect("/manage/agents")
+
+
 @router.post("/agents/{agent_id}/delete")
 def agent_delete(agent_id: int, request: Request, db: Session = Depends(get_db)):
     user = _manager(request, db)

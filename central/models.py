@@ -128,6 +128,10 @@ class CommandType(str, enum.Enum):
     poll_now = "poll_now"
     poll_printer = "poll_printer"  # payload: {"ip": "..."} or {"printer_id": N}
     update_config = "update_config"
+    # Agent self-update: pip install --force-reinstall --no-deps <pip_source>,
+    # then exit so the service manager (systemd / NSSM) restarts the process
+    # against the freshly-installed code. payload: {"pip_source": "git+..."}.
+    update_agent = "update_agent"
 
 
 class CommandStatus(str, enum.Enum):

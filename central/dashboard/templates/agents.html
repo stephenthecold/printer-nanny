@@ -56,6 +56,10 @@
           <form method="post" action="/manage/agents/{{ a.id }}/rotate-key" onsubmit="return confirm('Issue a new key for {{ a.name }}? The old key stops working.')">
             <button class="text-xs text-sky-700 hover:underline">Rotate key</button>
           </form>
+          <form method="post" action="/manage/agents/{{ a.id }}/update"
+                onsubmit="return confirm('Push the latest agent build to {{ a.name }}? The agent will pip-install the new package and restart its service. Takes ~60s to apply (next heartbeat).')">
+            <button class="text-xs text-emerald-700 hover:underline" title="Queue an update_agent command. Agent pulls the new code on its next heartbeat, runs pip install, and exits so its service manager restarts it.">Update</button>
+          </form>
           {% if user.role.value == 'admin' %}
           <form method="post" action="/manage/agents/{{ a.id }}/delete" onsubmit="return confirm('Delete agent {{ a.name }}?')">
             <button class="text-xs text-red-600 hover:underline">Delete</button>
@@ -119,5 +123,16 @@
       <button class="w-full bg-slate-900 text-white rounded py-2 text-sm font-medium">Create &amp; show key</button>
     </form>
   </section>
+
+  {% if user.role.value == 'admin' and agents %}
+  <section class="bg-white rounded-lg shadow p-4 h-fit">
+    <h2 class="font-semibold mb-2">Update all agents</h2>
+    <p class="text-xs text-slate-500 mb-3">Pushes the latest agent build (Settings -&gt; Agent install -&gt; Pip source) to every enrolled agent. Each one pip-installs and restarts on its next heartbeat (~60s).</p>
+    <form method="post" action="/manage/agents/update-all"
+          onsubmit="return confirm('Push the latest agent build to ALL {{ agents|length }} enrolled agents? Each restarts independently within ~60s.')">
+      <button class="w-full bg-emerald-700 text-white rounded py-2 text-sm font-medium">Update all ({{ agents|length }})</button>
+    </form>
+  </section>
+  {% endif %}
 </div>
 {% endblock %}
