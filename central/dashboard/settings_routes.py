@@ -37,7 +37,13 @@ def _sections(values: dict):
 
 
 @router.get("/settings", response_class=HTMLResponse)
-def settings_page(request: Request, db: Session = Depends(get_db)):
+def settings_page(
+    request: Request,
+    smtp_oauth_error: str = "",
+    db: Session = Depends(get_db),
+):
+    from central.auth_oauth_smtp import CALLBACK_PATH
+
     user = _admin(request, db)
     if user is None:
         return RedirectResponse("/login", status_code=303)
@@ -47,7 +53,11 @@ def settings_page(request: Request, db: Session = Depends(get_db)):
         {"user": user, "sections": _sections(values),
          "placeholder": runtime.SECRET_PLACEHOLDER,
          "app": runtime.app_branding(db),
-         "flash": request.session.pop("flash", None)},
+         "flash": request.session.pop("flash", None),
+         "smtp_oauth_error": smtp_oauth_error or None,
+         "smtp_auth_type": str(values.get("smtp.auth_type") or "basic"),
+         "smtp_has_refresh_token": bool(values.get("smtp.oauth_refresh_token")),
+         "smtp_oauth_redirect_uri": str(request.base_url).rstrip("/") + CALLBACK_PATH},
     )
 
 

@@ -31,12 +31,22 @@ def build_channel(
 
 
 def active_channels(runtime: dict) -> List[NotificationChannel]:
-    """Channels enabled on the Settings page, as ready-to-use instances."""
+    """Channels enabled on the Settings page, as ready-to-use instances.
+
+    The email channel receives a lazy DB session factory so OAuth send paths can
+    persist refreshed access tokens. Worker code constructs settings once per
+    dispatch cycle; the channel only opens a session when an OAuth refresh runs.
+    """
     channels: List[NotificationChannel] = []
     if runtime.get("email.enabled") and runtime.get("email.default_recipients"):
-        channels.append(
-            EmailChannel("Email", {"to": runtime["email.default_recipients"]}, runtime)
-        )
+        from central.db import SessionLocal
+
+        channels.append(EmailChannel(
+            "Email",
+            config={"to": runtime["email.default_recipients"]},
+            runtime=runtime,
+            db_factory=SessionLocal,
+        ))
     if runtime.get("freescout.enabled"):
         channels.append(FreeScoutChannel("FreeScout", {}, runtime))
     return channels

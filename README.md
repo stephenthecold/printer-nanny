@@ -112,6 +112,31 @@ uvicorn central.main:app --reload      # http://localhost:8000  (admin / admin)
 python -m central.worker.run --once    # evaluate alerts once
 ```
 
+## Modern-auth email (OAuth SMTP)
+
+Out of the box, the email channel speaks plain SMTP AUTH (great for MailHog,
+internal relays, or providers that still accept app passwords). Gmail and
+Microsoft 365 have been deprecating that path, so the **Settings → Email
+(SMTP)** section also supports OAuth2 / XOAUTH2:
+
+1. Register an OAuth app:
+   - **Gmail** — Google Cloud Console → APIs & Services → Credentials → "OAuth
+     client ID" (Type: Web). Scope: `https://mail.google.com/`.
+   - **Microsoft 365** — Entra ID → App registrations → New registration
+     (Web). API permissions → `offline_access` + `https://outlook.office.com/SMTP.Send`
+     (delegated). Grant admin consent. Your tenant must have SMTP AUTH enabled
+     for the mailbox.
+2. Copy the redirect URI shown on the Settings page (it's
+   `https://CENTRAL/settings/smtp-oauth/callback`) into the cloud console's
+   allowed redirects.
+3. Back on Settings → Email: set `smtp.auth_type` to `oauth_google` or
+   `oauth_microsoft`, fill in `oauth_client_id` + `oauth_client_secret`
+   (+ tenant for Microsoft), Save.
+4. Click **Connect Gmail** / **Connect Microsoft 365**. After consent, the
+   refresh token is stored encrypted at rest and the channel refreshes
+   access tokens on demand. Use the **Send test notification** button to
+   confirm.
+
 ## Install a site agent
 
 Enroll the agent in the UI (**Agents → enroll**); it shows a ready command:
