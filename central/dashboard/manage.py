@@ -472,6 +472,33 @@ def subnet_delete(subnet_id: int, request: Request, db: Session = Depends(get_db
     return _redirect("/manage/agents")
 
 
+@router.post("/subnets/{subnet_id}")
+def subnet_update(
+    subnet_id: int, request: Request,
+    label: str = Form(""),
+    snmp_community: str = Form(""),
+    snmp_version: str = Form(""),
+    db: Session = Depends(get_db),
+):
+    """Edit a subnet's friendly label and (optionally) its SNMP creds.
+
+    Empty SNMP fields are ignored so the inline label-edit form on the agents
+    page doesn't accidentally wipe creds when an operator just renames a subnet.
+    """
+    if _manager(request, db) is None:
+        return _redirect("/login")
+    subnet = db.get(m.Subnet, subnet_id)
+    if subnet:
+        subnet.label = label.strip() or None
+        if snmp_community.strip():
+            subnet.snmp_community = snmp_community.strip()
+        if snmp_version.strip():
+            subnet.snmp_version = snmp_version.strip()
+        db.commit()
+        _flash(request, f"Subnet {subnet.cidr} updated.")
+    return _redirect("/manage/agents")
+
+
 # --------------------------------------------------------------------------- #
 # Users (admin only)
 # --------------------------------------------------------------------------- #

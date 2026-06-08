@@ -203,6 +203,12 @@ class Subnet(Base):
     # SNMP creds for this subnet — pushed to the owning agent for discovery.
     snmp_community: Mapped[str] = mapped_column(String(120), default="public")
     snmp_version: Mapped[str] = mapped_column(String(8), default="2c")
+    # Discovery status (updated by the ingest endpoint on each /discovered batch).
+    last_discovery_at: Mapped[Optional[datetime]] = mapped_column(
+        DateTime(timezone=True), default=None
+    )
+    last_discovery_found_count: Mapped[Optional[int]] = mapped_column(Integer, default=None)
+    last_discovery_new_count: Mapped[Optional[int]] = mapped_column(Integer, default=None)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
 
     site: Mapped[Site] = relationship(back_populates="subnets")

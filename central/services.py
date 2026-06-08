@@ -137,6 +137,27 @@ def apply_reading(db: Session, site_id: int, reading: s.ReadingIn) -> Optional[m
     return printer
 
 
+def update_subnet_discovery_stats(
+    db: Session, site_id: int, cidr: str, *, found: int, new: int
+) -> Optional[m.Subnet]:
+    """Stamp the (site, cidr) Subnet row with the last discovery batch's results.
+
+    Operators read these on the Discovery page so they can tell which subnets
+    are actively producing devices (and which agents are silent). No-op for
+    agents reporting a CIDR that isn't enrolled as a Subnet — silently ignored
+    so a stale config doesn't break ingest.
+    """
+    subnet = db.scalar(
+        select(m.Subnet).where(m.Subnet.site_id == site_id, m.Subnet.cidr == cidr)
+    )
+    if subnet is None:
+        return None
+    subnet.last_discovery_at = _now()
+    subnet.last_discovery_found_count = found
+    subnet.last_discovery_new_count = new
+    return subnet
+
+
 def record_discovered(
     db: Session, agent: m.Agent, device: s.DiscoveredIn
 ) -> tuple[m.Printer, bool]:

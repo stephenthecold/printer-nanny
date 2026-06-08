@@ -1,0 +1,79 @@
+{% extends "base.html" %}
+{% block title %}Discovery · {{ app.name or 'Printer Nanny' }}{% endblock %}
+{% block body %}
+<div class="flex items-center gap-3 mb-4">
+  <h1 class="text-2xl font-semibold">Local discovery</h1>
+  <span class="text-xs text-slate-500">Per-agent subnet status. Use Rescan to trigger an immediate sweep.</span>
+</div>
+
+{% if agents %}
+<div class="space-y-4">
+  {% for agent in agents %}
+  {% set site = sites.get(agent.site_id) %}
+  {% set client = clients.get(site.client_id) if site else None %}
+  <section class="bg-white rounded-lg shadow">
+    <div class="px-4 py-3 border-b flex items-center justify-between flex-wrap gap-2">
+      <div>
+        <h2 class="font-semibold">{{ agent.name }}</h2>
+        <p class="text-xs text-slate-500">
+          {{ client.name if client else '—' }} · {{ site.name if site else 'unknown site' }} ·
+          {% if agent.status.value == 'online' %}<span class="text-emerald-700">online</span>
+          {% else %}<span class="text-slate-500">{{ agent.status.value }}</span>{% endif %}
+          {% if agent.last_heartbeat %} · last heartbeat {{ agent.last_heartbeat.strftime('%Y-%m-%d %H:%M') }}{% endif %}
+        </p>
+      </div>
+      <div class="flex items-center gap-2">
+        <span class="text-xs text-slate-500">
+          {{ pending_by_site.get(agent.site_id, 0) }} pending at this site
+        </span>
+        <form method="post" action="/discovery/agents/{{ agent.id }}/rescan" class="inline">
+          <button class="bg-sky-600 text-white rounded px-2.5 py-1 text-xs font-medium">Rescan now</button>
+        </form>
+      </div>
+    </div>
+    <table class="w-full text-sm">
+      <thead class="text-left text-slate-500 bg-slate-50">
+        <tr>
+          <th class="px-4 py-2">Subnet</th>
+          <th class="py-2">SNMP</th>
+          <th class="py-2">Last discovered</th>
+          <th class="py-2">Found</th>
+          <th class="py-2">New</th>
+        </tr>
+      </thead>
+      <tbody>
+      {% for sub in subnets_by_agent.get(agent.id, []) %}
+        <tr class="border-t">
+          <td class="px-4 py-2">
+            <div class="font-medium">{{ sub.label or sub.cidr }}</div>
+            {% if sub.label %}<div class="text-xs text-slate-400 tabular-nums">{{ sub.cidr }}</div>{% endif %}
+          </td>
+          <td class="py-2 text-slate-500">{{ sub.snmp_version }} · {{ sub.snmp_community }}</td>
+          <td class="py-2 text-slate-500">
+            {% if sub.last_discovery_at %}
+              {{ sub.last_discovery_at.strftime('%Y-%m-%d %H:%M') }}
+            {% else %}<span class="text-slate-400 italic">never</span>{% endif %}
+          </td>
+          <td class="py-2 tabular-nums">{{ sub.last_discovery_found_count if sub.last_discovery_found_count is not none else '—' }}</td>
+          <td class="py-2 tabular-nums">
+            {% set new = sub.last_discovery_new_count %}
+            {% if new is not none and new > 0 %}<span class="text-emerald-700 font-medium">{{ new }}</span>
+            {% elif new is not none %}{{ new }}
+            {% else %}—{% endif %}
+          </td>
+        </tr>
+      {% else %}
+        <tr><td class="px-4 py-3 text-slate-400" colspan="5">No subnets assigned. Add one under <a href="/manage/agents" class="text-sky-700 hover:underline">Agents</a>.</td></tr>
+      {% endfor %}
+      </tbody>
+    </table>
+  </section>
+  {% endfor %}
+</div>
+{% else %}
+<div class="bg-white rounded-lg shadow p-6 text-center">
+  <p class="text-slate-500">No agents enrolled yet.</p>
+  <a href="/manage/agents" class="inline-block mt-3 bg-sky-600 text-white rounded px-3 py-2 text-sm font-medium">Enroll an agent</a>
+</div>
+{% endif %}
+{% endblock %}
