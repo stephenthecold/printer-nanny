@@ -13,6 +13,10 @@ services:
       interval: 5s
       timeout: 3s
       retries: 10
+    # Self-heal on host reboot. Without this a transient crash on startup
+    # (DNS race, port conflict, etc.) leaves the container dead until manual
+    # `docker compose up -d`.
+    restart: unless-stopped
 
   api:
     build:
@@ -42,6 +46,11 @@ services:
       sh -c "alembic upgrade head &&
              python -m central.seed --init &&
              uvicorn central.main:app --host 0.0.0.0 --port 8000"
+    # Self-heal on host reboot. A transient docker-DNS race on boot (api
+    # coming up before db's hostname is resolvable on the bridge network)
+    # would otherwise leave the api dead and the site stuck on 502 until
+    # someone runs `docker compose up -d` by hand.
+    restart: unless-stopped
 
   worker:
     build:
@@ -58,6 +67,7 @@ services:
       db:
         condition: service_healthy
     command: ["python", "-m", "central.worker.run", "--interval", "60"]
+    restart: unless-stopped
 
   # Local SMTP catcher so email alerts are visible in dev (http://localhost:8025).
   mailhog:
@@ -82,6 +92,7 @@ services:
       - caddy_config:/config
     depends_on:
       - api
+    restart: unless-stopped
 
   # Optional built-in site agent (opt-in: `docker compose --profile agent up -d`).
   # LINUX ONLY for real SNMP — network_mode: host lets it reach LAN printers. On
