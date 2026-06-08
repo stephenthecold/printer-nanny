@@ -14,6 +14,11 @@ branch_labels = None
 depends_on = None
 
 
+def _column_exists(bind, table: str, column: str) -> bool:
+    insp = sa.inspect(bind)
+    return column in {c["name"] for c in insp.get_columns(table)}
+
+
 def upgrade() -> None:
     bind = op.get_bind()
     if bind.dialect.name == "postgresql":
@@ -24,10 +29,18 @@ def upgrade() -> None:
             "bind_interface VARCHAR(64)"
         )
         return
+    # SQLite (and dev runs that called create_all before alembic) -- check
+    # before adding so a fresh CI run that already has the column from the
+    # model doesn't fail with "duplicate column name".
+    if _column_exists(bind, "subnets", "bind_interface"):
+        return
     with op.batch_alter_table("subnets") as batch_op:
         batch_op.add_column(sa.Column("bind_interface", sa.String(64), nullable=True))
 
 
 def downgrade() -> None:
+    bind = op.get_bind()
+    if not _column_exists(bind, "subnets", "bind_interface"):
+        return
     with op.batch_alter_table("subnets") as batch_op:
         batch_op.drop_column("bind_interface")
