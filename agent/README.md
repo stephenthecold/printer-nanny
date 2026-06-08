@@ -42,13 +42,27 @@ copy-paste command with the key baked in. No file to edit:
 # Linux (systemd) — installs a venv + service:
 curl -fsSL https://CENTRAL/install-agent.sh | sudo bash -s -- \
   --central-url https://CENTRAL --agent-id 12 --api-key pn_xxxxx
+```
 
+```powershell
+# Windows Server (in an elevated PowerShell — Run as Administrator):
+$env:PN_CENTRAL_URL="https://CENTRAL"; $env:PN_AGENT_ID="12"; $env:PN_API_KEY="pn_xxxxx"
+iwr -useb https://CENTRAL/install-agent.ps1 | iex
+```
+
+```bash
 # or Docker (build & push the image first — see deploy/agent.Dockerfile;
 # there is no prebuilt public image yet):
 docker run -d --restart=always --network host --name printer-nanny-agent \
   -e PN_CENTRAL_URL=https://CENTRAL -e PN_AGENT_ID=12 -e PN_API_KEY=pn_xxxxx \
   ghcr.io/stephenthecold/printer-nanny-agent
 ```
+
+The Windows installer requires Python 3.10+ (install once with
+`winget install Python.Python.3.12 -e --silent`) and downloads NSSM 2.24 from
+nssm.cc the first time so it can run the agent as a proper Windows service.
+Service name: `PrinterNannyAgent`. Logs: `C:\ProgramData\PrinterNanny\agent\agent.log`.
+Uninstall: re-run the script with `-Uninstall`.
 
 The installer ([`../deploy/install-agent.sh`](../deploy/install-agent.sh), served
 at `GET /install-agent.sh`) writes a minimal config and a systemd unit. Subnets,
