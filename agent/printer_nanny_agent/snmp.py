@@ -34,8 +34,22 @@ class SnmpBackend:
         raise NotImplementedError
 
     async def walk(self, host: str, base_oid: str, params: SnmpParams) -> Dict[str, str]:
-        """Return {full_oid: value} for every node under ``base_oid``."""
+        """Walk an OID subtree. Capped at 512 rows for safety (Brother's binary
+        status tables can be thousands of zero rows). Use ``walk_max`` for
+        diagnostic dumps that need more, or to widen specific real tables."""
         raise NotImplementedError
+
+    async def walk_max(
+        self, host: str, base_oid: str, params: SnmpParams, max_rows: int
+    ) -> Dict[str, str]:
+        """Walk with a caller-controlled row cap. Default impls forward to walk().
+
+        Implementations that can do better (pysnmp etc.) should override this so
+        diagnostic walks (probe command) can pull more than 512 rows when the
+        vendor's subtree is verbose -- the standard walk() stays bounded so
+        ordinary polling stays predictable.
+        """
+        return await self.walk(host, base_oid, params)
 
     async def close(self) -> None:  # pragma: no cover - optional cleanup hook
         return None
@@ -87,7 +101,7 @@ class PysnmpBackend(SnmpBackend):
         out: Dict[str, Optional[str]] = {oid: None for oid in oids}
         for oid, (name, value) in zip(oids, var_binds):
             text = value.prettyPrint()
-            # pysnmp renders absent objects as "No Such Object/Instance ..." — the
+            # pysnmp renders absent objects as "No Such Object/Instance ..." -- the
             # exact wording varies by version, so match on the prefix.
             if not text or text.startswith(("No Such Object", "No Such Instance")):
                 out[oid] = None
@@ -96,6 +110,11 @@ class PysnmpBackend(SnmpBackend):
         return out
 
     async def walk(self, host: str, base_oid: str, params: SnmpParams) -> Dict[str, str]:
+        return await self.walk_max(host, base_oid, params, 512)
+
+    async def walk_max(
+        self, host: str, base_oid: str, params: SnmpParams, max_rows: int
+    ) -> Dict[str, str]:
         from pysnmp.hlapi.v3arch.asyncio import (
             ContextData,
             ObjectIdentity,
@@ -107,7 +126,7 @@ class PysnmpBackend(SnmpBackend):
         results: Dict[str, str] = {}
         # lexicographicMode=False stops the walk at the end of the base_oid subtree;
         # without it pysnmp walks to the end of the device's entire MIB (slow/hang on
-        # real printers). maxRows bounds pathological tables as a safety net.
+        # real printers). max_rows bounds pathological tables as a safety net.
         async for err_ind, err_stat, _err_idx, var_binds in walk_cmd(
             self._engine,
             self._auth(params),
@@ -115,7 +134,7 @@ class PysnmpBackend(SnmpBackend):
             ContextData(),
             ObjectType(ObjectIdentity(base_oid)),
             lexicographicMode=False,
-            maxRows=512,
+            maxRows=max_rows,
         ):
             if err_ind:
                 raise SnmpError(f"{host}: {err_ind}")
