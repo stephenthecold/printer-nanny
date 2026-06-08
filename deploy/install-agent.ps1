@@ -31,7 +31,7 @@ param(
     [string]$CentralUrl = $env:PN_CENTRAL_URL,
     [Nullable[int]]$AgentId = $(if ($env:PN_AGENT_ID) { [int]$env:PN_AGENT_ID } else { $null }),
     [string]$ApiKey = $env:PN_API_KEY,
-    [string]$PipSource = "git+https://github.com/your-org/printer-nanny.git#subdirectory=agent",
+    [string]$PipSource = $(if ($env:PN_PIP_SOURCE) { $env:PN_PIP_SOURCE } else { "git+https://github.com/your-org/printer-nanny.git#subdirectory=agent" }),
     [string]$InstallDir = "$env:ProgramData\PrinterNanny\agent",
     [string]$ConfigDir = "$env:ProgramData\PrinterNanny",
     [string]$ServiceName = "PrinterNannyAgent",

@@ -6,7 +6,7 @@
 
 {% if new_key %}
 {% set install_cmd = 'curl -fsSL ' ~ central_url ~ '/install-agent.sh | sudo bash -s -- --central-url ' ~ central_url ~ ' --agent-id ' ~ new_key.id ~ ' --api-key ' ~ new_key.key ~ ' --pip-source "' ~ pip_source ~ '"' %}
-{% set windows_cmd = '$env:PN_CENTRAL_URL="' ~ central_url ~ '"; $env:PN_AGENT_ID="' ~ new_key.id ~ '"; $env:PN_API_KEY="' ~ new_key.key ~ '"; iwr -useb ' ~ central_url ~ '/install-agent.ps1 | iex' %}
+{% set windows_cmd = '$env:PN_CENTRAL_URL="' ~ central_url ~ '"; $env:PN_AGENT_ID="' ~ new_key.id ~ '"; $env:PN_API_KEY="' ~ new_key.key ~ '"; $env:PN_PIP_SOURCE="' ~ pip_source ~ '"; iwr -useb ' ~ central_url ~ '/install-agent.ps1 | iex' %}
 {% set docker_cmd = 'docker run -d --restart=always --network host --name printer-nanny-agent -e PN_CENTRAL_URL=' ~ central_url ~ ' -e PN_AGENT_ID=' ~ new_key.id ~ ' -e PN_API_KEY=' ~ new_key.key ~ ' ' ~ docker_image %}
 <div class="mb-5 rounded-lg border border-amber-300 bg-amber-50 p-4">
   <div class="font-semibold text-amber-900">Agent “{{ new_key.name }}” (#{{ new_key.id }}) — install command</div>
