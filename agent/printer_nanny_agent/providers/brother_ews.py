@@ -273,6 +273,10 @@ class BrotherEwsProvider(PrinterProvider):
             if not color or color not in percentages:
                 continue
             pct = float(percentages[color])
+            # PJL is more reliable than EWS gauge-pixel scraping; defer to it
+            # when this supply was already PJL-sourced.
+            if supply.get("_pjl_sourced"):
+                continue
             # If SNMP already reported a real percentage AND it matches the EWS
             # value within 5%, leave it alone -- both agree, no need to override.
             existing = supply.get("level_pct")
