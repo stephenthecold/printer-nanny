@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import html
+
 import pytest
 from fastapi.testclient import TestClient
 
@@ -80,12 +82,26 @@ def test_enroll_renders_windows_powershell_command(http, db):
     _enroll_agent(http, http.site_id)
     resp = http.get("/manage/agents")
     assert resp.status_code == 200
-    assert "install-agent.ps1" in resp.text
-    assert "iwr -useb" in resp.text
-    assert "$env:PN_CENTRAL_URL" in resp.text
-    assert "$env:PN_AGENT_ID" in resp.text
-    assert "$env:PN_API_KEY" in resp.text
-    # PipSource must be carried in via env var, because `iwr | iex` can't pass
-    # parameters to the executed script — without this the PS1 falls back to
-    # the 'your-org' placeholder and refuses to install.
-    assert "$env:PN_PIP_SOURCE" in resp.text
+    # The command lives inside a <pre> as text — Jinja HTML-escapes `&` to `&amp;`
+    # before it ends up in markup, but the rendered text the user copies is the
+    # original. Test against the unescaped text so the assertions read naturally.
+    rendered = html.unescape(resp.text)
+    assert "install-agent.ps1" in rendered
+    # Must use the OutFile + execute pattern, NOT `iwr | iex`. PS 5.1's parser
+    # handles [CmdletBinding()]/param() inconsistently when piped through
+    # Invoke-Expression, which led to "Unexpected token '}'" errors that had
+    # nothing to do with the actual script. Downloading to a temp file and
+    # invoking it gets proper script-file semantics.
+    assert "iwr -useb" in rendered
+    assert "-OutFile" in rendered
+    assert "& $p" in rendered
+    # Execution-policy bypass for this process only — default Server 2022
+    # policy blocks downloaded scripts. Scoped so it doesn't persist.
+    assert "Set-ExecutionPolicy -Scope Process Bypass" in rendered
+    assert "$env:PN_CENTRAL_URL" in rendered
+    assert "$env:PN_AGENT_ID" in rendered
+    assert "$env:PN_API_KEY" in rendered
+    # PipSource must be carried in via env var because the script picks up
+    # parameter defaults from $env:PN_* — without this the script falls back
+    # to the 'your-org' placeholder and refuses to install.
+    assert "$env:PN_PIP_SOURCE" in rendered
