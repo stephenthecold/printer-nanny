@@ -6,7 +6,7 @@
 {% set is_pending = printer.discovery_state.value == 'pending' %}
 {% set is_ignored = printer.discovery_state.value == 'ignored' %}
 <div class="flex items-center gap-3 mb-4 flex-wrap">
-  <a href="/clients/{{ printer.client_id }}" class="text-sm text-sky-700 hover:underline">← Client</a>
+  <a href="/clients/{{ printer.client_id }}" class="text-sm text-sky-700 hover:underline"><- Client</a>
   <h1 class="text-2xl font-semibold">{{ printer.model or printer.hostname or 'Printer' }}</h1>
   {{ status_badge(printer.status) }}
   <span class="text-xs px-2 py-0.5 rounded
@@ -47,9 +47,9 @@
 <div class="grid md:grid-cols-3 gap-4 mb-6 text-sm">
   <div class="bg-white rounded-lg shadow p-4">
     <div class="text-slate-500 text-xs">Identity</div>
-    <div class="mt-1">{{ printer.brand or '—' }} {{ printer.model or '' }}</div>
+    <div class="mt-1">{{ printer.brand or '--' }} {{ printer.model or '' }}</div>
     <div class="text-slate-500">IP {{ printer.ip }} · {{ printer.location or 'no location' }}</div>
-    <div class="text-slate-500">S/N {{ printer.serial or '—' }}</div>
+    <div class="text-slate-500">S/N {{ printer.serial or '--' }}</div>
     {% if printer.asset_tag %}<div class="text-slate-500">Asset {{ printer.asset_tag }}</div>{% endif %}
     {% if printer.tags %}
     <div class="mt-1 flex flex-wrap gap-1">
@@ -60,7 +60,7 @@
   </div>
   <div class="bg-white rounded-lg shadow p-4">
     <div class="text-slate-500 text-xs">Page count</div>
-    <div class="text-2xl font-semibold mt-1 tabular-nums">{{ '{:,}'.format(printer.page_count) if printer.page_count else '—' }}</div>
+    <div class="text-2xl font-semibold mt-1 tabular-nums">{{ '{:,}'.format(printer.page_count) if printer.page_count else '--' }}</div>
     {% if spark %}
     <svg viewBox="0 0 280 48" class="mt-2 w-full h-12">
       <polyline points="{{ spark }}" fill="none" stroke="#0284c7" stroke-width="2" />
@@ -70,10 +70,15 @@
   <div class="bg-white rounded-lg shadow p-4">
     <div class="text-slate-500 text-xs mb-2">Supplies</div>
     {% for sup in supplies %}
-    <div class="flex justify-between items-center py-1">
-      <span>{{ sup.color or sup.type.value }}</span>
+    {# Prefer the vendor-provided description ("Black Toner Cartridge",
+       "Imaging Unit", "Fuser Maintenance Kit") since type+color alone gives
+       useless rows like "black / black" when a printer has both a toner and
+       a drum of the same color. Fall back to type:color, then bare type. #}
+    {% set label = sup.description or (sup.type.value ~ (' (' ~ sup.color ~ ')' if sup.color else '')) %}
+    <div class="flex justify-between items-center py-1 gap-2">
+      <span class="text-sm truncate" title="{{ label }}">{{ label }}</span>
       {% if sup.level_pct is not none %}{{ level_bar(sup.level_pct) }}
-      {% elif sup.status_note %}<span class="text-xs text-slate-500 italic">{{ sup.status_note }}</span>
+      {% elif sup.status_note %}<span class="text-xs text-slate-500 italic whitespace-nowrap">{{ sup.status_note }}</span>
       {% else %}<span class="text-xs text-slate-400">unknown</span>{% endif %}
     </div>
     {% else %}<div class="text-slate-400">No supply data.</div>{% endfor %}
