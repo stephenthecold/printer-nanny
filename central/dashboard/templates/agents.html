@@ -2,15 +2,15 @@
 {% block title %}Agents · Printer Nanny{% endblock %}
 {% block body %}
 <h1 class="text-2xl font-semibold mb-1">Agents</h1>
-<p class="text-sm text-slate-500 mb-4">Each site runs one agent. Enroll it here to get its API key, then assign the subnets it should scan. The agent's local file only needs the central URL + this key — everything else is managed here.</p>
+<p class="text-sm text-slate-500 mb-4">Each site runs one agent. Enroll it here to get its API key, then assign the subnets it should scan. The agent's local file only needs the central URL + this key -- everything else is managed here.</p>
 
 {% if new_key %}
 {% set install_cmd = 'curl -fsSL ' ~ central_url ~ '/install-agent.sh | sudo bash -s -- --central-url ' ~ central_url ~ ' --agent-id ' ~ new_key.id ~ ' --api-key ' ~ new_key.key ~ ' --pip-source "' ~ pip_source ~ '"' %}
 {% set windows_cmd = '$env:PN_CENTRAL_URL="' ~ central_url ~ '"; $env:PN_AGENT_ID="' ~ new_key.id ~ '"; $env:PN_API_KEY="' ~ new_key.key ~ '"; $env:PN_PIP_SOURCE="' ~ pip_source ~ '"; Set-ExecutionPolicy -Scope Process Bypass -Force; $p="$env:TEMP\\install-pn-agent.ps1"; iwr -useb ' ~ central_url ~ '/install-agent.ps1 -OutFile $p; & $p' %}
 {% set docker_cmd = 'docker run -d --restart=always --network host --name printer-nanny-agent -e PN_CENTRAL_URL=' ~ central_url ~ ' -e PN_AGENT_ID=' ~ new_key.id ~ ' -e PN_API_KEY=' ~ new_key.key ~ ' ' ~ docker_image %}
 <div class="mb-5 rounded-lg border border-amber-300 bg-amber-50 p-4">
-  <div class="font-semibold text-amber-900">Agent “{{ new_key.name }}” (#{{ new_key.id }}) — install command</div>
-  <p class="text-sm text-amber-800 mt-1">Run this on the site box. The key is shown <strong>only once</strong> (stored hashed) — copy it now.</p>
+  <div class="font-semibold text-amber-900">Agent "{{ new_key.name }}" (#{{ new_key.id }}) -- install command</div>
+  <p class="text-sm text-amber-800 mt-1">Run this on the site box. The key is shown <strong>only once</strong> (stored hashed) -- copy it now.</p>
 
   <div class="mt-3">
     <div class="text-xs font-medium text-amber-900 mb-1">Linux (systemd)</div>
@@ -26,7 +26,7 @@
       <pre id="cmd-windows" class="bg-slate-900 text-slate-100 rounded p-3 text-xs overflow-x-auto whitespace-pre-wrap break-all select-all">{{ windows_cmd }}</pre>
       <button type="button" onclick="navigator.clipboard.writeText(document.getElementById('cmd-windows').innerText)" class="absolute top-2 right-2 text-xs bg-white/10 hover:bg-white/20 text-white rounded px-2 py-1">Copy</button>
     </div>
-    <p class="text-xs text-amber-800 mt-1">Requires Python 3.10+ — install once with <code class="select-all">winget install Python.Python.3.12 -e --silent</code>.</p>
+    <p class="text-xs text-amber-800 mt-1">Requires Python 3.10+ -- install once with <code class="select-all">winget install Python.Python.3.12 -e --silent</code>.</p>
   </div>
 
   <details class="mt-3">
@@ -37,7 +37,7 @@
     </div>
   </details>
   {% if 'your-org' in pip_source %}
-  <p class="text-xs text-amber-800 mt-2">⚠ Set your published repo under <a href="/settings" class="underline">Settings → Agent install</a> so the command points at your GitHub.</p>
+  <p class="text-xs text-amber-800 mt-2">⚠ Set your published repo under <a href="/settings" class="underline">Settings -> Agent install</a> so the command points at your GitHub.</p>
   {% endif %}
 </div>
 {% endif %}
@@ -68,15 +68,18 @@
         {% for s in a.subnets %}
         <div class="text-sm py-1 border-t first:border-t-0">
           <form method="post" action="/manage/subnets/{{ s.id }}" class="flex items-center gap-2 flex-wrap">
-            <span class="tabular-nums font-medium">{{ s.cidr }}</span>
+            <span class="tabular-nums font-medium" title="Site: {{ s.site.client.name ~ ' / ' ~ s.site.name if s.site and s.site.client }}">{{ s.cidr }}</span>
             <input name="label" value="{{ s.label or '' }}" placeholder="Label (e.g. VLAN 10)"
-                   class="border rounded px-2 py-1 text-xs flex-1 min-w-[140px]" />
+                   class="border rounded px-2 py-1 text-xs flex-1 min-w-[120px]" />
             <input name="snmp_community" value="{{ s.snmp_community }}"
-                   class="border rounded px-2 py-1 text-xs w-28" />
+                   class="border rounded px-2 py-1 text-xs w-24" />
             <select name="snmp_version" class="border rounded px-2 py-1 text-xs">
               <option value="2c" {% if s.snmp_version == '2c' %}selected{% endif %}>v2c</option>
               <option value="1" {% if s.snmp_version == '1' %}selected{% endif %}>v1</option>
             </select>
+            <input name="bind_interface" value="{{ s.bind_interface or '' }}"
+                   placeholder="Bind IP (optional)" title="Source IP this agent should bind to when scanning. Lets one agent serve multiple clients with overlapping CIDRs -- leave empty to use the OS default route."
+                   class="border rounded px-2 py-1 text-xs w-32" />
             {% if s.last_discovery_at %}
             <span class="text-xs text-slate-400">last {{ s.last_discovery_at.strftime('%m-%d %H:%M') }}</span>
             {% endif %}

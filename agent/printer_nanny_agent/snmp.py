@@ -18,6 +18,11 @@ class SnmpParams:
     port: int = 161
     timeout: float = 2.0
     retries: int = 1
+    # Source IP / interface to bind to before sending SNMP packets. When set,
+    # pysnmp's UdpTransportTarget uses localAddress=(bind_interface, 0). Lets
+    # one agent serve multiple clients with overlapping internal CIDRs --
+    # each tunnel terminates at a unique local IP on the agent host.
+    bind_interface: Optional[str] = None
 
 
 class SnmpError(Exception):
@@ -74,9 +79,14 @@ class PysnmpBackend(SnmpBackend):
     async def _target(self, host: str, params: SnmpParams):
         from pysnmp.hlapi.v3arch.asyncio import UdpTransportTarget
 
-        return await UdpTransportTarget.create(
-            (host, params.port), timeout=params.timeout, retries=params.retries
-        )
+        kwargs = {"timeout": params.timeout, "retries": params.retries}
+        # localAddress lets the OS know which interface to send from -- the
+        # multi-client agent path. Without it the OS picks based on the
+        # routing table, which is wrong when two clients route the same
+        # destination CIDR via different tunnels.
+        if params.bind_interface:
+            kwargs["localAddress"] = (params.bind_interface, 0)
+        return await UdpTransportTarget.create((host, params.port), **kwargs)
 
     async def get(
         self, host: str, oids: List[str], params: SnmpParams

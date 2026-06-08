@@ -1,4 +1,4 @@
-"""Agent → central ingest endpoints (push readings/discovery, pull commands)."""
+"""Agent -> central ingest endpoints (push readings/discovery, pull commands)."""
 
 from __future__ import annotations
 
@@ -36,9 +36,12 @@ def post_readings(
     db: Session = Depends(get_db),
 ):
     touch_heartbeat(agent)
+    served = services.sites_served_by_agent(db, agent)
     applied, skipped = 0, []
     for reading in batch.readings:
-        printer = services.apply_reading(db, agent.site_id, reading)
+        # Look up the printer across ALL sites this agent collects for, not
+        # just its home site -- the multi-client agent path.
+        printer = services.apply_reading(db, served, reading)
         if printer is None:
             skipped.append(reading.ip)
         else:
@@ -68,8 +71,13 @@ def post_discovered(
             bucket["found"] += 1
             bucket["new"] += int(was_created)
     for cidr, counts in per_subnet.items():
+        # Resolve the right (site_id, cidr) Subnet row by going via the
+        # agent's assignment -- otherwise stats land on the agent's home site
+        # even when the subnet actually belongs to a different customer site.
+        subnet_row = services.find_subnet_for_agent_cidr(db, agent.id, cidr)
+        target_site = subnet_row.site_id if subnet_row else agent.site_id
         services.update_subnet_discovery_stats(
-            db, agent.site_id, cidr, found=counts["found"], new=counts["new"]
+            db, target_site, cidr, found=counts["found"], new=counts["new"]
         )
     db.commit()
     return {"new_pending": created, "already_known": known}
@@ -82,7 +90,7 @@ def get_agent_config(
 ):
     """Central-managed config for this agent: intervals, SNMP defaults, and subnets.
 
-    Lets the agent's local file hold only the central URL + API key — everything
+    Lets the agent's local file hold only the central URL + API key -- everything
     else is set in the site UI and delivered here.
     """
     from central.runtime import load_settings
@@ -103,7 +111,10 @@ def get_agent_config(
         },
         subnets=[
             s.AgentSubnetConfig(
-                cidr=sub.cidr, snmp_community=sub.snmp_community, snmp_version=sub.snmp_version
+                cidr=sub.cidr,
+                snmp_community=sub.snmp_community,
+                snmp_version=sub.snmp_version,
+                bind_interface=sub.bind_interface,
             )
             for sub in subnets
         ],
@@ -115,12 +126,15 @@ def get_targets(
     agent: m.Agent = Depends(authenticated_agent),
     db: Session = Depends(get_db),
 ):
-    """Approved printers at the agent's site, with SNMP params — the poll list."""
+    """Approved printers from every site this agent collects for, with SNMP
+    params -- the poll list. Covers both the simple case (one agent per site)
+    and the multi-client pattern (HQ agent serving several customer sites)."""
     touch_heartbeat(agent)
+    served = services.sites_served_by_agent(db, agent)
     targets = list(
         db.scalars(
             select(m.Printer).where(
-                m.Printer.site_id == agent.site_id,
+                m.Printer.site_id.in_(served),
                 m.Printer.discovery_state == m.DiscoveryState.approved,
             )
         )

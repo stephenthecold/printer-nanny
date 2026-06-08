@@ -1,7 +1,7 @@
 """Agent configuration loaded from a TOML file.
 
-Resolution order for the path: explicit ``--config`` arg → ``$PRINTER_NANNY_CONFIG``
-→ ``/etc/printer-nanny/agent.toml``.
+Resolution order for the path: explicit ``--config`` arg -> ``$PRINTER_NANNY_CONFIG``
+-> ``/etc/printer-nanny/agent.toml``.
 """
 
 from __future__ import annotations
@@ -32,6 +32,10 @@ class SubnetConfig:
     cidr: str
     community: Optional[str] = None  # overrides the global SNMP community
     version: Optional[str] = None
+    # Optional source IP / interface the agent should bind to when scanning
+    # this subnet. Lets one agent serve multiple clients with overlapping
+    # internal CIDRs (each tunnel terminates at a unique local IP).
+    bind_interface: Optional[str] = None
 
 
 @dataclass
@@ -54,6 +58,9 @@ class AgentConfig:
             port=self.snmp.port,
             timeout=self.snmp.timeout,
             retries=self.snmp.retries,
+            # subnet-level bind only -- the global SnmpParams default leaves
+            # bind_interface None (use the OS default route).
+            bind_interface=subnet.bind_interface,
         )
 
 
@@ -77,6 +84,7 @@ def merge_remote(config: AgentConfig, remote: dict) -> AgentConfig:
             cidr=s["cidr"],
             community=s.get("snmp_community"),
             version=str(s["snmp_version"]) if s.get("snmp_version") else None,
+            bind_interface=s.get("bind_interface"),
         )
         for s in remote.get("subnets", [])
     ]
@@ -122,7 +130,7 @@ def load_config(
 ) -> AgentConfig:
     """Build config from a TOML file (if present) overlaid with env vars and CLI flags.
 
-    Precedence: CLI flags > env vars > file. A file is optional — env/flags alone
+    Precedence: CLI flags > env vars > file. A file is optional -- env/flags alone
     are enough, which is what the one-line installer relies on.
     """
     data: dict = {}
@@ -155,6 +163,7 @@ def parse_config(data: dict) -> AgentConfig:
             cidr=s["cidr"],
             community=s.get("community"),
             version=str(s["version"]) if s.get("version") is not None else None,
+            bind_interface=s.get("bind_interface"),
         )
         for s in data.get("subnets", [])
     ]

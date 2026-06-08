@@ -26,6 +26,44 @@ def find_printer_by_ip(db: Session, site_id: int, ip: str) -> Optional[m.Printer
     )
 
 
+def sites_served_by_agent(db: Session, agent: m.Agent) -> set[int]:
+    """The set of site_ids this agent collects for.
+
+    Always includes the agent's home site. Plus every site that has a Subnet
+    row assigned to this agent (the multi-client pattern: one agent at HQ
+    serving Beta, Gamma, ... over per-client tunnels).
+    """
+    extra = db.scalars(
+        select(m.Subnet.site_id).where(m.Subnet.agent_id == agent.id).distinct()
+    )
+    served = {agent.site_id}
+    served.update(extra)
+    return served
+
+
+def find_printer_by_ip_in_sites(
+    db: Session, site_ids: set[int], ip: str
+) -> Optional[m.Printer]:
+    if not site_ids:
+        return None
+    return db.scalar(
+        select(m.Printer).where(m.Printer.site_id.in_(site_ids), m.Printer.ip == ip)
+    )
+
+
+def find_subnet_for_agent_cidr(
+    db: Session, agent_id: int, cidr: str
+) -> Optional[m.Subnet]:
+    """The Subnet row this agent is assigned that has the given CIDR -- used
+    by ingest to resolve which site (and therefore which client) a discovered
+    device or reading belongs to."""
+    return db.scalar(
+        select(m.Subnet).where(
+            m.Subnet.agent_id == agent_id, m.Subnet.cidr == cidr
+        )
+    )
+
+
 def upsert_supply(db: Session, printer: m.Printer, supply: s.SupplyIn) -> m.Supply:
     """Insert or update a printer's supply row, keyed by (type, color)."""
     existing = db.scalar(
@@ -94,13 +132,20 @@ def _reconcile_events(db: Session, printer: m.Printer, incoming, ts) -> None:
             )
 
 
-def apply_reading(db: Session, site_id: int, reading: s.ReadingIn) -> Optional[m.Printer]:
+def apply_reading(db: Session, site_id, reading: s.ReadingIn) -> Optional[m.Printer]:
     """Apply one poll result to a known, approved printer.
 
-    Returns the printer, or None if no matching approved printer exists at the site
-    (discovery happens via the separate /discovered endpoint, not here).
+    ``site_id`` may be a single int (legacy) or a set of int (the multi-client
+    agent path -- one agent serves several sites). The printer is looked up by
+    IP across whichever site_ids are passed in.
+
+    Returns the printer, or None if no matching approved printer exists at the
+    site(s) (discovery happens via the separate /discovered endpoint, not here).
     """
-    printer = find_printer_by_ip(db, site_id, reading.ip)
+    if isinstance(site_id, (set, list, tuple, frozenset)):
+        printer = find_printer_by_ip_in_sites(db, set(site_id), reading.ip)
+    else:
+        printer = find_printer_by_ip(db, site_id, reading.ip)
     if printer is None or printer.discovery_state != m.DiscoveryState.approved:
         return None
 
@@ -144,7 +189,7 @@ def update_subnet_discovery_stats(
 
     Operators read these on the Discovery page so they can tell which subnets
     are actively producing devices (and which agents are silent). No-op for
-    agents reporting a CIDR that isn't enrolled as a Subnet — silently ignored
+    agents reporting a CIDR that isn't enrolled as a Subnet -- silently ignored
     so a stale config doesn't break ingest.
     """
     subnet = db.scalar(
@@ -161,8 +206,23 @@ def update_subnet_discovery_stats(
 def record_discovered(
     db: Session, agent: m.Agent, device: s.DiscoveredIn
 ) -> tuple[m.Printer, bool]:
-    """Record a discovered device as a pending printer. Returns (printer, created)."""
-    existing = find_printer_by_ip(db, agent.site_id, device.ip)
+    """Record a discovered device as a pending printer. Returns (printer, created).
+
+    Site/client assignment: when the device reports a subnet_cidr that matches
+    a Subnet row assigned to this agent, the printer is recorded at THAT subnet's
+    site (the multi-client agent path -- HQ agent collecting for Beta drops the
+    printer into Beta's site, not HQ's). Falls back to agent.site_id when no
+    subnet_cidr is given or the CIDR isn't enrolled.
+    """
+    target_site_id = agent.site_id
+    if device.subnet_cidr:
+        sub = find_subnet_for_agent_cidr(db, agent.id, device.subnet_cidr)
+        if sub is not None:
+            target_site_id = sub.site_id
+
+    existing = find_printer_by_ip_in_sites(
+        db, sites_served_by_agent(db, agent), device.ip
+    )
     if existing is not None:
         # Refresh identity but never downgrade an approved/ignored device to pending.
         for attr in ("mac", "hostname", "brand", "model", "serial"):
@@ -171,10 +231,10 @@ def record_discovered(
                 setattr(existing, attr, val)
         return existing, False
 
-    site = db.get(m.Site, agent.site_id)
+    site = db.get(m.Site, target_site_id)
     printer = m.Printer(
         client_id=site.client_id,
-        site_id=agent.site_id,
+        site_id=target_site_id,
         discovered_by_agent_id=agent.id,
         ip=device.ip,
         mac=device.mac,
