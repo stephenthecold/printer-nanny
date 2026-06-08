@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from fastapi import FastAPI
 from starlette.middleware.sessions import SessionMiddleware
+from uvicorn.middleware.proxy_headers import ProxyHeadersMiddleware
 
 from central import auth_oauth_smtp, auth_oidc
 from central.api import ingest, management, reporting
@@ -12,6 +13,12 @@ from central.dashboard import installer, manage, routes as dashboard, settings_r
 from central.db import create_all
 
 app = FastAPI(title="Printer Nanny", version="0.1.0")
+# Honor X-Forwarded-Proto/For from the reverse proxy so request.base_url returns
+# https:// when Caddy/Nginx terminates TLS in front of us. Without this, the
+# agent install command on /manage/agents leaks http://… to operators behind
+# their own TLS proxy. Trusts headers from any source — we already require the
+# proxy to be a trusted hop (it's the same docker network or LAN).
+app.add_middleware(ProxyHeadersMiddleware, trusted_hosts="*")
 app.add_middleware(
     SessionMiddleware,
     secret_key=settings.secret_key,

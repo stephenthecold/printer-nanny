@@ -381,11 +381,15 @@ def agents_home(request: Request, db: Session = Depends(get_db)):
     agents = list(db.scalars(select(m.Agent).order_by(m.Agent.id)))
     sites = list(db.scalars(select(m.Site).order_by(m.Site.name)))
     rt = load_settings(db)
+    # Prefer the operator-pinned public URL so the agent install command always
+    # uses the public HTTPS hostname even if this request hit the API directly
+    # via an internal address. Falls back to the request URL otherwise.
+    public_url = (rt.get("app.public_url") or str(request.base_url)).rstrip("/")
     return _tpl(
         request, "agents.html", db,
         user=user, agents=agents, sites=sites,
         new_key=_keystore.pop(request.session.pop("new_agent_key_token", None)),
-        central_url=str(request.base_url).rstrip("/"),
+        central_url=public_url,
         pip_source=rt["agent.pip_source"],
         docker_image=rt["agent.docker_image"],
         flash=_pop_flash(request),

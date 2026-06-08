@@ -20,6 +20,7 @@ from sqlalchemy import (
     Float,
     ForeignKey,
     Integer,
+    LargeBinary,
     String,
     Text,
     UniqueConstraint,
@@ -460,6 +461,23 @@ class User(Base):
         ForeignKey("clients.id", ondelete="SET NULL"), default=None
     )
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+
+
+class AppAsset(Base):
+    """Operator-uploaded blobs (today: just the dashboard logo).
+
+    Stored in the DB rather than the filesystem so it survives container
+    rebuilds without an extra mount, and so it Just Works on both SQLite
+    (LargeBinary → BLOB) and Postgres (BYTEA). Cap individual rows at a few
+    hundred KB at the upload route — this isn't meant for large media.
+    """
+
+    __tablename__ = "app_assets"
+
+    name: Mapped[str] = mapped_column(String(40), primary_key=True)  # e.g. "logo"
+    content_type: Mapped[str] = mapped_column(String(80))
+    data: Mapped[bytes] = mapped_column(LargeBinary)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
 
 
 class AppSetting(Base):

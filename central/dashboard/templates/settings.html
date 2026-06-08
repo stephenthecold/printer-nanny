@@ -9,6 +9,41 @@
   SMTP OAuth: {{ smtp_oauth_error }}
 </div>
 {% endif %}
+{% if logo_error %}
+<div class="mb-4 rounded bg-red-50 border border-red-200 text-red-700 text-sm px-3 py-2">
+  Logo upload: {{ logo_error }}
+</div>
+{% endif %}
+
+<section class="bg-white rounded-lg shadow max-w-3xl mb-6">
+  <div class="px-4 py-3 border-b font-semibold">Logo</div>
+  <div class="p-4 grid md:grid-cols-2 gap-4 items-center">
+    <div>
+      {% if has_uploaded_logo %}
+      <img src="/branding/logo" alt="Current logo" class="max-h-20 max-w-full bg-slate-50 rounded p-2" />
+      {% else %}
+      <p class="text-sm text-slate-500">No logo uploaded — the 🖨️ emoji is shown in the nav and login.</p>
+      {% endif %}
+    </div>
+    <div class="space-y-3">
+      <form method="post" action="/settings/branding/logo" enctype="multipart/form-data" class="space-y-2">
+        <input type="file" name="logo" accept="image/png,image/jpeg,image/svg+xml,image/webp,image/gif" required
+               class="block w-full text-sm" />
+        <p class="text-xs text-slate-400">PNG, JPEG, SVG, WEBP, GIF up to 512 KB.</p>
+        <button class="bg-slate-900 text-white rounded px-3 py-2 text-sm font-medium">Upload</button>
+      </form>
+      {% if has_uploaded_logo %}
+      <form method="post" action="/settings/branding/logo/delete"
+            onsubmit="return confirm('Remove the uploaded logo?')">
+        <button class="text-xs text-red-600 hover:underline">Remove uploaded logo</button>
+      </form>
+      {% endif %}
+      <p class="text-xs text-slate-500">
+        Or paste an external URL in <code>app.logo_url</code> below; the field overrides the upload.
+      </p>
+    </div>
+  </div>
+</section>
 
 <form method="post" action="/settings" class="space-y-6 max-w-3xl">
   {% for section, fields in sections.items() %}
