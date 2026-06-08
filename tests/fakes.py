@@ -1,4 +1,4 @@
-"""A fake SNMP backend for agent tests and the end-to-end demo — no real network."""
+"""A fake SNMP backend for agent tests and the end-to-end demo -- no real network."""
 
 from __future__ import annotations
 
@@ -23,7 +23,7 @@ def canned_printer(
 
     ``device_index`` controls the hrDeviceIndex used for the prtGeneral table
     rows. Real printers use whatever index they like (often 1, but 2/5/65535
-    happen) — tests pass non-default values to prove discovery doesn't depend
+    happen) -- tests pass non-default values to prove discovery doesn't depend
     on the .1 form.
     """
     d_base = oids.PRT_MARKER_SUPPLIES_DESCRIPTION
@@ -49,7 +49,7 @@ def canned_printer(
             m_base: {f"{m_base}{idx}": str(black_max)},
             l_base: {f"{l_base}{idx}": str(black_level)},
             # Discovery uses these walks for the printer fingerprint, indexed
-            # by hrDeviceIndex (di) — letting tests vary the index.
+            # by hrDeviceIndex (di) -- letting tests vary the index.
             oids.PRT_GENERAL_PRINTER_NAME_BASE: {
                 f"{oids.PRT_GENERAL_PRINTER_NAME_BASE}.{di}": model,
             },
@@ -84,3 +84,11 @@ class FakeSnmpBackend(SnmpBackend):
         if device is None:
             raise SnmpError(f"{host}: No SNMP response")
         return dict(device["walks"].get(base_oid, {}))
+
+    async def walk_max(
+        self, host: str, base_oid: str, params: SnmpParams, max_rows: int
+    ) -> Dict[str, str]:
+        rows = await self.walk(host, base_oid, params)
+        if len(rows) <= max_rows:
+            return rows
+        return dict(list(rows.items())[:max_rows])

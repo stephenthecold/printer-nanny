@@ -99,37 +99,66 @@ async def _cmd_probe(config: AgentConfig, ip: str) -> int:
         # Vendor-specific private MIB dump. Standard Printer-MIB reports many
         # printers' toner level as -3 (some remaining) because the cartridge has
         # no continuous sensor; the real percentages live under the vendor's
-        # private enterprise OID. Walk that subtree so we can build a
-        # vendor-specific parser from what THIS printer actually exposes.
+        # private enterprise OID. We walk SPECIFIC sub-trees (not the whole
+        # vendor root) because Brother in particular exposes a 600+-row binary
+        # status table at .2.3.9.2.1.1.x that drowns out the actual toner data
+        # at .2.3.9.4.2.1.5.5.x. A single tree walk would max-rows out before
+        # ever reaching the useful values.
         sys_oid = ident.get(oids.SYS_OBJECT_ID) or ""
-        # pysnmp pretty-prints "SNMPv2-SMI::enterprises.2435.2.3.9.1"; pull the
-        # enterprise number so we don't have to guess the rendered form.
-        for vendor_prefix, (vendor_name, mib_root) in (
-            ("2435", ("Brother", "1.3.6.1.4.1.2435.2.3.9")),
-            ("11.",  ("HP",      "1.3.6.1.4.1.11.2.3.9.4.2.1.5")),
-            ("641",  ("Lexmark", "1.3.6.1.4.1.641.2.1")),
-            ("1602", ("Canon",   "1.3.6.1.4.1.1602.1.11.1.3")),
-            ("1347", ("Kyocera", "1.3.6.1.4.1.1347.43")),
-            ("367",  ("Ricoh",   "1.3.6.1.4.1.367.3.2.1.2.24")),
-            ("236",  ("Samsung", "1.3.6.1.4.1.236.11.5.11")),
-            ("253",  ("Xerox",   "1.3.6.1.4.1.253.8.53.13")),
+        # Per-vendor list of (label, oid, max_rows). max_rows is the cap for
+        # that specific sub-tree -- give Brother's maintenance tables enough
+        # room (~256 rows each is generous) without uncapping ordinary polling.
+        _BROTHER_SUBTREES = [
+            ("IEEE 1284 DeviceID",       "1.3.6.1.4.1.2435.2.3.9.1.1.7", 8),
+            ("brStatus / brInfoStatus",  "1.3.6.1.4.1.2435.2.3.9.4.2.1.5.4", 128),
+            ("brInfoMaintenance",        "1.3.6.1.4.1.2435.2.3.9.4.2.1.5.5", 128),
+            ("brInfoNextCare",           "1.3.6.1.4.1.2435.2.3.9.4.2.1.5.6", 128),
+            ("brInfoCounter",            "1.3.6.1.4.1.2435.2.3.9.4.2.1.5.7", 128),
+            ("brInfoCommands",           "1.3.6.1.4.1.2435.2.3.9.4.2.1.5.8", 64),
+        ]
+        _HP_SUBTREES = [
+            ("hpDeviceStatusInfo",       "1.3.6.1.4.1.11.2.3.9.4.2.1.5",   256),
+        ]
+        _LEXMARK_SUBTREES = [
+            ("prtSupply / lexInfo",      "1.3.6.1.4.1.641.2.1.5",          256),
+            ("lexSuppliesInformation",   "1.3.6.1.4.1.641.6.5.7",          256),
+        ]
+        _GENERIC_SUBTREES = {
+            "Canon":   [("private", "1.3.6.1.4.1.1602.1.11.1.3", 256)],
+            "Kyocera": [("private", "1.3.6.1.4.1.1347.43",       256)],
+            "Ricoh":   [("private", "1.3.6.1.4.1.367.3.2.1.2.24",256)],
+            "Samsung": [("private", "1.3.6.1.4.1.236.11.5.11",   256)],
+            "Xerox":   [("private", "1.3.6.1.4.1.253.8.53.13",   256)],
+        }
+        vendor_subtrees = None
+        for vendor_prefix, vendor_name, trees in (
+            ("2435", "Brother", _BROTHER_SUBTREES),
+            ("11.",  "HP",      _HP_SUBTREES),
+            ("641",  "Lexmark", _LEXMARK_SUBTREES),
+            ("1602", "Canon",   _GENERIC_SUBTREES["Canon"]),
+            ("1347", "Kyocera", _GENERIC_SUBTREES["Kyocera"]),
+            ("367",  "Ricoh",   _GENERIC_SUBTREES["Ricoh"]),
+            ("236",  "Samsung", _GENERIC_SUBTREES["Samsung"]),
+            ("253",  "Xerox",   _GENERIC_SUBTREES["Xerox"]),
         ):
-            # Match on enterprises.<vendor>. so HP (11) doesn't gobble Brother (2435).
-            if f"enterprises.{vendor_prefix}" not in sys_oid and \
-               f".1.3.6.1.4.1.{vendor_prefix}" not in sys_oid:
-                continue
-            print(f"\n  -- {vendor_name} private MIB ({mib_root}) --")
-            try:
-                rows = await backend.walk(ip, mib_root, p)
-            except SnmpError as exc:
-                print(f"  WALK {vendor_name}: error {exc}")
+            if f"enterprises.{vendor_prefix}" in sys_oid or \
+               f".1.3.6.1.4.1.{vendor_prefix}" in sys_oid:
+                vendor_subtrees = (vendor_name, trees)
                 break
-            if not rows:
-                print(f"  WALK {vendor_name}: (empty)")
-                break
-            for oid, value in rows.items():
-                print(f"  {oid} = {value!r}")
-            break
+        if vendor_subtrees:
+            vendor_name, trees = vendor_subtrees
+            for label, root, max_rows in trees:
+                print(f"\n  -- {vendor_name} {label} ({root}) --")
+                try:
+                    rows = await backend.walk_max(ip, root, p, max_rows)
+                except SnmpError as exc:
+                    print(f"  WALK {label}: error {exc}")
+                    continue
+                if not rows:
+                    print(f"  WALK {label}: (empty)")
+                    continue
+                for oid, value in rows.items():
+                    print(f"  {oid} = {value!r}")
         return 0
     finally:
         await backend.close()
