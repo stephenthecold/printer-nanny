@@ -68,7 +68,15 @@
     {% endif %}
   </div>
   <div class="bg-white rounded-lg shadow p-4">
-    <div class="text-slate-500 text-xs mb-2">Supplies</div>
+    <div class="flex items-center justify-between mb-2">
+      <div class="text-slate-500 text-xs">Supplies</div>
+      {% if printer.brand and printer.brand.lower() == 'brother' %}
+      <span class="text-xs text-slate-400 italic"
+            title="Brother lasers do not have continuous toner sensors; firmware reports only OK / Low / Empty. The estimated percentage is derived from the printer's active alert. Use the printer's web UI for vendor-estimated percentages.">
+        ? buckets only
+      </span>
+      {% endif %}
+    </div>
     {% for sup in supplies %}
     {# Prefer the vendor-provided description ("Black Toner Cartridge",
        "Imaging Unit", "Fuser Maintenance Kit") since type+color alone gives

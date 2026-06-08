@@ -46,3 +46,33 @@ no toner, door open, jammed, offline, service requested, …).
 SNMP GET `sysDescr` (or `hrDeviceDescr`) across the subnet's host range. Anything
 that answers and exposes `prtGeneralPrinterName` / the marker-supplies table is a
 printer → recorded as `discovery_state = pending` for a tech to approve.
+
+## Vendor-specific provider notes (post-Milestone-2)
+
+Brand-agnostic Printer-MIB doesn't capture everything. Per the project design
+(see `CLAUDE.md` upload), a `PrinterProvider` plugin layer at
+`agent/printer_nanny_agent/providers/` runs after the standard reading is
+built and can enrich it from vendor-private OIDs.
+
+### Brother
+
+Brother laser MFCs (MFC-/HL-/DCP- series) do not have continuous toner fill
+sensors. The cartridge firmware only tracks OK / Low / Empty buckets, so
+`prtMarkerSuppliesLevel` returns `-3` for every toner. Brother's private MIB
+exposes the bucket-state as a plain-text active-alert scalar:
+
+| OID                                              | Example                  |
+|--------------------------------------------------|--------------------------|
+| `1.3.6.1.4.1.2435.2.3.9.4.2.1.5.4.5.2.0`         | `Toner Low (BK)`         |
+| `1.3.6.1.4.1.2435.2.3.9.4.2.1.5.5.51.2.1.{1,2,3}`| Recent-alerts table (index, description, page count when raised) |
+
+The Brother provider parses the active alert into a (severity, color) pair
+and upgrades the matching toner supply: `level_pct` becomes a UI hint
+(`15.0` for low, `0.0` for empty) and `status_note` becomes the bucket name.
+Page-count consumables (drum, belt, fuser) keep the real numbers Brother
+already reports via the standard Printer-MIB.
+
+For real continuous percentages on Brother lasers (vendor-estimated, not
+sensor data) the only source is HTML scraping of the printer's EWS at
+`http://<ip>/general/status.html`. The gauge HTML format varies by firmware
+and is left as a future EWS provider.
