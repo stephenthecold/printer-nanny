@@ -87,6 +87,48 @@ def test_parse_returns_empty_for_unknown_layout():
     assert _parse_toner_percentages(html) == {}
 
 
+def test_parse_tonerremain_gauge_height_attribute_mfc_l8900cdw():
+    """Pattern D -- real L8900CDW HTML uses gauge height as the value, no
+    numeric percentage displayed anywhere. Pulled directly from Stephen's
+    /general/status.html dump."""
+    html = """
+    <div id="ink_level"><table id="inkLevel" summary="ink level">
+    <tr><th><img src="../common/images/low.gif" alt="Low" /></th><th></th><th></th><th></th></tr>
+    <tr>
+      <td><img src="../common/images/black.gif"   alt="Black"   class="tonerremain" height="5"  /></td>
+      <td><img src="../common/images/cyan.gif"    alt="Cyan"    class="tonerremain" height="11" /></td>
+      <td><img src="../common/images/magenta.gif" alt="Magenta" class="tonerremain" height="11" /></td>
+      <td><img src="../common/images/yellow.gif"  alt="Yellow"  class="tonerremain" height="11" /></td>
+    </tr>
+    <tr><th>BK</th><th>C</th><th>M</th><th>Y</th></tr>
+    </table></div>
+    """
+    pcts = _parse_toner_percentages(html)
+    # Max gauge height on this model family is 11px ("full"). Black=5 -> ~45%
+    # (which matches the printer simultaneously reporting "Toner Low (BK)" --
+    # Brother's low warning fires at this level on the L8900). C/M/Y = full.
+    assert pcts == {"black": 45, "cyan": 100, "magenta": 100, "yellow": 100}
+
+
+def test_parse_tonerremain_handles_reversed_attribute_order():
+    """Brother firmwares vary attribute order; class= can come before alt= or after."""
+    html = """
+    <img height="3" class="tonerremain" alt="Black" src="/x.gif" />
+    <img class="tonerremain" height="10" alt="Cyan" src="/y.gif" />
+    """
+    pcts = _parse_toner_percentages(html)
+    assert pcts["black"] == 27  # 3/11 -> 27%
+    assert pcts["cyan"] == 91   # 10/11 -> 91%
+
+
+def test_parse_tonerremain_clamps_to_100():
+    """If a firmware reports a height greater than the assumed max (newer
+    revs with a 30px gauge?) we clamp rather than emit >100%."""
+    html = """<img class="tonerremain" alt="Black" height="30" />"""
+    pcts = _parse_toner_percentages(html)
+    assert pcts == {"black": 100}
+
+
 def test_parse_returns_empty_for_blank_input():
     assert _parse_toner_percentages("") == {}
     assert _parse_toner_percentages("   ") == {}
