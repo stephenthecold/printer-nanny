@@ -45,16 +45,38 @@ case "$PIP_SOURCE" in
   *your-org*) die "pip source still points at the 'your-org' placeholder. Pass --pip-source with your real repo, or set it in the central UI (Settings → Agent install)." ;;
 esac
 command -v "$PYTHON_BIN" >/dev/null 2>&1 || die "$PYTHON_BIN not found; install Python 3.9+"
+
+# Try to install missing prerequisites automatically. We can't do this in the
+# Windows installer's spirit (winget), but apt / dnf / yum cover almost every
+# Linux box an MSP would deploy this on.
+install_pkgs() {
+  if command -v apt-get >/dev/null 2>&1; then
+    apt-get update -qq >/dev/null 2>&1 || true
+    DEBIAN_FRONTEND=noninteractive apt-get install -y -qq "$@" >/dev/null
+  elif command -v dnf >/dev/null 2>&1; then
+    dnf install -y -q "$@" >/dev/null
+  elif command -v yum >/dev/null 2>&1; then
+    yum install -y -q "$@" >/dev/null
+  else
+    return 1
+  fi
+}
+
 # Debian 12 / Ubuntu 24.04 split `ensurepip` into its own apt package and the
 # venv create silently leaves an empty .venv/ behind that breaks every later run.
-# Catch it up-front with a clear hint instead of failing on `.venv/bin/pip`.
+# Auto-install python3-venv (or the distro equivalent) so the operator doesn't
+# have to know which package they need.
 if ! "$PYTHON_BIN" -c "import ensurepip" >/dev/null 2>&1; then
-  PKG="$(basename "$PYTHON_BIN" | grep -oE '[0-9]+\.[0-9]+' | head -1)"
-  HINT="python3-venv"
-  [ -n "$PKG" ] && HINT="python${PKG}-venv (or python3-venv)"
-  die "Python venv support is missing: 'import ensurepip' failed.
-        Install it first:  sudo apt install -y $HINT
-        Then re-run this script."
+  PKG_VER="$(basename "$PYTHON_BIN" | grep -oE '[0-9]+\.[0-9]+' | head -1)"
+  CANDIDATES=()
+  [ -n "$PKG_VER" ] && CANDIDATES+=("python${PKG_VER}-venv")
+  CANDIDATES+=("python3-venv")
+  echo "==> Python venv support missing; installing ${CANDIDATES[*]}"
+  if ! install_pkgs "${CANDIDATES[@]}"; then
+    die "Auto-install failed (no apt/dnf/yum, or install errored). Install one of: ${CANDIDATES[*]} and re-run."
+  fi
+  "$PYTHON_BIN" -c "import ensurepip" >/dev/null 2>&1 || \
+    die "venv support still missing after package install. Check that ${CANDIDATES[*]} matches $PYTHON_BIN."
 fi
 
 echo "==> Printer Nanny agent installer"
