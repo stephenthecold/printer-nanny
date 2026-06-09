@@ -131,6 +131,7 @@ async def run_providers(
             # Brother provider leaves diagnostic breadcrumbs so the dashboard
             # can show WHY no change was made (e.g. live alert was "Sleep").
             for key, label in (
+                ("_brother_maintenance", "maintenance"),
                 ("_brother_active_alert", "alert"),
                 ("_brother_alert_source", "source"),
                 ("_brother_parsed_severity", "parsed"),
@@ -146,15 +147,19 @@ async def run_providers(
 # Import side-effect: every provider module that wants to be registered
 # imports `register` and calls it at module load. Built-in providers are
 # loaded here so they're always available. Order matters within a vendor:
-#  1. brother (SNMP MIB): always runs, seeds bucket-state UI hints from the
-#     active-alert text.
-#  2. brother_pjl (TCP/9100 PJL): the channel BRAdmin Pro uses; runs second
-#     so its precise percentages take priority over EWS.
-#  3. brother_ews (HTTP scrape): fragile per-model gauge math, only fills in
-#     when PJL didn't have data for that supply.
+#  1. brother_maintenance (SNMP private-MIB binary blobs): the data path
+#     BRAdmin Pro uses -- exact percentages straight from firmware counters.
+#     Runs first so everything downstream only fills gaps.
+#  2. brother (SNMP MIB): seeds bucket-state UI hints from the active-alert
+#     text for supplies that still have no real percentage.
+#  3. brother_pjl (TCP/9100 PJL): same firmware counters over the print
+#     port; agrees with the maintenance blob when both respond.
+#  4. brother_ews (HTTP scrape): fragile per-model gauge math, last resort,
+#     defers to maintenance- and PJL-sourced values.
 #
 # Other vendor providers fire only for their own sysObjectID enterprise
 # prefix, so their order relative to Brother is irrelevant.
+from printer_nanny_agent.providers import brother_maintenance  # noqa: E402,F401
 from printer_nanny_agent.providers import brother  # noqa: E402,F401
 from printer_nanny_agent.providers import brother_pjl  # noqa: E402,F401
 from printer_nanny_agent.providers import brother_ews  # noqa: E402,F401

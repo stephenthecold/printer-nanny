@@ -196,7 +196,9 @@ class BrotherProvider(PrinterProvider):
         reading["_brother_parsed_severity"] = severity or "none"
 
         # Flag the reading so the UI knows to render the "buckets only" tooltip.
-        reading["_supply_precision"] = "brother_buckets"
+        # setdefault: never downgrade the tag when the maintenance-blob provider
+        # already established real percentages ("brother_maintenance").
+        reading.setdefault("_supply_precision", "brother_buckets")
         return reading
 
 

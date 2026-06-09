@@ -159,6 +159,35 @@ async def _cmd_probe(config: AgentConfig, ip: str) -> int:
                     continue
                 for oid, value in rows.items():
                     print(f"  {oid} = {value!r}")
+            # Brother: also decode the maintenance/nextcare binary blobs the
+            # same way the polling provider does, so the operator can compare
+            # the decoded percentages against the printer's own EWS gauge
+            # before trusting the dashboard numbers.
+            if vendor_name == "Brother":
+                from printer_nanny_agent.providers.brother_maintenance import (
+                    OID_MAINTENANCE,
+                    OID_NEXTCARE,
+                    decode_maintenance,
+                    decode_nextcare,
+                )
+                print("\n  -- Brother maintenance blob (decoded) --")
+                try:
+                    blobs = await backend.get(ip, [OID_MAINTENANCE, OID_NEXTCARE], p)
+                except SnmpError as exc:
+                    print(f"  GET maintenance blobs: error {exc}")
+                else:
+                    levels = decode_maintenance(blobs.get(OID_MAINTENANCE))
+                    unknown = levels.pop("_unknown", None)
+                    if levels:
+                        for part, pct in sorted(levels.items()):
+                            print(f"  {part:<18} = {pct:.1f}%")
+                    else:
+                        print("  (no decodable percentage records)")
+                    if unknown:
+                        print(f"  unknown record IDs: {unknown}  <- send these to the developers")
+                    pages = decode_nextcare(blobs.get(OID_NEXTCARE))
+                    for part, remaining in sorted(pages.items()):
+                        print(f"  {part:<18} ~ {remaining:,} pages left")
         return 0
     finally:
         await backend.close()
