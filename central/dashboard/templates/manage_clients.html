@@ -60,6 +60,23 @@
       <p class="text-xs text-slate-500">Add a client first.</p>
       {% endif %}
     </section>
+
+    <section class="bg-white rounded-lg shadow p-4 h-fit">
+      <h2 class="font-semibold mb-3">Download CSV</h2>
+      <p class="text-xs text-slate-500 mb-3">Pull current fleet data for billing, supply ordering, or PSA import.</p>
+      <div class="space-y-1.5 text-sm">
+        <a class="flex items-center justify-between bg-slate-100 hover:bg-slate-200 rounded px-3 py-2" href="/api/v1/reports/export/inventory.csv">
+          <span>Inventory</span><span class="text-xs text-slate-500">printers</span>
+        </a>
+        <a class="flex items-center justify-between bg-slate-100 hover:bg-slate-200 rounded px-3 py-2" href="/api/v1/reports/export/supplies.csv">
+          <span>Supplies</span><span class="text-xs text-slate-500">toner / drum levels</span>
+        </a>
+        <a class="flex items-center justify-between bg-slate-100 hover:bg-slate-200 rounded px-3 py-2" href="/api/v1/reports/export/alerts.csv">
+          <span>Open alerts</span><span class="text-xs text-slate-500">current issues</span>
+        </a>
+      </div>
+      <p class="text-xs text-slate-400 mt-3">client_readonly users get their client's data only. Add <code>?client_id=N</code> to scope to a specific client.</p>
+    </section>
   </div>
 </div>
 {% endblock %}
