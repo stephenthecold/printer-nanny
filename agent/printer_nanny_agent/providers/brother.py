@@ -120,11 +120,17 @@ class BrotherProvider(PrinterProvider):
         except SnmpError:
             alert_text = None
 
-        # --- Recent alerts table -> events + fallback alert source ---
-        # Walk first so we can fall back to the history when the live active
-        # alert is idle ("Sleep" / "Ready" / etc.). Without this fallback, a
-        # printer that's "asleep but the cartridge is empty" reports the sleep
-        # state and we miss the supply condition entirely.
+        # --- Recent alerts table -> events ---
+        # Walk the alert history so we can surface past events on the printer
+        # detail page. Earlier revisions of this provider ALSO used the history
+        # as a fallback source for current supply state when the live alert
+        # was idle ("Sleep" / "Ready") -- that proved unreliable. Brother MFC
+        # models keep stale "No Toner @page 0" placeholders forever, and a
+        # "Toner Low" event from 800+ pages ago doesn't reflect a cartridge
+        # that's since been replaced or kept printing. The dashboard now
+        # treats history strictly as a log; the live active-alert OID is the
+        # only source for the current supply state. Real percentages come
+        # from PJL / EWS scraping (separate providers).
         try:
             history_index = await backend.walk(ip, OID_ALERT_HISTORY_INDEX, params)
             history_descr = await backend.walk(ip, OID_ALERT_HISTORY_DESCR, params)
@@ -135,48 +141,7 @@ class BrotherProvider(PrinterProvider):
         desc_map = _walk_table(history_descr, OID_ALERT_HISTORY_DESCR)
         page_map = _walk_table(history_pages, OID_ALERT_HISTORY_PAGES)
 
-        # If the live active alert is missing or doesn't carry a supply state
-        # (Sleep / Ready / Power Save / a jam / etc.), walk back through the
-        # alert history and use the MOST RECENT entry that actually describes
-        # a supply condition. The history is index-ordered by insertion, so
-        # the last entry with a parseable severity wins.
-        #
-        # IMPORTANT: skip history entries with page_count=0. On several Brother
-        # models (HL-L2460DW class) the alert history table carries stale
-        # placeholder rows from initial factory/setup whose page column is 0
-        # even though the printer is now well into its life cycle. Those rows
-        # often hold a literal "No Toner" string that has nothing to do with
-        # the current cartridge state -- using them flips a nearly-full toner
-        # to 0% and triggers a false alarm.
-        parse_source = "live"
-        parsed = _parse_alert(alert_text)
-        if not parsed[0]:
-            # Sort suffixes high-to-low so we see the newest entries first.
-            for suffix in sorted(
-                idx_map,
-                key=lambda s: int(s) if s.isdigit() else 0,
-                reverse=True,
-            ):
-                desc = (desc_map.get(suffix) or "").strip()
-                if not desc:
-                    continue
-                # Skip stale page=0 placeholder rows. A real supply alert always
-                # carries the page count at which it occurred; a 0 means we
-                # can't trust the entry to represent the current state.
-                try:
-                    page_at = int(page_map.get(suffix, "0"))
-                except (TypeError, ValueError):
-                    page_at = 0
-                if page_at <= 0:
-                    continue
-                hist_parsed = _parse_alert(desc)
-                if hist_parsed[0]:
-                    parsed = hist_parsed
-                    alert_text = f"history: {desc} @page {page_at}"
-                    parse_source = "history"
-                    break
-
-        severity, color = parsed
+        severity, color = _parse_alert(alert_text)
         if severity:
             toner_supplies = [
                 s for s in reading.get("supplies", []) if s.get("type") == "toner"
@@ -224,11 +189,10 @@ class BrotherProvider(PrinterProvider):
             )
 
         # Diagnostic breadcrumb -- visible in the Provider diagnostics card.
-        # Shows what the live alert OID returned and whether we ended up
-        # using history fallback. Without this, "no changes" is opaque.
-        diag_alert = (alert_text or "(empty)").replace("history: ", "history=")
-        reading["_brother_active_alert"] = diag_alert
-        reading["_brother_alert_source"] = parse_source
+        # Shows what the live alert OID returned and whether the parser
+        # extracted a supply severity. Without this, "no changes" is opaque.
+        reading["_brother_active_alert"] = alert_text or "(empty)"
+        reading["_brother_alert_source"] = "live"
         reading["_brother_parsed_severity"] = severity or "none"
 
         # Flag the reading so the UI knows to render the "buckets only" tooltip.
