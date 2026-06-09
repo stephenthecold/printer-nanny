@@ -121,6 +121,8 @@ class ChannelType(str, enum.Enum):
     email = "email"
     freescout = "freescout"
     teams = "teams"
+    webhook = "webhook"
+    slack = "slack"
 
 
 class CommandType(str, enum.Enum):

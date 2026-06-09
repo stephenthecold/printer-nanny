@@ -190,7 +190,8 @@ def settings_test(request: Request, db: Session = Depends(get_db)):
     channels = active_channels(runtime.load_settings(db))
     if not channels:
         request.session["flash"] = (
-            "No channels enabled -- turn on Email and/or FreeScout above, then save first."
+            "No channels enabled -- turn on Email, FreeScout, Teams, Slack, "
+            "or Webhook above, then save first."
         )
         return RedirectResponse("/settings", status_code=303)
     note = Notification(
