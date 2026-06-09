@@ -100,6 +100,59 @@
 </section>
 {% endif %}
 
+{% if can_manage and printer.last_provider_trace %}
+<details class="bg-white rounded-lg shadow mb-6">
+  <summary class="px-4 py-3 cursor-pointer font-semibold text-sm flex items-center gap-2">
+    Provider diagnostics
+    <span class="text-xs text-slate-400 font-normal">({{ printer.last_provider_trace|length }} provider(s) ran on last poll)</span>
+  </summary>
+  <div class="px-4 pb-4 text-sm">
+    <p class="text-xs text-slate-500 mb-3">
+      Which vendor-specific providers (SNMP private MIB, PJL over 9100, EWS scraping)
+      ran on the last poll, whether each succeeded, and what they set. Use this when
+      a printer's data looks wrong -- you can see which channel returned what.
+    </p>
+    <table class="w-full text-sm border-t">
+      <thead class="text-left text-xs text-slate-500">
+        <tr>
+          <th class="py-2">Provider</th>
+          <th class="py-2">Result</th>
+          <th class="py-2">Changes</th>
+          <th class="py-2">Notes</th>
+        </tr>
+      </thead>
+      <tbody>
+        {% for trace in printer.last_provider_trace %}
+        <tr class="border-t align-top">
+          <td class="py-2 pr-2 font-medium tabular-nums">{{ trace.name }}</td>
+          <td class="py-2 pr-2">
+            {% if trace.ok %}
+            <span class="px-1.5 py-0.5 rounded text-xs bg-green-100 text-green-700">ok</span>
+            {% else %}
+            <span class="px-1.5 py-0.5 rounded text-xs bg-red-100 text-red-700">fail</span>
+            {% endif %}
+          </td>
+          <td class="py-2 pr-2">
+            {% if trace.changed %}
+            <ul class="space-y-0.5">
+              {% for change in trace.changed %}<li class="text-xs">{{ change }}</li>{% endfor %}
+            </ul>
+            {% else %}
+            <span class="text-xs text-slate-400">no changes</span>
+            {% endif %}
+          </td>
+          <td class="py-2 text-xs text-slate-600">
+            {% if trace.error %}<span class="text-red-600">{{ trace.error }}</span>{% endif %}
+            {% if trace.summary %}{{ trace.summary }}{% endif %}
+          </td>
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+</details>
+{% endif %}
+
 <div class="grid md:grid-cols-2 gap-6">
   <section class="bg-white rounded-lg shadow p-4">
     <h2 class="font-semibold mb-3">Error history</h2>

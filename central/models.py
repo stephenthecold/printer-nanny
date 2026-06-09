@@ -279,6 +279,15 @@ class Printer(Base):
     notes: Mapped[Optional[str]] = mapped_column(Text, default=None)
     asset_tag: Mapped[Optional[str]] = mapped_column(String(120), default=None)
     tags: Mapped[Optional[list]] = mapped_column(JSON, default=None)
+    # Last poll's vendor-provider diagnostics -- which providers ran, whether
+    # each one succeeded, and a short summary of what data it contributed.
+    # Used by the printer detail page so an operator can see at a glance why
+    # (for example) a Brother is still showing "buckets only" -- maybe PJL
+    # was unreachable on port 9100, or EWS scraping fell off a layout
+    # pattern. The shape is a list of dicts, one per provider that ran:
+    #   {"name": "brother_pjl", "ok": false, "error": "connect refused",
+    #    "fields": [], "summary": "PJL port 9100 unreachable"}
+    last_provider_trace: Mapped[Optional[list]] = mapped_column(JSON, default=None)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
 
     client: Mapped[Client] = relationship(back_populates="printers")
