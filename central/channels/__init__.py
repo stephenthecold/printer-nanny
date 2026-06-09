@@ -1,4 +1,4 @@
-"""Pluggable notification channels (email, FreeScout, Teams)."""
+"""Pluggable notification channels (email, FreeScout, Teams, webhook, Slack)."""
 
 from __future__ import annotations
 

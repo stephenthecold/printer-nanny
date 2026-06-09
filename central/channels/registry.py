@@ -1,9 +1,9 @@
 """Build channel implementations and dispatch notifications.
 
 Channels are driven by the Settings page: ``active_channels(runtime)`` returns the
-channels enabled there (email / FreeScout), so turning FreeScout on is just a
-toggle + creds in the UI — no channel rows to manage. ``build_channel`` still
-exists for the optional per-rule NotificationChannel rows.
+channels enabled there, so turning a destination on is just a toggle + creds in
+the UI -- no channel rows to manage. ``build_channel`` still exists for the
+optional per-rule NotificationChannel rows.
 """
 
 from __future__ import annotations
@@ -14,12 +14,16 @@ from central import models as m
 from central.channels.base import ChannelResult, Notification, NotificationChannel
 from central.channels.email import EmailChannel
 from central.channels.freescout import FreeScoutChannel
+from central.channels.slack import SlackChannel
 from central.channels.teams import TeamsChannel
+from central.channels.webhook import WebhookChannel
 
 _IMPLS = {
     m.ChannelType.email: EmailChannel,
     m.ChannelType.freescout: FreeScoutChannel,
     m.ChannelType.teams: TeamsChannel,
+    m.ChannelType.webhook: WebhookChannel,
+    m.ChannelType.slack: SlackChannel,
 }
 
 
@@ -49,6 +53,12 @@ def active_channels(runtime: dict) -> List[NotificationChannel]:
         ))
     if runtime.get("freescout.enabled"):
         channels.append(FreeScoutChannel("FreeScout", {}, runtime))
+    if runtime.get("teams.enabled"):
+        channels.append(TeamsChannel("Teams", {}, runtime))
+    if runtime.get("webhook.enabled"):
+        channels.append(WebhookChannel("Webhook", {}, runtime))
+    if runtime.get("slack.enabled"):
+        channels.append(SlackChannel("Slack", {}, runtime))
     return channels
 
 

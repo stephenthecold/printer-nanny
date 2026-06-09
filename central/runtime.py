@@ -74,6 +74,27 @@ SPECS: List[Spec] = [
     Spec("smtp.oauth_access_token", "secret", "Email (SMTP)", "OAuth access token (cached)", ""),
     Spec("smtp.oauth_access_token_expires_at", "int", "Email (SMTP)",
          "OAuth access token expiry (unix ts)", 0),
+    # Microsoft Teams
+    Spec("teams.enabled", "bool", "Microsoft Teams", "Post to a Teams channel on alerts", False),
+    Spec("teams.webhook_url", "secret", "Microsoft Teams", "Incoming webhook URL", "",
+         "From Teams: channel ... -> Connectors -> Incoming Webhook -> Configure"),
+    # Slack
+    Spec("slack.enabled", "bool", "Slack", "Post to a Slack channel on alerts", False),
+    Spec("slack.webhook_url", "secret", "Slack", "Incoming webhook URL", "",
+         "Add the 'Incoming Webhooks' Slack app, pick a channel, paste the URL here"),
+    Spec("slack.min_severity", "str", "Slack", "Minimum severity",
+         "info", "info | warning | critical -- skip messages below this severity"),
+    # Generic webhook (PSA / PagerDuty / Zapier / etc.)
+    Spec("webhook.enabled", "bool", "Webhook (generic)",
+         "POST every alert to a custom URL", False),
+    Spec("webhook.url", "str", "Webhook (generic)", "Webhook URL", "",
+         "JSON POST destination. See docs for the payload shape."),
+    Spec("webhook.auth_header", "str", "Webhook (generic)", "Auth header name",
+         "Authorization", "Header name for the credential (e.g. X-Api-Key)"),
+    Spec("webhook.auth_token", "secret", "Webhook (generic)", "Auth header value",
+         "", "Sent verbatim -- e.g. 'Bearer abc123' or your raw token"),
+    Spec("webhook.min_severity", "str", "Webhook (generic)", "Minimum severity",
+         "info", "info | warning | critical -- skip messages below this severity"),
     # FreeScout (ticketing)
     Spec("freescout.enabled", "bool", "FreeScout", "Open a ticket on alerts", False),
     Spec("freescout.base_url", "str", "FreeScout", "Base URL", _env.freescout_base_url,

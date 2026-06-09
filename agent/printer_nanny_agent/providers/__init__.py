@@ -83,13 +83,18 @@ async def run_providers(
 
 # Import side-effect: every provider module that wants to be registered
 # imports `register` and calls it at module load. Built-in providers are
-# loaded here so they're always available. Order matters:
+# loaded here so they're always available. Order matters within a vendor:
 #  1. brother (SNMP MIB): always runs, seeds bucket-state UI hints from the
 #     active-alert text.
 #  2. brother_pjl (TCP/9100 PJL): the channel BRAdmin Pro uses; runs second
 #     so its precise percentages take priority over EWS.
 #  3. brother_ews (HTTP scrape): fragile per-model gauge math, only fills in
 #     when PJL didn't have data for that supply.
+#
+# Other vendor providers fire only for their own sysObjectID enterprise
+# prefix, so their order relative to Brother is irrelevant.
 from printer_nanny_agent.providers import brother  # noqa: E402,F401
 from printer_nanny_agent.providers import brother_pjl  # noqa: E402,F401
 from printer_nanny_agent.providers import brother_ews  # noqa: E402,F401
+from printer_nanny_agent.providers import hp  # noqa: E402,F401
+from printer_nanny_agent.providers import lexmark  # noqa: E402,F401
