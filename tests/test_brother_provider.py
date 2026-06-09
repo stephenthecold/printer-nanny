@@ -180,11 +180,10 @@ async def test_augment_handles_mono_toner_low_alert():
 
 
 async def test_augment_falls_back_to_history_when_live_alert_is_idle():
-    """Live HL-L2370DW symptom: when the printer is sleeping at poll time,
-    the active-alert OID returns 'Sleep' (or '' / 'Ready' / similar) so the
-    parser finds no severity. The history table still carries the real
-    'No Toner' entry -- use it. Regression: provider trace shows 'no changes'
-    despite the user staring at an empty cartridge."""
+    """When the printer is sleeping at poll time, the active-alert OID returns
+    'Sleep' so the parser finds no severity. Walk the history table and use
+    the most recent supply event whose page count is non-zero (page=0 entries
+    are stale placeholders on Brother MFC models)."""
     reading = {
         "supplies": [
             {"type": "toner", "color": "black", "level_pct": None,
@@ -192,12 +191,12 @@ async def test_augment_falls_back_to_history_when_live_alert_is_idle():
         ],
         "events": [],
     }
-    # Live active alert is "Sleep" (idle state); history has the real signal.
+    # All entries carry a real page count -- a real "No Toner" event at page 2100.
     history = [
         ("Toner Low", 691),
         ("Cannot Print 3A", 1077),
         ("Jam Inside", 1060),
-        ("No Toner", 0),  # most recent supply alert
+        ("No Toner", 2100),  # most recent real supply alert
     ]
     backend = _backend_with_brother_alerts(alert_text="Sleep", history=history)
     out = await BrotherProvider().augment(
@@ -210,6 +209,76 @@ async def test_augment_falls_back_to_history_when_live_alert_is_idle():
     # Diagnostic breadcrumbs surfaced so the provider trace can explain it.
     assert out["_brother_alert_source"] == "history"
     assert "No Toner" in out["_brother_active_alert"]
+    assert "page 2100" in out["_brother_active_alert"]
+
+
+async def test_augment_skips_stale_page_zero_history_entries():
+    """Regression for the HL-L2460DW: alert history carries 'No Toner @ page 0'
+    entries that are stale factory/setup placeholders. The cartridge is
+    actually nearly full (EWS gauge shows ~80%), but using those stale rows
+    flipped the toner to '0% empty' and triggered a false alarm.
+
+    Fix: history entries with page=0 are skipped. If the most recent
+    parseable supply event is at page=0 AND no later non-zero event exists,
+    no fallback is applied -- safer to keep 'some remaining' than to fire
+    a false empty.
+    """
+    reading = {
+        "supplies": [
+            {"type": "toner", "color": "black", "level_pct": None,
+             "status_note": "some remaining", "description": "Black Toner Cartridge"},
+        ],
+        "events": [],
+    }
+    # The most-recent supply event is a stale page=0 'No Toner' placeholder.
+    # An older real 'Toner Low' is the only entry with a real page count.
+    history = [
+        ("Toner Low", 691),       # real, but old
+        ("Cannot Print 3A", 1077),
+        ("Jam Inside", 1060),
+        ("No Toner", 0),          # stale placeholder -- must be skipped
+        ("No Toner", 0),          # ditto
+    ]
+    backend = _backend_with_brother_alerts(alert_text="Sleep", history=history)
+    out = await BrotherProvider().augment(
+        backend, "10.0.0.1", SnmpParams(), reading,
+        "SNMPv2-SMI::enterprises.2435.2.3.9.1",
+    )
+    black = next(s for s in out["supplies"] if s["color"] == "black")
+    # Falls through to the real 'Toner Low' at page 691 (low, not empty).
+    assert black["status_note"] == "low"
+    assert black["level_pct"] == 15.0
+    # Diagnostic breadcrumb confirms history was used and which entry.
+    assert "Toner Low" in out["_brother_active_alert"]
+    assert "page 691" in out["_brother_active_alert"]
+
+
+async def test_augment_leaves_supply_alone_when_only_page_zero_history_matches():
+    """When the ONLY parseable supply event is at page=0 (no real history at
+    all), don't fire a false empty -- leave the supply at 'some remaining'."""
+    reading = {
+        "supplies": [
+            {"type": "toner", "color": "black", "level_pct": None,
+             "status_note": "some remaining", "description": "Black Toner Cartridge"},
+        ],
+        "events": [],
+    }
+    history = [
+        ("No Toner", 0),
+        ("Jam Inside", 0),
+    ]
+    backend = _backend_with_brother_alerts(alert_text="Sleep", history=history)
+    out = await BrotherProvider().augment(
+        backend, "10.0.0.1", SnmpParams(), reading,
+        "SNMPv2-SMI::enterprises.2435.2.3.9.1",
+    )
+    black = next(s for s in out["supplies"] if s["color"] == "black")
+    # Nothing fired -- supply preserved as the standard MIB reported it.
+    assert black["status_note"] == "some remaining"
+    assert black["level_pct"] is None
+    # Diagnostic breadcrumb explains: live=Sleep, source=live (no history match), parsed=none
+    assert out["_brother_alert_source"] == "live"
+    assert out["_brother_parsed_severity"] == "none"
 
 
 async def test_augment_records_diagnostics_even_when_live_alert_has_no_severity():

@@ -140,6 +140,14 @@ class BrotherProvider(PrinterProvider):
         # alert history and use the MOST RECENT entry that actually describes
         # a supply condition. The history is index-ordered by insertion, so
         # the last entry with a parseable severity wins.
+        #
+        # IMPORTANT: skip history entries with page_count=0. On several Brother
+        # models (HL-L2460DW class) the alert history table carries stale
+        # placeholder rows from initial factory/setup whose page column is 0
+        # even though the printer is now well into its life cycle. Those rows
+        # often hold a literal "No Toner" string that has nothing to do with
+        # the current cartridge state -- using them flips a nearly-full toner
+        # to 0% and triggers a false alarm.
         parse_source = "live"
         parsed = _parse_alert(alert_text)
         if not parsed[0]:
@@ -152,10 +160,19 @@ class BrotherProvider(PrinterProvider):
                 desc = (desc_map.get(suffix) or "").strip()
                 if not desc:
                     continue
+                # Skip stale page=0 placeholder rows. A real supply alert always
+                # carries the page count at which it occurred; a 0 means we
+                # can't trust the entry to represent the current state.
+                try:
+                    page_at = int(page_map.get(suffix, "0"))
+                except (TypeError, ValueError):
+                    page_at = 0
+                if page_at <= 0:
+                    continue
                 hist_parsed = _parse_alert(desc)
                 if hist_parsed[0]:
                     parsed = hist_parsed
-                    alert_text = f"history: {desc}"
+                    alert_text = f"history: {desc} @page {page_at}"
                     parse_source = "history"
                     break
 
