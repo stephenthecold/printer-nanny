@@ -54,17 +54,27 @@ _COLOR_CODES = {
 # Alert keyword -> (status_note, severity hint). Status_note ends up shown
 # next to the (empty) progress bar on the printer detail page.
 _TONER_SEVERITY = {
-    "empty": "empty",
-    "out":   "empty",
-    "low":   "low",
-    "near":  "low",  # "Near end of life" etc.
+    "empty":   "empty",
+    "out":     "empty",
+    "no":      "empty",   # "No Toner" (HL-L2370DW mono lasers)
+    "replace": "empty",   # "Replace Toner" / "Replace Cartridge"
+    "depleted": "empty",
+    "low":     "low",
+    "near":    "low",     # "Near end of life" etc.
 }
 
-# "Toner Low (BK)" / "Replace Toner (C)" / "Toner Empty Y" -- catch the
-# severity word and the parenthesized OR trailing color code.
+# Match a Brother alert string in one of these forms:
+#   "Toner Low (BK)"   -> low / black     (color in parens, modern color lasers)
+#   "Toner Empty Y"    -> empty / yellow  (trailing color code)
+#   "Replace Toner"    -> empty / -       (no color: defaults to black for mono)
+#   "No Toner"         -> empty / -       (HL-L2370DW etc.)
+# The color group is OPTIONAL so mono-printer alerts that omit the color still
+# match; the caller defaults a missing color to "black" when there's exactly
+# one toner on the printer.
 _ALERT_RE = re.compile(
-    r"(?P<sev>empty|out|low|near)\b.*?(?:\((?P<color1>BK|K|C|M|Y)\)|(?P<color2>BK|K|C|M|Y)\s*$)",
-    re.IGNORECASE,
+    r"""(?P<sev>empty|out|no|replace|depleted|low|near)\b
+        (?:.*?(?:\((?P<color1>BK|K|C|M|Y)\)|(?P<color2>BK|K|C|M|Y)\s*$))?""",
+    re.IGNORECASE | re.VERBOSE,
 )
 
 
@@ -111,10 +121,22 @@ class BrotherProvider(PrinterProvider):
             alert_text = None
         if alert_text:
             severity, color = _parse_alert(alert_text)
-            if severity and color:
-                for supply in reading.get("supplies", []):
-                    if supply.get("type") != "toner":
-                        continue
+            if severity:
+                toner_supplies = [
+                    s for s in reading.get("supplies", []) if s.get("type") == "toner"
+                ]
+                # When the alert omits a color code, default to black -- this is
+                # how mono printers (HL-L2370DW etc.) phrase their alerts
+                # ("No Toner", "Replace Toner") since they have only one supply.
+                # For multi-toner color devices the regex normally matches the
+                # color, but the absent-color fallback still works as long as
+                # there's a single black toner to attach to.
+                if color is None and toner_supplies:
+                    if any(s.get("color") == "black" for s in toner_supplies):
+                        color = "black"
+                    elif len(toner_supplies) == 1:
+                        color = toner_supplies[0].get("color")
+                for supply in toner_supplies:
                     if supply.get("color") != color:
                         continue
                     # Only override when standard MIB had no real percentage.

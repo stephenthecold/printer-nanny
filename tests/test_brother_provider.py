@@ -22,13 +22,21 @@ from tests.fakes import FakeSnmpBackend
 
 
 def test_parse_alert_matches_brother_formats():
-    assert _parse_alert("Toner Low (BK)")    == ("low",   "black")
-    assert _parse_alert("Toner Empty (C)")   == ("empty", "cyan")
-    assert _parse_alert("Replace Toner (M)") == (None,    None)  # no severity keyword
-    assert _parse_alert("Toner Near End (Y)") == ("low", "yellow")
-    assert _parse_alert("Drum Low")          == (None,    None)  # not a color we map
-    assert _parse_alert(None)                == (None,    None)
-    assert _parse_alert("")                  == (None,    None)
+    # Color-laser format: severity + parenthesized or trailing color code.
+    assert _parse_alert("Toner Low (BK)")     == ("low",   "black")
+    assert _parse_alert("Toner Empty (C)")    == ("empty", "cyan")
+    assert _parse_alert("Replace Toner (M)")  == ("empty", "magenta")
+    assert _parse_alert("Toner Near End (Y)") == ("low",   "yellow")
+    # Mono-laser format: severity word alone, no color code in the text.
+    # The augment step defaults the color to black when there's only a black
+    # toner on the device -- the parser just reports "no color found".
+    assert _parse_alert("No Toner")      == ("empty", None)
+    assert _parse_alert("Replace Toner") == ("empty", None)
+    assert _parse_alert("Toner Low")     == ("low",   None)
+    # Non-toner alerts shouldn't trigger toner status changes.
+    assert _parse_alert("Drum Low")      == ("low",   None)  # parser doesn't filter; augment does
+    assert _parse_alert(None)            == (None,   None)
+    assert _parse_alert("")              == (None,   None)
 
 
 def test_detects_brother_via_enterprise_oid():
@@ -108,6 +116,67 @@ async def test_augment_surfaces_alert_history_as_events():
     assert "Toner Low (BK) (page 76,786)" in messages
     assert "Replace Drum (page 75,585)" in messages
     assert all(e["severity"] == "info" for e in out["events"])
+
+
+async def test_augment_handles_mono_no_toner_alert():
+    """Mono lasers like the HL-L2370DW say 'No Toner' with no color code.
+    The augment step defaults missing color to the printer's single black toner.
+    Regression: real-world Brother showed 'No Toner' active alert but the
+    provider left status_note='some remaining' because the old regex required
+    a color in parens."""
+    reading = {
+        "supplies": [
+            {"type": "toner", "color": "black", "level_pct": None,
+             "status_note": "some remaining", "description": "Black Toner Cartridge"},
+        ],
+        "events": [],
+    }
+    backend = _backend_with_brother_alerts(alert_text="No Toner")
+    out = await BrotherProvider().augment(
+        backend, "10.0.0.1", SnmpParams(), reading,
+        "SNMPv2-SMI::enterprises.2435.2.3.9.1",
+    )
+    black = next(s for s in out["supplies"] if s["color"] == "black")
+    assert black["status_note"] == "empty"
+    assert black["level_pct"] == 0.0
+    assert black["_brother_estimated"] is True
+
+
+async def test_augment_handles_mono_replace_toner_alert():
+    """'Replace Toner' on mono lasers maps to empty/black, no color code needed."""
+    reading = {
+        "supplies": [
+            {"type": "toner", "color": "black", "level_pct": None,
+             "status_note": "some remaining", "description": "Black Toner Cartridge"},
+        ],
+        "events": [],
+    }
+    backend = _backend_with_brother_alerts(alert_text="Replace Toner")
+    out = await BrotherProvider().augment(
+        backend, "10.0.0.1", SnmpParams(), reading,
+        "SNMPv2-SMI::enterprises.2435.2.3.9.1",
+    )
+    black = next(s for s in out["supplies"] if s["color"] == "black")
+    assert black["status_note"] == "empty"
+
+
+async def test_augment_handles_mono_toner_low_alert():
+    """'Toner Low' on a mono printer (no color in parens) -> low/black."""
+    reading = {
+        "supplies": [
+            {"type": "toner", "color": "black", "level_pct": None,
+             "status_note": "some remaining", "description": "Black Toner Cartridge"},
+        ],
+        "events": [],
+    }
+    backend = _backend_with_brother_alerts(alert_text="Toner Low")
+    out = await BrotherProvider().augment(
+        backend, "10.0.0.1", SnmpParams(), reading,
+        "SNMPv2-SMI::enterprises.2435.2.3.9.1",
+    )
+    black = next(s for s in out["supplies"] if s["color"] == "black")
+    assert black["status_note"] == "low"
+    assert black["level_pct"] == 15.0
 
 
 async def test_augment_swallows_snmp_errors():
