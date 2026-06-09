@@ -68,7 +68,10 @@ def _tpl(request: Request, template: str, db: Session, **ctx) -> HTMLResponse:
     Keeps every manage template (nav, login, footer) in sync with the operator's
     Settings -> Branding values without each callsite having to remember.
     """
+    from central import __version__ as _central_version
+
     ctx.setdefault("app", app_branding(db))
+    ctx.setdefault("central_version", _central_version)
     return _templates.TemplateResponse(request, template, ctx)
 
 
@@ -373,25 +376,37 @@ def printer_poll_now(printer_id: int, request: Request, db: Session = Depends(ge
 # --------------------------------------------------------------------------- #
 @router.get("/agents", response_class=HTMLResponse)
 def agents_home(request: Request, db: Session = Depends(get_db)):
+    from central import __version__ as central_version
     from central.runtime import load_settings
 
     user = _manager(request, db)
     if user is None:
         return _redirect("/login")
     agents = list(db.scalars(select(m.Agent).order_by(m.Agent.id)))
-    sites = list(db.scalars(select(m.Site).order_by(m.Site.name)))
+    sites = list(db.scalars(
+        select(m.Site).join(m.Client).order_by(m.Client.name, m.Site.name)
+    ))
+    clients = list(db.scalars(select(m.Client).order_by(m.Client.name)))
     rt = load_settings(db)
     # Prefer the operator-pinned public URL so the agent install command always
     # uses the public HTTPS hostname even if this request hit the API directly
     # via an internal address. Falls back to the request URL otherwise.
     public_url = (rt.get("app.public_url") or str(request.base_url)).rstrip("/")
+    # Group sites by client so the cross-site subnet picker can render an
+    # optgroup-style picker -- making the multi-client agent pattern visible.
+    sites_by_client: dict[int, list[m.Site]] = {}
+    for site in sites:
+        sites_by_client.setdefault(site.client_id, []).append(site)
     return _tpl(
         request, "agents.html", db,
         user=user, agents=agents, sites=sites,
+        clients=clients,
+        sites_by_client=sites_by_client,
         new_key=_keystore.pop(request.session.pop("new_agent_key_token", None)),
         central_url=public_url,
         pip_source=rt["agent.pip_source"],
         docker_image=rt["agent.docker_image"],
+        central_version=central_version,
         flash=_pop_flash(request),
     )
 
@@ -496,6 +511,51 @@ def agents_update_all(request: Request, db: Session = Depends(get_db)):
     return _redirect("/manage/agents")
 
 
+@router.post("/agents/{agent_id}/rescan")
+def agent_rescan(agent_id: int, request: Request, db: Session = Depends(get_db)):
+    """Queue a discovery rescan for this agent (picked up on next heartbeat).
+
+    Mirror of POST /discovery/agents/{agent_id}/rescan but lives on /manage/agents
+    so the operator doesn't have to leave the Agents page to trigger a sweep.
+    """
+    if _manager(request, db) is None:
+        return _redirect("/login")
+    agent = db.get(m.Agent, agent_id)
+    if agent is None:
+        _flash(request, "Agent not found.")
+        return _redirect("/manage/agents")
+    db.add(m.Command(agent_id=agent.id, type=m.CommandType.rescan, payload=None))
+    db.commit()
+    _flash(
+        request,
+        f"Rescan queued for '{agent.name}' (picks up on next heartbeat ~60s).",
+    )
+    return _redirect("/manage/agents")
+
+
+@router.post("/agents/{agent_id}/poll-now")
+def agent_poll_now(agent_id: int, request: Request, db: Session = Depends(get_db)):
+    """Queue a full poll cycle for this agent (every approved printer it serves).
+
+    Cuts the wait from the poll interval (default 5 min) down to the heartbeat
+    interval (default 60s) so a tech can verify a fix landed without standing
+    around.
+    """
+    if _manager(request, db) is None:
+        return _redirect("/login")
+    agent = db.get(m.Agent, agent_id)
+    if agent is None:
+        _flash(request, "Agent not found.")
+        return _redirect("/manage/agents")
+    db.add(m.Command(agent_id=agent.id, type=m.CommandType.poll_now, payload=None))
+    db.commit()
+    _flash(
+        request,
+        f"Poll-now queued for '{agent.name}' (picks up on next heartbeat ~60s).",
+    )
+    return _redirect("/manage/agents")
+
+
 @router.post("/agents/{agent_id}/delete")
 def agent_delete(agent_id: int, request: Request, db: Session = Depends(get_db)):
     user = _manager(request, db)
@@ -510,12 +570,50 @@ def agent_delete(agent_id: int, request: Request, db: Session = Depends(get_db))
     return _redirect("/manage/agents")
 
 
+def _build_v3_blob(
+    *,
+    user: str, security_level: str,
+    auth_protocol: str, auth_password: str,
+    priv_protocol: str, priv_password: str,
+    context_name: str = "",
+) -> Optional[dict]:
+    """Build the snmp_v3 JSON blob from form fields. Returns None when no
+    user was supplied (so toggling back to v1/v2c clears the blob)."""
+    user = user.strip()
+    if not user:
+        return None
+    blob = {
+        "user": user,
+        "security_level": security_level.strip() or "noAuthNoPriv",
+    }
+    if auth_protocol.strip():
+        blob["auth_protocol"] = auth_protocol.strip()
+    if auth_password:
+        # Password sent over the wire from the form. Stored plaintext today
+        # (encryption-at-rest is design-doc follow-up). Empty value => unset.
+        blob["auth_password"] = auth_password
+    if priv_protocol.strip():
+        blob["priv_protocol"] = priv_protocol.strip()
+    if priv_password:
+        blob["priv_password"] = priv_password
+    if context_name.strip():
+        blob["context_name"] = context_name.strip()
+    return blob
+
+
 @router.post("/agents/{agent_id}/subnets")
 def subnet_add(
     agent_id: int, request: Request, cidr: str = Form(...),
     snmp_community: str = Form("public"), snmp_version: str = Form("2c"),
     bind_interface: str = Form(""),
     site_id: str = Form(""),
+    snmp_v3_user: str = Form(""),
+    snmp_v3_security_level: str = Form("noAuthNoPriv"),
+    snmp_v3_auth_protocol: str = Form(""),
+    snmp_v3_auth_password: str = Form(""),
+    snmp_v3_priv_protocol: str = Form(""),
+    snmp_v3_priv_password: str = Form(""),
+    snmp_v3_context_name: str = Form(""),
     db: Session = Depends(get_db),
 ):
     """Create a subnet and bind it to this agent.
@@ -524,6 +622,10 @@ def subnet_add(
     ``site_id`` to create the subnet at a DIFFERENT site -- the multi-client
     pattern where one HQ agent collects for several client sites whose
     tunnels are terminated locally.
+
+    SNMPv3 fields are picked up when ``snmp_version="3"``; for v1/v2c they're
+    ignored. The agent receives the v3 blob through the existing /config
+    endpoint and uses it to build a USM auth context.
     """
     if _manager(request, db) is None:
         return _redirect("/login")
@@ -540,6 +642,15 @@ def subnet_add(
             snmp_community=snmp_community.strip() or "public",
             snmp_version=snmp_version,
             bind_interface=bind_interface.strip() or None,
+            snmp_v3=_build_v3_blob(
+                user=snmp_v3_user,
+                security_level=snmp_v3_security_level,
+                auth_protocol=snmp_v3_auth_protocol,
+                auth_password=snmp_v3_auth_password,
+                priv_protocol=snmp_v3_priv_protocol,
+                priv_password=snmp_v3_priv_password,
+                context_name=snmp_v3_context_name,
+            ),
         ))
         db.commit()
         _flash(request, f"Subnet {cidr} assigned.")
@@ -566,6 +677,14 @@ def subnet_update(
     snmp_version: str = Form(""),
     bind_interface: str = Form(""),
     agent_id: str = Form(""),
+    snmp_v3_user: str = Form(""),
+    snmp_v3_security_level: str = Form(""),
+    snmp_v3_auth_protocol: str = Form(""),
+    snmp_v3_auth_password: str = Form(""),
+    snmp_v3_priv_protocol: str = Form(""),
+    snmp_v3_priv_password: str = Form(""),
+    snmp_v3_context_name: str = Form(""),
+    snmp_v3_clear: str = Form(""),
     db: Session = Depends(get_db),
 ):
     """Edit a subnet's friendly label, SNMP creds, source-bind address, and
@@ -575,6 +694,8 @@ def subnet_update(
 
     Empty fields are ignored so the inline label-edit form on the agents page
     doesn't accidentally wipe other settings when an operator just renames.
+    ``snmp_v3_clear=1`` is the explicit "blow away v3 creds" signal -- without
+    it, omitting v3 form fields keeps the existing creds.
     """
     if _manager(request, db) is None:
         return _redirect("/login")
@@ -588,6 +709,23 @@ def subnet_update(
         # bind_interface: empty string clears it (one explicit interface ->
         # OS default route); operator can intentionally remove it.
         subnet.bind_interface = bind_interface.strip() or None
+        # SNMPv3: explicit clear vs. partial update. A partial v3 update where
+        # only ``snmp_v3_user`` is present means the operator wants to rebuild
+        # the blob from these form values. If no v3 fields at all are present
+        # we leave the existing blob alone (so renaming a subnet doesn't blow
+        # away creds).
+        if snmp_v3_clear.strip():
+            subnet.snmp_v3 = None
+        elif snmp_v3_user.strip():
+            subnet.snmp_v3 = _build_v3_blob(
+                user=snmp_v3_user,
+                security_level=snmp_v3_security_level or "noAuthNoPriv",
+                auth_protocol=snmp_v3_auth_protocol,
+                auth_password=snmp_v3_auth_password,
+                priv_protocol=snmp_v3_priv_protocol,
+                priv_password=snmp_v3_priv_password,
+                context_name=snmp_v3_context_name,
+            )
         # agent_id: optional reassignment. Accept any agent regardless of
         # site -- that's the whole point of the multi-client agent path.
         if agent_id.strip():

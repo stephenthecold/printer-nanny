@@ -1,6 +1,6 @@
 {% extends "base.html" %}
 {% from "base.html" import status_badge, level_bar %}
-{% block title %}Overview · Printer Nanny{% endblock %}
+{% block title %}Overview · {{ app.name or 'Printer Nanny' }}{% endblock %}
 {% block body %}
 <h1 class="text-2xl font-semibold mb-4">Fleet overview</h1>
 
@@ -18,26 +18,59 @@
     <div class="text-3xl font-semibold text-red-600">{{ s.by_status.error + s.by_status.offline }}</div>
     <div class="text-xs text-slate-500 mt-1">Error / Offline</div>
   </div>
-  <div class="bg-white rounded-lg shadow p-4">
-    <a href="/approvals"><div class="text-3xl font-semibold text-sky-600">{{ s.pending_discovery }}</div>
-    <div class="text-xs text-slate-500 mt-1">Pending discovery</div></a>
-  </div>
-  <div class="bg-white rounded-lg shadow p-4">
-    <a href="/alerts"><div class="text-3xl font-semibold text-amber-600">{{ s.open_alerts }}</div>
-    <div class="text-xs text-slate-500 mt-1">Open alerts</div></a>
-  </div>
+  <a href="/approvals" class="bg-white rounded-lg shadow p-4 hover:ring-2 hover:ring-sky-300 block">
+    <div class="text-3xl font-semibold text-sky-600">{{ s.pending_discovery }}</div>
+    <div class="text-xs text-slate-500 mt-1">Pending discovery</div>
+  </a>
+  <a href="/alerts" class="bg-white rounded-lg shadow p-4 hover:ring-2 hover:ring-amber-300 block">
+    <div class="text-3xl font-semibold text-amber-600">{{ s.open_alerts }}</div>
+    <div class="text-xs text-slate-500 mt-1">Open alerts</div>
+  </a>
 </div>
+
+{% if rollup %}
+<section class="bg-white rounded-lg shadow p-4 mb-6">
+  <h2 class="font-semibold mb-3">Clients</h2>
+  <table class="w-full text-sm">
+    <thead class="text-left text-xs text-slate-500">
+      <tr>
+        <th class="py-1">Client</th>
+        <th class="py-1 text-right">Sites</th>
+        <th class="py-1 text-right">Printers</th>
+        <th class="py-1 text-right">Down</th>
+        <th class="py-1 text-right">Low supplies</th>
+        <th class="py-1 text-right">Open alerts</th>
+      </tr>
+    </thead>
+    <tbody>
+      {% for row in rollup %}
+      <tr class="border-t hover:bg-slate-50">
+        <td class="py-1.5"><a href="/clients/{{ row.client.id }}" class="text-sky-700 hover:underline font-medium">{{ row.client.name }}</a></td>
+        <td class="py-1.5 text-right text-slate-500">{{ row.sites_count }}</td>
+        <td class="py-1.5 text-right tabular-nums">{{ row.printer_count }}</td>
+        <td class="py-1.5 text-right tabular-nums {{ 'text-red-600 font-semibold' if row.offline_count else 'text-slate-400' }}">{{ row.offline_count }}</td>
+        <td class="py-1.5 text-right tabular-nums {{ 'text-amber-600 font-semibold' if row.low_supplies else 'text-slate-400' }}">{{ row.low_supplies }}</td>
+        <td class="py-1.5 text-right tabular-nums {{ 'text-amber-700 font-semibold' if row.open_alerts else 'text-slate-400' }}">{{ row.open_alerts }}</td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+</section>
+{% endif %}
 
 <div class="grid md:grid-cols-2 gap-6">
   <section class="bg-white rounded-lg shadow p-4">
-    <h2 class="font-semibold mb-3">Clients</h2>
-    <ul class="divide-y">
-      {% for c in clients %}
-      <li class="py-2 flex justify-between text-sm">
-        <a href="/clients/{{ c.id }}" class="text-sky-700 hover:underline">{{ c.name }}</a>
-        <span class="text-slate-400">{{ c.sites|length }} site(s)</span>
+    <h2 class="font-semibold mb-3">Recent activity</h2>
+    <ul class="space-y-2 text-sm">
+      {% for r in recent_activity %}
+      {% set sev_color = 'bg-red-100 text-red-700' if r.severity=='critical' else ('bg-amber-100 text-amber-700' if r.severity=='warning' else ('bg-sky-100 text-sky-700' if r.kind=='discovery' else 'bg-slate-100 text-slate-600')) %}
+      {% set kind_label = {'event':'event','alert':'alert','discovery':'new'}[r.kind] %}
+      <li class="flex gap-2 items-start">
+        <span class="text-slate-400 tabular-nums text-xs whitespace-nowrap pt-0.5">{{ r.ts.strftime('%m-%d %H:%M') if r.ts else '' }}</span>
+        <span class="px-1.5 py-0.5 rounded text-xs h-fit {{ sev_color }}">{{ kind_label }}</span>
+        <a href="{{ r.link }}" class="hover:underline">{{ r.message }}</a>
       </li>
-      {% else %}<li class="py-2 text-sm text-slate-400">No clients yet.</li>{% endfor %}
+      {% else %}<li class="text-slate-400">Nothing recent.</li>{% endfor %}
     </ul>
   </section>
 
