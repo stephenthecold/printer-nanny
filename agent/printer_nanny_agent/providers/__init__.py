@@ -71,13 +71,63 @@ async def run_providers(
 
     Provider exceptions are logged and swallowed - the standard reading still
     ships even if a vendor provider is broken on a particular printer.
+
+    Each provider run leaves a small trace dict on ``reading["provider_trace"]``
+    so the central server's printer detail page can surface diagnostics
+    (which provider matched, did it succeed, what did it change). This is the
+    primary way an operator can see why a Brother is still showing buckets
+    instead of percentages without dropping into agent logs.
     """
     for provider in _REGISTRY:
         try:
-            if provider.detect(reading, sys_object_id):
-                reading = await provider.augment(backend, ip, params, reading, sys_object_id)
+            if not provider.detect(reading, sys_object_id):
+                continue
+        except Exception as exc:  # noqa: BLE001 - never fail the poll over a provider
+            log.warning("provider %s detect raised for %s: %s", provider.name, ip, exc)
+            continue
+        # Snapshot the supply state before the provider runs so we can diff
+        # afterward and tell the operator what the provider actually changed.
+        before_pcts = {
+            (s.get("type"), s.get("color")): s.get("level_pct")
+            for s in reading.get("supplies", [])
+        }
+        before_status = {
+            (s.get("type"), s.get("color")): s.get("status_note")
+            for s in reading.get("supplies", [])
+        }
+        trace = {
+            "name": provider.name,
+            "ok": True,
+            "error": None,
+            "changed": [],  # ["yellow toner: 73% via brother_pjl", ...]
+            "summary": "",
+        }
+        try:
+            reading = await provider.augment(backend, ip, params, reading, sys_object_id)
         except Exception as exc:  # noqa: BLE001 - never fail the poll over a provider
             log.warning("provider %s failed for %s: %s", provider.name, ip, exc)
+            trace["ok"] = False
+            trace["error"] = f"{type(exc).__name__}: {exc}"
+        else:
+            for supply in reading.get("supplies", []):
+                key = (supply.get("type"), supply.get("color"))
+                before_pct = before_pcts.get(key)
+                after_pct = supply.get("level_pct")
+                before_note = before_status.get(key)
+                after_note = supply.get("status_note")
+                label = supply.get("color") or supply.get("type") or "supply"
+                if before_pct is None and after_pct is not None:
+                    trace["changed"].append(f"{label}: set to {after_pct:.0f}%")
+                elif before_pct != after_pct and after_pct is not None:
+                    trace["changed"].append(
+                        f"{label}: {before_pct:.0f}% -> {after_pct:.0f}%"
+                    )
+                elif before_note != after_note and after_note:
+                    trace["changed"].append(f"{label}: status '{after_note}'")
+            precision = reading.get("_supply_precision")
+            if precision:
+                trace["summary"] = f"precision={precision}"
+        reading.setdefault("provider_trace", []).append(trace)
     return reading
 
 

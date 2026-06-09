@@ -52,6 +52,10 @@ class ReadingIn(BaseModel):
     serial: Optional[str] = None
     supplies: list[SupplyIn] = Field(default_factory=list)
     events: list[EventIn] = Field(default_factory=list)
+    # Per-poll vendor-provider diagnostics. Free-shape dicts (one per provider
+    # that ran) -- the dashboard renders them as-is so providers can evolve
+    # their summary without a schema migration.
+    provider_trace: Optional[list[dict]] = None
 
 
 class ReadingsBatchIn(BaseModel):

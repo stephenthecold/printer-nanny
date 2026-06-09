@@ -160,6 +160,11 @@ def apply_reading(db: Session, site_id, reading: s.ReadingIn) -> Optional[m.Prin
     if reading.page_count is not None:
         printer.page_count = reading.page_count
     printer.last_seen = ts
+    if reading.provider_trace is not None:
+        # Always overwrite with the latest poll's trace. Old traces don't
+        # accumulate because the diagnostic value is "what happened on the
+        # most recent poll" -- a stale 6-hour-old trace is misleading.
+        printer.last_provider_trace = reading.provider_trace
 
     snapshot = []
     for supply in reading.supplies:
