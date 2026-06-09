@@ -125,8 +125,20 @@ async def run_providers(
                 elif before_note != after_note and after_note:
                     trace["changed"].append(f"{label}: status '{after_note}'")
             precision = reading.get("_supply_precision")
+            parts = []
             if precision:
-                trace["summary"] = f"precision={precision}"
+                parts.append(f"precision={precision}")
+            # Brother provider leaves diagnostic breadcrumbs so the dashboard
+            # can show WHY no change was made (e.g. live alert was "Sleep").
+            for key, label in (
+                ("_brother_active_alert", "alert"),
+                ("_brother_alert_source", "source"),
+                ("_brother_parsed_severity", "parsed"),
+            ):
+                val = reading.get(key)
+                if val is not None:
+                    parts.append(f"{label}={val}")
+            trace["summary"] = " ".join(parts)
         reading.setdefault("provider_trace", []).append(trace)
     return reading
 

@@ -179,6 +179,69 @@ async def test_augment_handles_mono_toner_low_alert():
     assert black["level_pct"] == 15.0
 
 
+async def test_augment_falls_back_to_history_when_live_alert_is_idle():
+    """Live HL-L2370DW symptom: when the printer is sleeping at poll time,
+    the active-alert OID returns 'Sleep' (or '' / 'Ready' / similar) so the
+    parser finds no severity. The history table still carries the real
+    'No Toner' entry -- use it. Regression: provider trace shows 'no changes'
+    despite the user staring at an empty cartridge."""
+    reading = {
+        "supplies": [
+            {"type": "toner", "color": "black", "level_pct": None,
+             "status_note": "some remaining", "description": "Black Toner Cartridge"},
+        ],
+        "events": [],
+    }
+    # Live active alert is "Sleep" (idle state); history has the real signal.
+    history = [
+        ("Toner Low", 691),
+        ("Cannot Print 3A", 1077),
+        ("Jam Inside", 1060),
+        ("No Toner", 0),  # most recent supply alert
+    ]
+    backend = _backend_with_brother_alerts(alert_text="Sleep", history=history)
+    out = await BrotherProvider().augment(
+        backend, "10.0.0.1", SnmpParams(), reading,
+        "SNMPv2-SMI::enterprises.2435.2.3.9.1",
+    )
+    black = next(s for s in out["supplies"] if s["color"] == "black")
+    assert black["status_note"] == "empty"  # picked up via history fallback
+    assert black["level_pct"] == 0.0
+    # Diagnostic breadcrumbs surfaced so the provider trace can explain it.
+    assert out["_brother_alert_source"] == "history"
+    assert "No Toner" in out["_brother_active_alert"]
+
+
+async def test_augment_records_diagnostics_even_when_live_alert_has_no_severity():
+    """When the live alert exists but doesn't carry a supply state (e.g. a
+    paper jam) and history has nothing supply-related either, the breadcrumb
+    fields must still be set so the dashboard can tell the operator what
+    happened: 'alert=Jam Inside, source=live, parsed=none'."""
+    reading = {
+        "supplies": [
+            {"type": "toner", "color": "black", "level_pct": None,
+             "status_note": "some remaining"},
+        ],
+        "events": [],
+    }
+    backend = _backend_with_brother_alerts(
+        alert_text="Jam Inside",
+        history=[("Paper Tray Open", 100), ("Jam Inside", 200)],
+    )
+    out = await BrotherProvider().augment(
+        backend, "10.0.0.1", SnmpParams(), reading,
+        "SNMPv2-SMI::enterprises.2435.2.3.9.1",
+    )
+    # No supply state matched: toner stays as-is.
+    black = next(s for s in out["supplies"] if s["color"] == "black")
+    assert black["status_note"] == "some remaining"
+    assert black["level_pct"] is None
+    # But the diagnostic breadcrumb explains why.
+    assert out["_brother_active_alert"] == "Jam Inside"
+    assert out["_brother_alert_source"] == "live"
+    assert out["_brother_parsed_severity"] == "none"
+
+
 async def test_augment_swallows_snmp_errors():
     """A printer that exposes a partial / no Brother MIB must not crash the poll."""
     reading = {"supplies": [], "events": []}
