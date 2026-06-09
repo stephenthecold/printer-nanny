@@ -16,6 +16,12 @@ dependencies = [
     "tomli>=2.0; python_version < '3.11'",
 ]
 
+# zeroconf gives the agent hands-off mDNS / Bonjour discovery on top of the
+# always-on SNMP sweep. Optional so deployments that can't reach the
+# multicast group (or that don't want the extra dep) skip it gracefully.
+[project.optional-dependencies]
+mdns = ["zeroconf>=0.132"]
+
 [project.scripts]
 printer-nanny-agent = "printer_nanny_agent.cli:main"
 

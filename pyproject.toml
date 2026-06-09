@@ -26,6 +26,9 @@ dependencies = [
 postgres = ["psycopg[binary]>=3.1"]
 # The site agent. `tomli` is only needed on Python < 3.11 (stdlib tomllib after).
 agent = ["pysnmp>=6.2", "tomli>=2.0; python_version < '3.11'"]
+# Hands-off auto-discovery via mDNS / Bonjour, layered on top of the SNMP
+# sweep. When zeroconf is missing the agent degrades to SNMP-only silently.
+agent-mdns = ["pysnmp>=6.2", "tomli>=2.0; python_version < '3.11'", "zeroconf>=0.132"]
 dev = [
     "pytest>=8.0",
     "pytest-asyncio>=0.23",

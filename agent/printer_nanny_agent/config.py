@@ -36,6 +36,10 @@ class SubnetConfig:
     # this subnet. Lets one agent serve multiple clients with overlapping
     # internal CIDRs (each tunnel terminates at a unique local IP).
     bind_interface: Optional[str] = None
+    # SNMPv3 (USM) credentials. None when this subnet uses v1/v2c. Keys mirror
+    # the JSON shape pushed by central -- user / security_level / auth_protocol
+    # / auth_password / priv_protocol / priv_password / context_name.
+    snmp_v3: Optional[dict] = None
 
 
 @dataclass
@@ -52,6 +56,7 @@ class AgentConfig:
 
     def snmp_for(self, subnet: SubnetConfig) -> SnmpParams:
         """SNMP params for a subnet, applying per-subnet overrides."""
+        v3 = subnet.snmp_v3 or {}
         return SnmpParams(
             community=subnet.community or self.snmp.community,
             version=subnet.version or self.snmp.version,
@@ -61,6 +66,13 @@ class AgentConfig:
             # subnet-level bind only -- the global SnmpParams default leaves
             # bind_interface None (use the OS default route).
             bind_interface=subnet.bind_interface,
+            v3_user=v3.get("user"),
+            v3_security_level=v3.get("security_level"),
+            v3_auth_protocol=v3.get("auth_protocol"),
+            v3_auth_password=v3.get("auth_password"),
+            v3_priv_protocol=v3.get("priv_protocol"),
+            v3_priv_password=v3.get("priv_password"),
+            v3_context_name=v3.get("context_name"),
         )
 
 
@@ -85,6 +97,7 @@ def merge_remote(config: AgentConfig, remote: dict) -> AgentConfig:
             community=s.get("snmp_community"),
             version=str(s["snmp_version"]) if s.get("snmp_version") else None,
             bind_interface=s.get("bind_interface"),
+            snmp_v3=s.get("snmp_v3") or None,
         )
         for s in remote.get("subnets", [])
     ]
@@ -164,6 +177,7 @@ def parse_config(data: dict) -> AgentConfig:
             community=s.get("community"),
             version=str(s["version"]) if s.get("version") is not None else None,
             bind_interface=s.get("bind_interface"),
+            snmp_v3=s.get("snmp_v3"),
         )
         for s in data.get("subnets", [])
     ]

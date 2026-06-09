@@ -210,6 +210,19 @@ class Subnet(Base):
     # SNMP creds for this subnet -- pushed to the owning agent for discovery.
     snmp_community: Mapped[str] = mapped_column(String(120), default="public")
     snmp_version: Mapped[str] = mapped_column(String(8), default="2c")
+    # SNMPv3 credentials, used when snmp_version == "3". JSON blob mirroring
+    # Printer.snmp_v3 so per-subnet v3 config matches per-printer override
+    # patterns. Keys:
+    #   user                -- USM security name
+    #   security_level      -- noAuthNoPriv | authNoPriv | authPriv
+    #   auth_protocol       -- MD5 | SHA | SHA224 | SHA256 | SHA384 | SHA512
+    #   auth_password       -- shared secret (treat at-rest encryption as a
+    #                          design-doc follow-up; today this is plaintext)
+    #   priv_protocol       -- DES | 3DES | AES128 | AES192 | AES256
+    #   priv_password       -- shared secret
+    #   context_name        -- optional engine context (default "")
+    # All keys are optional except `user`; defaults map to noAuthNoPriv.
+    snmp_v3: Mapped[Optional[dict]] = mapped_column(JSON, default=None)
     # Optional source IP / interface name the agent should bind SNMP packets to
     # when sweeping this subnet. Lets one agent serve multiple clients whose
     # internal RFC 1918 CIDRs overlap (each tunnel terminates at a different

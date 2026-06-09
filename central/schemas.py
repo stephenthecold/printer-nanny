@@ -97,6 +97,9 @@ class AgentSubnetConfig(BaseModel):
     # Lets one agent serve multiple clients with overlapping RFC 1918 CIDRs
     # (each tunnel terminates at a unique local IP).
     bind_interface: Optional[str] = None
+    # SNMPv3 USM credentials (used when snmp_version == "3"). JSON pass-through
+    # of the Subnet.snmp_v3 column. See central/models.py:Subnet for keys.
+    snmp_v3: Optional[dict] = None
 
 
 class AgentConfigOut(BaseModel):

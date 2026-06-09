@@ -115,6 +115,7 @@ def get_agent_config(
                 snmp_community=sub.snmp_community,
                 snmp_version=sub.snmp_version,
                 bind_interface=sub.bind_interface,
+                snmp_v3=sub.snmp_v3 or None,
             )
             for sub in subnets
         ],

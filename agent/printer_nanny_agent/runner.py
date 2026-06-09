@@ -13,6 +13,7 @@ from printer_nanny_agent import __version__
 from printer_nanny_agent.client import CentralClient
 from printer_nanny_agent.config import AgentConfig, merge_remote
 from printer_nanny_agent.discovery import discover_subnet
+from printer_nanny_agent.mdns import assign_subnet_cidr, discover_mdns, mdns_available
 from printer_nanny_agent.poller import poll_printer
 from printer_nanny_agent.snmp import PysnmpBackend, SnmpBackend, SnmpError, SnmpParams
 
@@ -67,13 +68,66 @@ async def poll_targets(client: CentralClient, backend: SnmpBackend, config: Agen
 
 
 async def discover_all(client: CentralClient, backend: SnmpBackend, config: AgentConfig) -> dict:
+    """Run every discovery channel in parallel:
+
+      * SNMP sweep across each configured subnet (works cross-VLAN through
+        tunnels because it's unicast).
+      * mDNS browse on the local subnet (hands-off; picks up printers that
+        Bonjour/Avahi advertise without any configuration). Only emits hits
+        whose IP falls inside one of the configured subnets, so a printer
+        advertised by some unrelated device on the agent's LAN doesn't
+        accidentally land in central as "pending".
+
+    mDNS results are merged into the same /discovered batch -- central
+    dedupes by (site_id, ip), so a printer seen by both channels lands once.
+    """
     new_pending = 0
+    known_cidrs = [subnet.cidr for subnet in config.subnets]
+    snmp_devices: List[dict] = []
     for subnet in config.subnets:
         devices = await discover_subnet(backend, subnet.cidr, config.snmp_for(subnet))
-        if devices:
-            result = await client.post_discovered(devices)
-            new_pending += result.get("new_pending", 0)
-    log.info("discovery added %d new pending device(s)", new_pending)
+        snmp_devices.extend(devices)
+
+    mdns_devices: List[dict] = []
+    if mdns_available():
+        for device in await discover_mdns():
+            cidr = assign_subnet_cidr(device, known_cidrs)
+            if cidr is None:
+                # Outside any configured subnet -- ignore (likely the agent's own
+                # WAN-facing interface or a printer the operator hasn't asked us
+                # to monitor).
+                log.debug(
+                    "mDNS device %s is outside configured subnets, skipping",
+                    device.get("ip"),
+                )
+                continue
+            device["subnet_cidr"] = cidr
+            mdns_devices.append(device)
+    else:
+        log.debug(
+            "mDNS unavailable (zeroconf not installed) -- relying on SNMP sweep only"
+        )
+
+    # Dedupe by IP within this batch -- SNMP wins where both channels saw the
+    # device (richer brand/model fingerprint).
+    by_ip: dict[str, dict] = {}
+    for d in mdns_devices:
+        by_ip[d["ip"]] = d
+    for d in snmp_devices:
+        by_ip[d["ip"]] = d  # SNMP overrides mDNS on conflict
+    devices = list(by_ip.values())
+    # Strip internal-only fields before pushing -- central's DiscoveredIn
+    # schema doesn't know about ``_mdns_services``.
+    for d in devices:
+        d.pop("_mdns_services", None)
+
+    if devices:
+        result = await client.post_discovered(devices)
+        new_pending += result.get("new_pending", 0)
+    log.info(
+        "discovery added %d new pending device(s) (snmp=%d, mdns=%d, total=%d)",
+        new_pending, len(snmp_devices), len(mdns_devices), len(devices),
+    )
     return {"new_pending": new_pending}
 
 

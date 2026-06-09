@@ -39,10 +39,13 @@
 </main>
 {# 'app is defined' keeps this safe when base.html is loaded as a module
    for {% from "base.html" import ... %} elsewhere — module imports don't carry context. #}
-{% if app is defined and (app.support_email or app.footer_text) %}
+{% if app is defined %}
 <footer class="border-t bg-white text-xs text-slate-500">
   <div class="max-w-7xl mx-auto px-4 py-3 flex items-center gap-4 flex-wrap">
     {% if app.footer_text %}<span>{{ app.footer_text }}</span>{% endif %}
+    {% if central_version is defined %}
+    <span class="tabular-nums" title="Central server version (matches the deployed Docker image)">v{{ central_version }}</span>
+    {% endif %}
     {% if app.support_email %}
     <span class="ml-auto">Support: <a href="mailto:{{ app.support_email }}" class="text-sky-700 hover:underline">{{ app.support_email }}</a></span>
     {% endif %}

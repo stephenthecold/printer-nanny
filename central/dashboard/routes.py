@@ -39,10 +39,15 @@ def _forbidden_client(user, client_id) -> bool:
 def _render(
     request: Request, template: str, db: Optional[Session] = None, **ctx
 ) -> HTMLResponse:
+    from central import __version__ as _central_version
+
     ctx.setdefault("user", ctx.get("user"))
     # White-label branding injected into every render. Templates read ``app.name``,
     # ``app.logo_url``, ``app.primary_color``, ``app.support_email``, ``app.footer_text``.
     ctx.setdefault("app", app_branding(db) if db is not None else {})
+    # Central server version surfaced in the footer of every page so operators
+    # can verify a rollout landed without dropping to the shell.
+    ctx.setdefault("central_version", _central_version)
     return _templates.TemplateResponse(request, template, ctx)
 
 
@@ -87,6 +92,13 @@ def overview(request: Request, db: Session = Depends(get_db)):
     if user is None:
         return _login_redirect()
     client_filter = user.client_id if user.role == m.UserRole.client_readonly else None
+    # For admin/tech: per-client roll-up + cross-fleet recent activity. For
+    # client_readonly: the same view scoped to their pinned client (the
+    # roll-up still returns just their client, and recent_activity is filtered
+    # post-hoc since the printer_events join honors Printer FK).
+    rollup = queries.per_client_rollup(db)
+    if user.role == m.UserRole.client_readonly:
+        rollup = [r for r in rollup if r["client"].id == user.client_id]
     return _render(
         request,
         "overview.html",
@@ -97,6 +109,8 @@ def overview(request: Request, db: Session = Depends(get_db)):
         errors=queries.recent_errors(db, 10),
         alerts=queries.open_alerts(db, 10),
         clients=list(db.scalars(select(m.Client).order_by(m.Client.name))),
+        rollup=rollup,
+        recent_activity=queries.recent_activity(db, 12),
         printer_label=_printer_label,
     )
 
