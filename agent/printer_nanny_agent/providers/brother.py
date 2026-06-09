@@ -119,37 +119,12 @@ class BrotherProvider(PrinterProvider):
             alert_text = ident.get(OID_ACTIVE_ALERT_TEXT + ".0")
         except SnmpError:
             alert_text = None
-        if alert_text:
-            severity, color = _parse_alert(alert_text)
-            if severity:
-                toner_supplies = [
-                    s for s in reading.get("supplies", []) if s.get("type") == "toner"
-                ]
-                # When the alert omits a color code, default to black -- this is
-                # how mono printers (HL-L2370DW etc.) phrase their alerts
-                # ("No Toner", "Replace Toner") since they have only one supply.
-                # For multi-toner color devices the regex normally matches the
-                # color, but the absent-color fallback still works as long as
-                # there's a single black toner to attach to.
-                if color is None and toner_supplies:
-                    if any(s.get("color") == "black" for s in toner_supplies):
-                        color = "black"
-                    elif len(toner_supplies) == 1:
-                        color = toner_supplies[0].get("color")
-                for supply in toner_supplies:
-                    if supply.get("color") != color:
-                        continue
-                    # Only override when standard MIB had no real percentage.
-                    if supply.get("level_pct") is None:
-                        supply["status_note"] = severity  # "low" / "empty"
-                        # Numeric hint so the bar can colour itself. Brother's
-                        # "Low" threshold maps roughly to ~15% on most lasers
-                        # (cartridge keeps printing for ~500 more pages after).
-                        # "Empty" is reported when the printer refuses to print.
-                        supply["level_pct"] = 15.0 if severity == "low" else 0.0
-                        supply["_brother_estimated"] = True
 
-        # --- Recent alerts table -> events ---
+        # --- Recent alerts table -> events + fallback alert source ---
+        # Walk first so we can fall back to the history when the live active
+        # alert is idle ("Sleep" / "Ready" / etc.). Without this fallback, a
+        # printer that's "asleep but the cartridge is empty" reports the sleep
+        # state and we miss the supply condition entirely.
         try:
             history_index = await backend.walk(ip, OID_ALERT_HISTORY_INDEX, params)
             history_descr = await backend.walk(ip, OID_ALERT_HISTORY_DESCR, params)
@@ -159,6 +134,61 @@ class BrotherProvider(PrinterProvider):
         idx_map = _walk_table(history_index, OID_ALERT_HISTORY_INDEX)
         desc_map = _walk_table(history_descr, OID_ALERT_HISTORY_DESCR)
         page_map = _walk_table(history_pages, OID_ALERT_HISTORY_PAGES)
+
+        # If the live active alert is missing or doesn't carry a supply state
+        # (Sleep / Ready / Power Save / a jam / etc.), walk back through the
+        # alert history and use the MOST RECENT entry that actually describes
+        # a supply condition. The history is index-ordered by insertion, so
+        # the last entry with a parseable severity wins.
+        parse_source = "live"
+        parsed = _parse_alert(alert_text)
+        if not parsed[0]:
+            # Sort suffixes high-to-low so we see the newest entries first.
+            for suffix in sorted(
+                idx_map,
+                key=lambda s: int(s) if s.isdigit() else 0,
+                reverse=True,
+            ):
+                desc = (desc_map.get(suffix) or "").strip()
+                if not desc:
+                    continue
+                hist_parsed = _parse_alert(desc)
+                if hist_parsed[0]:
+                    parsed = hist_parsed
+                    alert_text = f"history: {desc}"
+                    parse_source = "history"
+                    break
+
+        severity, color = parsed
+        if severity:
+            toner_supplies = [
+                s for s in reading.get("supplies", []) if s.get("type") == "toner"
+            ]
+            # When the alert omits a color code, default to black -- this is
+            # how mono printers (HL-L2370DW etc.) phrase their alerts
+            # ("No Toner", "Replace Toner") since they have only one supply.
+            # For multi-toner color devices the regex normally matches the
+            # color, but the absent-color fallback still works as long as
+            # there's a single black toner to attach to.
+            if color is None and toner_supplies:
+                if any(s.get("color") == "black" for s in toner_supplies):
+                    color = "black"
+                elif len(toner_supplies) == 1:
+                    color = toner_supplies[0].get("color")
+            for supply in toner_supplies:
+                if supply.get("color") != color:
+                    continue
+                # Only override when standard MIB had no real percentage.
+                if supply.get("level_pct") is None:
+                    supply["status_note"] = severity  # "low" / "empty"
+                    # Numeric hint so the bar can colour itself. Brother's
+                    # "Low" threshold maps roughly to ~15% on most lasers
+                    # (cartridge keeps printing for ~500 more pages after).
+                    # "Empty" is reported when the printer refuses to print.
+                    supply["level_pct"] = 15.0 if severity == "low" else 0.0
+                    supply["_brother_estimated"] = True
+
+        # Append the alert-history walk results as info events.
         for suffix in sorted(idx_map, key=lambda s: int(s) if s.isdigit() else 0):
             desc = desc_map.get(suffix)
             if not desc or not desc.strip():
@@ -175,6 +205,14 @@ class BrotherProvider(PrinterProvider):
                     "message": f"{desc.strip()} (page {pages:,})",
                 }
             )
+
+        # Diagnostic breadcrumb -- visible in the Provider diagnostics card.
+        # Shows what the live alert OID returned and whether we ended up
+        # using history fallback. Without this, "no changes" is opaque.
+        diag_alert = (alert_text or "(empty)").replace("history: ", "history=")
+        reading["_brother_active_alert"] = diag_alert
+        reading["_brother_alert_source"] = parse_source
+        reading["_brother_parsed_severity"] = severity or "none"
 
         # Flag the reading so the UI knows to render the "buckets only" tooltip.
         reading["_supply_precision"] = "brother_buckets"
