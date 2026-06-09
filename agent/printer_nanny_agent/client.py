@@ -22,8 +22,24 @@ class CentralClient:
     def _url(self, path: str) -> str:
         return f"{self._base}/api/v1/agents/{self._agent_id}{path}"
 
-    async def heartbeat(self, version: Optional[str] = None) -> dict:
-        resp = await self._client.post(self._url("/heartbeat"), json={"version": version})
+    async def heartbeat(
+        self,
+        version: Optional[str] = None,
+        install_path: Optional[str] = None,
+        last_update_result: Optional[dict] = None,
+    ) -> dict:
+        """Post a heartbeat; carry diagnostic fields when present.
+
+        The diagnostic fields are only sent once after a self-update attempt
+        (read by the runner from the result-marker file, then dropped) so the
+        steady-state heartbeat is still essentially {version}.
+        """
+        payload: dict = {"version": version}
+        if install_path is not None:
+            payload["install_path"] = install_path
+        if last_update_result is not None:
+            payload["last_update_result"] = last_update_result
+        resp = await self._client.post(self._url("/heartbeat"), json=payload)
         resp.raise_for_status()
         return resp.json()
 

@@ -148,14 +148,18 @@ async def test_perform_self_update_skips_when_no_pip_source(monkeypatch):
     await perform_self_update("")
 
 
-async def test_perform_self_update_does_not_exit_on_pip_failure(monkeypatch):
+async def test_perform_self_update_does_not_exit_on_pip_failure(monkeypatch, tmp_path):
     """When pip fails (network blip, broken package), the agent stays up on
     the OLD code rather than exiting and getting stuck in a restart loop on
-    a venv that no longer installs."""
+    a venv that no longer installs.
+
+    Also records the failure detail in the result marker so the next heartbeat
+    surfaces it on the dashboard.
+    """
     from printer_nanny_agent import updater
 
     async def fake_run(pip_source, timeout_seconds=300.0):
-        return False  # pip failed
+        return False, "pip exit 1: connection refused"
 
     exited = []
 
@@ -163,27 +167,36 @@ async def test_perform_self_update_does_not_exit_on_pip_failure(monkeypatch):
         exited.append(code)
         raise SystemExit(code)  # would normally be os._exit
 
+    marker = tmp_path / "m.json"
+    monkeypatch.setattr(updater, "_result_path", lambda: marker)
     monkeypatch.setattr(updater, "run_self_update", fake_run)
     monkeypatch.setattr(updater, "restart_for_service_manager", fake_exit)
 
-    # Should NOT call restart_for_service_manager.
     await updater.perform_self_update("git+https://x/y")
-    assert exited == []
+    assert exited == []  # didn't restart
+    result = updater.read_last_update_result()
+    assert result["status"] == "pip_failed"
+    assert "connection refused" in result["detail"]
 
 
-async def test_perform_self_update_exits_on_pip_success(monkeypatch):
-    """Happy path: pip install succeeded, agent calls restart_for_service_manager."""
+async def test_perform_self_update_exits_on_pip_success(monkeypatch, tmp_path):
+    """Happy path: pip install succeeded -> marker records 'ok' -> agent
+    calls restart_for_service_manager."""
     from printer_nanny_agent import updater
 
     async def fake_run(pip_source, timeout_seconds=300.0):
-        return True
+        return True, ""
 
     exited = []
 
     def fake_exit(code=0):
         exited.append(code)
 
+    marker = tmp_path / "m.json"
+    monkeypatch.setattr(updater, "_result_path", lambda: marker)
     monkeypatch.setattr(updater, "run_self_update", fake_run)
     monkeypatch.setattr(updater, "restart_for_service_manager", fake_exit)
     await updater.perform_self_update("git+https://x/y")
     assert exited == [0]
+    result = updater.read_last_update_result()
+    assert result["status"] == "ok"

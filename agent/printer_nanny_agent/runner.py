@@ -7,6 +7,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import time
+from pathlib import Path
 from typing import List, Optional
 
 from printer_nanny_agent import __version__
@@ -195,14 +196,34 @@ async def handle_commands(
             log.warning("unknown command type: %s", ctype)
 
 
+def _startup_diagnostics() -> tuple[str, Optional[dict]]:
+    """Read once-per-process diagnostic fields the next heartbeat should carry.
+
+    Returns (install_path, last_update_result). install_path is where the
+    package was loaded from (helpful when self-update lands in the wrong
+    site-packages). last_update_result is the marker file the updater
+    writes after every attempt -- success or specific failure.
+    """
+    import printer_nanny_agent as _pkg
+    from printer_nanny_agent.updater import read_last_update_result
+
+    install_path = str(Path(_pkg.__file__).resolve().parent)
+    return install_path, read_last_update_result()
+
+
 async def run_once(config: AgentConfig, backend: Optional[SnmpBackend] = None) -> dict:
     """One full cycle: heartbeat, commands, poll, discover. Returns a summary."""
     backend = backend or PysnmpBackend()
     client = CentralClient(
         config.central_url, config.agent_id, config.api_key, verify_tls=config.verify_tls
     )
+    install_path, update_result = _startup_diagnostics()
     try:
-        await client.heartbeat(__version__)
+        await client.heartbeat(
+            __version__,
+            install_path=install_path,
+            last_update_result=update_result,
+        )
         config = await _effective_config(client, config)
         commands = await client.get_commands()
         await handle_commands(client, backend, config, commands)
@@ -220,18 +241,29 @@ async def run_forever(config: AgentConfig, backend: Optional[SnmpBackend] = None
     client = CentralClient(
         config.central_url, config.agent_id, config.api_key, verify_tls=config.verify_tls
     )
-    # None = "due now" so the first cycle always polls + discovers, regardless of
-    # the monotonic clock's epoch (which is not zero-based on every platform).
+    install_path, update_result = _startup_diagnostics()
+    # Send install_path on every heartbeat (cheap, helps diagnose stale
+    # installs), but last_update_result only on the FIRST heartbeat after
+    # startup -- after that, the dashboard already has it and re-sending
+    # would just churn the row.
+    pending_update_result: Optional[dict] = update_result
     last_poll = None
     last_discovery = None
     effective = config
-    log.info("agent %d started -> %s", config.agent_id, config.central_url)
+    log.info(
+        "agent %d started -> %s (install: %s, version: %s)",
+        config.agent_id, config.central_url, install_path, __version__,
+    )
     try:
         while True:
             now = time.monotonic()
             try:
-                await client.heartbeat(__version__)
-                # Pull central-managed config each cycle so UI changes apply live.
+                await client.heartbeat(
+                    __version__,
+                    install_path=install_path,
+                    last_update_result=pending_update_result,
+                )
+                pending_update_result = None  # only on the first heartbeat
                 effective = await _effective_config(client, config)
                 commands = await client.get_commands()
                 await handle_commands(client, backend, effective, commands)

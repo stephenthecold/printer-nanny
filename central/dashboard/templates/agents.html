@@ -12,6 +12,24 @@
   Agents pull commands on heartbeat (~60s), so force actions take effect within ~1 minute.
 </p>
 
+{% if 'your-org' in pip_source or not pip_source %}
+<div class="mb-4 rounded border border-amber-300 bg-amber-50 px-3 py-2 text-sm text-amber-900">
+  <strong>Self-update is configured against the placeholder pip source</strong>
+  (<code class="text-xs">{{ pip_source or '(empty)' }}</code>).
+  Clicking <em>Update</em> will fail. Set
+  <a class="underline" href="/settings">Settings &rarr; Agent install &rarr; Pip install source</a>
+  to your real repo URL, e.g.
+  <code class="text-xs">git+https://github.com/stephenthecold/printer-nanny.git#subdirectory=agent</code>.
+</div>
+{% else %}
+<div class="mb-4 rounded border border-slate-200 bg-slate-50 px-3 py-2 text-xs text-slate-600">
+  Self-update will pip-install from
+  <code class="bg-white px-1 rounded text-slate-800 break-all">{{ pip_source }}</code>
+  (configured in <a class="underline" href="/settings">Settings &rarr; Agent install</a>).
+  After clicking Update, watch each agent's version suffix change -- that's the install timestamp.
+</div>
+{% endif %}
+
 {% if new_key %}
 {% set install_cmd = 'curl -fsSL ' ~ central_url ~ '/install-agent.sh | sudo bash -s -- --central-url ' ~ central_url ~ ' --agent-id ' ~ new_key.id ~ ' --api-key ' ~ new_key.key ~ ' --pip-source "' ~ pip_source ~ '"' %}
 {% set windows_cmd = '$env:PN_CENTRAL_URL="' ~ central_url ~ '"; $env:PN_AGENT_ID="' ~ new_key.id ~ '"; $env:PN_API_KEY="' ~ new_key.key ~ '"; $env:PN_PIP_SOURCE="' ~ pip_source ~ '"; Set-ExecutionPolicy -Scope Process Bypass -Force; $p="$env:TEMP\\install-pn-agent.ps1"; iwr -useb ' ~ central_url ~ '/install-agent.ps1 -OutFile $p; & $p' %}
@@ -59,12 +77,28 @@
           <span class="font-medium">{{ a.name }}</span>
           <span class="text-xs text-slate-400">agent #{{ a.id }} · home {{ a.site.client.name ~ ' / ' ~ a.site.name if a.site and a.site.client else 'site?' }}</span>
           {% if a.version %}
-          <span class="ml-2 text-xs text-slate-400 tabular-nums" title="Agent self-reported on its last heartbeat">v{{ a.version }}</span>
+          <span class="ml-2 text-xs text-slate-400 tabular-nums" title="Self-reported on heartbeat. Suffix after '+' is the install timestamp -- it changes when self-update actually replaces the package files.">v{{ a.version }}</span>
           {% else %}
           <span class="ml-2 text-xs text-slate-400">v?</span>
           {% endif %}
           {% if a.last_heartbeat %}
           <div class="text-xs text-slate-400 mt-0.5">last seen {{ a.last_heartbeat.strftime('%Y-%m-%d %H:%M:%S UTC') }}</div>
+          {% endif %}
+          {% if a.install_path %}
+          <div class="text-xs text-slate-400 mt-0.5 truncate max-w-md" title="Where the agent package was loaded from -- helps diagnose 'pip installed to the wrong place'">install: <code>{{ a.install_path }}</code></div>
+          {% endif %}
+          {% if a.last_update_result %}
+          {% set ur = a.last_update_result %}
+          {% set ok = ur.get('status') == 'ok' %}
+          <div class="mt-1 text-xs">
+            <span class="px-1.5 py-0.5 rounded {{ 'bg-emerald-100 text-emerald-800' if ok else 'bg-red-100 text-red-800' }}">
+              last update: {{ ur.get('status', 'unknown') }}
+            </span>
+            <span class="text-slate-500 ml-1">at {{ ur.get('ts', '') }}</span>
+            {% if ur.get('detail') %}
+            <div class="text-slate-500 mt-0.5 break-all">{{ ur.get('detail') }}</div>
+            {% endif %}
+          </div>
           {% endif %}
         </div>
         <div class="flex items-center gap-3 flex-wrap">

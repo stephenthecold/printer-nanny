@@ -185,9 +185,20 @@ class Agent(Base):
     site_id: Mapped[int] = mapped_column(ForeignKey("sites.id", ondelete="CASCADE"), index=True)
     name: Mapped[str] = mapped_column(String(200))
     api_key_hash: Mapped[str] = mapped_column(String(128), index=True)
-    version: Mapped[Optional[str]] = mapped_column(String(40), default=None)
+    # ``version`` now embeds an install-time marker (``0.1.0+YYYYMMDD-HHMMSS``)
+    # so the operator can SEE whether a self-update actually replaced the
+    # package files just by comparing the suffix before and after Update.
+    version: Mapped[Optional[str]] = mapped_column(String(80), default=None)
     status: Mapped[AgentStatus] = mapped_column(_enum(AgentStatus), default=AgentStatus.never_seen)
     last_heartbeat: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), default=None)
+    # Filesystem location the agent is running from. Pulled from the agent's
+    # __file__ on every heartbeat. Useful for "is pip installing to user
+    # site-packages vs the venv?" diagnostics.
+    install_path: Mapped[Optional[str]] = mapped_column(String(400), default=None)
+    # Outcome of the most recent self-update attempt (set after the agent
+    # restarts post-pip-install, or on the same process if pip failed).
+    # JSON keys: status ("ok" | "pip_failed" | ...), detail, ts.
+    last_update_result: Mapped[Optional[dict]] = mapped_column(JSON, default=None)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
 
     site: Mapped[Site] = relationship(back_populates="agents")

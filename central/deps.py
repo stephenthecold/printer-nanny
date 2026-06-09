@@ -49,8 +49,24 @@ def require_admin(user: m.User = Depends(require_user)) -> m.User:
     return user
 
 
-def touch_heartbeat(agent: m.Agent, version: Optional[str] = None) -> None:
+def touch_heartbeat(
+    agent: m.Agent,
+    version: Optional[str] = None,
+    install_path: Optional[str] = None,
+    last_update_result: Optional[dict] = None,
+) -> None:
+    """Update agent online state + diagnostic fields from a heartbeat payload.
+
+    The diagnostic fields are operator-facing only; they don't change agent
+    routing or auth. Passed individually instead of stuffing them in the
+    payload so the agent-driven callsites (readings, discovery, commands,
+    targets, config) that just bump last_heartbeat stay terse.
+    """
     agent.last_heartbeat = datetime.now(timezone.utc)
     agent.status = m.AgentStatus.online
     if version:
         agent.version = version
+    if install_path:
+        agent.install_path = install_path
+    if last_update_result is not None:
+        agent.last_update_result = last_update_result

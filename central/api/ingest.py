@@ -23,7 +23,12 @@ def heartbeat(
     agent: m.Agent = Depends(authenticated_agent),
     db: Session = Depends(get_db),
 ):
-    touch_heartbeat(agent, payload.version)
+    touch_heartbeat(
+        agent,
+        payload.version,
+        install_path=payload.install_path,
+        last_update_result=payload.last_update_result,
+    )
     db.commit()
     db.refresh(agent)
     return agent
