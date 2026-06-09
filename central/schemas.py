@@ -19,6 +19,13 @@ class ORMModel(BaseModel):
 # --------------------------------------------------------------------------- #
 class HeartbeatIn(BaseModel):
     version: Optional[str] = None
+    # Agent-side install path so the operator can confirm WHERE the agent's
+    # running from (matters when self-update lands in the wrong site-packages).
+    install_path: Optional[str] = None
+    # Outcome of the most recent self-update attempt (success or specific
+    # failure). Carried so the dashboard can show "last update: ok at X" or
+    # "FAILED: ..." without anyone reading log files on the agent host.
+    last_update_result: Optional[dict] = None
 
 
 class SupplyIn(BaseModel):
