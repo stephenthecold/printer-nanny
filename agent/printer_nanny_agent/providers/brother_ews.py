@@ -282,6 +282,7 @@ class BrotherEwsProvider(PrinterProvider):
         log.info("EWS toner percentages for %s: %s", ip, percentages)
         # Override the BrotherProvider's bucket estimate with the real % from
         # the gauge. Mark the supply as EWS-sourced for the UI.
+        changed = False
         for supply in reading.get("supplies", []):
             if supply.get("type") != "toner":
                 continue
@@ -289,9 +290,10 @@ class BrotherEwsProvider(PrinterProvider):
             if not color or color not in percentages:
                 continue
             pct = float(percentages[color])
-            # PJL is more reliable than EWS gauge-pixel scraping; defer to it
-            # when this supply was already PJL-sourced.
-            if supply.get("_pjl_sourced"):
+            # The maintenance blob and PJL both read firmware counters directly
+            # and beat EWS gauge-pixel scraping; defer to either when this
+            # supply was already sourced from them.
+            if supply.get("_pjl_sourced") or supply.get("_maintenance_sourced"):
                 continue
             # If SNMP already reported a real percentage AND it matches the EWS
             # value within 5%, leave it alone -- both agree, no need to override.
@@ -303,8 +305,12 @@ class BrotherEwsProvider(PrinterProvider):
             supply["status_note"] = None
             supply["_brother_estimated"] = False
             supply["_ews_sourced"] = True
-        # Promote the precision marker: real percentages are available, not buckets.
-        reading["_supply_precision"] = "brother_ews"
+            changed = True
+        # Promote the precision marker only when EWS actually supplied data --
+        # never relabel a reading whose values came from the maintenance blob
+        # or PJL (we skipped those supplies above).
+        if changed:
+            reading["_supply_precision"] = "brother_ews"
         return reading
 
 
