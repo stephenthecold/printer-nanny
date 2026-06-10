@@ -16,6 +16,7 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from central import models as m
+from central.audit import record
 from central.dashboard import _keystore
 from central.db import get_db
 from central.runtime import app_branding
@@ -96,10 +97,12 @@ def manage_home(request: Request, db: Session = Depends(get_db)):
 def create_client(
     request: Request, name: str = Form(...), notes: str = Form(""), db: Session = Depends(get_db)
 ):
-    if _manager(request, db) is None:
+    actor = _manager(request, db)
+    if actor is None:
         return _redirect("/login")
     if name.strip():
         db.add(m.Client(name=name.strip(), notes=notes.strip() or None))
+        record(db, request, actor, "client.create", target=f"client:{name.strip()}")
         db.commit()
         _flash(request, f"Client '{name}' added.")
     return _redirect("/manage")
@@ -134,6 +137,8 @@ def update_client(
     if client:
         client.name = name.strip() or client.name
         client.notes = notes.strip() or None
+        record(db, request, _manager(request, db), "client.update",
+               target=f"client:{client.id} {client.name}")
         db.commit()
         _flash(request, "Client updated.")
     return _redirect(f"/manage/clients/{client_id}")
@@ -147,6 +152,8 @@ def delete_client(client_id: int, request: Request, db: Session = Depends(get_db
         return _redirect(f"/manage/clients/{client_id}")
     client = db.get(m.Client, client_id)
     if client:
+        record(db, request, user, "client.delete",
+               target=f"client:{client.id} {client.name}")
         db.delete(client)
         db.commit()
         _flash(request, "Client deleted.")
@@ -158,13 +165,16 @@ def create_site(
     request: Request, client_id: int = Form(...), name: str = Form(...),
     address: str = Form(""), contact: str = Form(""), db: Session = Depends(get_db),
 ):
-    if _manager(request, db) is None:
+    actor = _manager(request, db)
+    if actor is None:
         return _redirect("/login")
     if name.strip():
         db.add(m.Site(
             client_id=client_id, name=name.strip(),
             address=address.strip() or None, contact=contact.strip() or None,
         ))
+        record(db, request, actor, "site.create",
+               target=f"site:{name.strip()} (client:{client_id})")
         db.commit()
         _flash(request, f"Site '{name}' added.")
     return _redirect(f"/manage/clients/{client_id}")
@@ -180,6 +190,8 @@ def delete_site(site_id: int, request: Request, db: Session = Depends(get_db)):
     if user.role != m.UserRole.admin:
         _flash(request, "Only admins can delete sites.")
     else:
+        record(db, request, user, "site.delete",
+               target=f"site:{site.id} {site.name}")
         db.delete(site)
         db.commit()
         _flash(request, "Site deleted.")
@@ -251,6 +263,8 @@ def printer_create(
         discovery_state=m.DiscoveryState.approved,
     )
     db.add(printer)
+    record(db, request, _manager(request, db), "printer.create",
+           target=f"printer:{printer.ip} (client:{client_id})")
     db.commit()
     _flash(request, f"Printer {ip} added.")
     return _redirect(f"/manage/clients/{client_id}")
@@ -288,6 +302,9 @@ def printer_update(
         if approve and printer.discovery_state != m.DiscoveryState.approved:
             printer.discovery_state = m.DiscoveryState.approved
             approved_now = True
+        record(db, request, _manager(request, db),
+               "printer.approve" if approved_now else "printer.update",
+               target=f"printer:{printer.id} {printer.ip}")
         db.commit()
         _flash(request, "Printer approved." if approved_now else "Printer updated.")
         # After approval (typically reached from /approvals), bounce back there
@@ -305,6 +322,8 @@ def printer_delete(printer_id: int, request: Request, db: Session = Depends(get_
     if user is None or printer is None:
         return _redirect("/manage")
     client_id = printer.client_id
+    record(db, request, user, "printer.delete",
+           target=f"printer:{printer.id} {printer.ip}")
     db.delete(printer)
     db.commit()
     _flash(request, "Printer deleted.")
@@ -319,6 +338,8 @@ def printer_ignore(printer_id: int, request: Request, db: Session = Depends(get_
     printer = db.get(m.Printer, printer_id)
     if printer:
         printer.discovery_state = m.DiscoveryState.ignored
+        record(db, request, _manager(request, db), "printer.ignore",
+               target=f"printer:{printer.id} {printer.ip}")
         db.commit()
         _flash(request, f"Stopped monitoring printer {printer.ip}.")
         return _redirect(f"/manage/clients/{printer.client_id}")
@@ -333,6 +354,8 @@ def printer_approve(printer_id: int, request: Request, db: Session = Depends(get
     printer = db.get(m.Printer, printer_id)
     if printer:
         printer.discovery_state = m.DiscoveryState.approved
+        record(db, request, _manager(request, db), "printer.approve",
+               target=f"printer:{printer.id} {printer.ip}")
         db.commit()
         _flash(request, f"Printer {printer.ip} approved.")
         return _redirect(f"/printers/{printer.id}")
@@ -366,6 +389,8 @@ def printer_poll_now(printer_id: int, request: Request, db: Session = Depends(ge
         type=m.CommandType.poll_printer,
         payload={"printer_id": printer.id, "ip": printer.ip},
     ))
+    record(db, request, _manager(request, db), "printer.poll_now",
+           target=f"printer:{printer.id} {printer.ip}")
     db.commit()
     _flash(request, "Poll queued. The agent will refresh this printer on its next heartbeat.")
     return _redirect(f"/printers/{printer.id}")
@@ -421,6 +446,8 @@ def agent_create(
     api_key = generate_api_key()
     agent = m.Agent(site_id=site_id, name=name.strip() or "agent", api_key_hash=hash_api_key(api_key))
     db.add(agent)
+    record(db, request, _manager(request, db), "agent.create",
+           target=f"agent:{name.strip() or 'agent'} (site:{site_id})")
     db.commit()
     # Surface the plaintext key exactly once. Keep it server-side (not in the
     # signed-but-readable session cookie); the session holds only a one-shot token.
@@ -439,6 +466,8 @@ def agent_rotate_key(agent_id: int, request: Request, db: Session = Depends(get_
     if agent:
         api_key = generate_api_key()
         agent.api_key_hash = hash_api_key(api_key)
+        record(db, request, _manager(request, db), "agent.rotate_key",
+               target=f"agent:{agent.id} {agent.name}")
         db.commit()
         request.session["new_agent_key_token"] = _keystore.put(
             {"id": agent.id, "name": agent.name, "key": api_key}
@@ -477,6 +506,8 @@ def agent_update_command(agent_id: int, request: Request, db: Session = Depends(
         type=m.CommandType.update_agent,
         payload={"pip_source": pip_source},
     ))
+    record(db, request, _manager(request, db), "agent.update_queued",
+           target=f"agent:{agent.id} {agent.name}", detail=pip_source)
     db.commit()
     _flash(request, f"Update queued for '{agent.name}' (picks up on next heartbeat).")
     return _redirect("/manage/agents")
@@ -506,6 +537,8 @@ def agents_update_all(request: Request, db: Session = Depends(get_db)):
             type=m.CommandType.update_agent,
             payload={"pip_source": pip_source},
         ))
+    record(db, request, user, "agent.update_all",
+           detail=f"{len(agents)} agent(s); source={pip_source}")
     db.commit()
     _flash(request, f"Update queued for {len(agents)} agent(s).")
     return _redirect("/manage/agents")
@@ -525,6 +558,8 @@ def agent_rescan(agent_id: int, request: Request, db: Session = Depends(get_db))
         _flash(request, "Agent not found.")
         return _redirect("/manage/agents")
     db.add(m.Command(agent_id=agent.id, type=m.CommandType.rescan, payload=None))
+    record(db, request, _manager(request, db), "agent.rescan",
+           target=f"agent:{agent.id} {agent.name}")
     db.commit()
     _flash(
         request,
@@ -548,6 +583,8 @@ def agent_poll_now(agent_id: int, request: Request, db: Session = Depends(get_db
         _flash(request, "Agent not found.")
         return _redirect("/manage/agents")
     db.add(m.Command(agent_id=agent.id, type=m.CommandType.poll_now, payload=None))
+    record(db, request, _manager(request, db), "agent.poll_now",
+           target=f"agent:{agent.id} {agent.name}")
     db.commit()
     _flash(
         request,
@@ -564,6 +601,8 @@ def agent_delete(agent_id: int, request: Request, db: Session = Depends(get_db))
         return _redirect("/manage/agents")
     agent = db.get(m.Agent, agent_id)
     if agent:
+        record(db, request, user, "agent.delete",
+               target=f"agent:{agent.id} {agent.name}")
         db.delete(agent)
         db.commit()
         _flash(request, "Agent deleted.")
@@ -654,6 +693,9 @@ def subnet_add(
                 context_name=snmp_v3_context_name,
             ),
         ))
+        record(db, request, _manager(request, db), "subnet.create",
+               target=f"subnet:{cidr.strip()} agent:{agent.id}",
+               detail=f"snmp v{snmp_version}")
         db.commit()
         _flash(request, f"Subnet {cidr} assigned.")
     return _redirect("/manage/agents")
@@ -665,6 +707,8 @@ def subnet_delete(subnet_id: int, request: Request, db: Session = Depends(get_db
         return _redirect("/login")
     subnet = db.get(m.Subnet, subnet_id)
     if subnet:
+        record(db, request, _manager(request, db), "subnet.delete",
+               target=f"subnet:{subnet.id} {subnet.cidr}")
         db.delete(subnet)
         db.commit()
         _flash(request, "Subnet removed.")
@@ -737,6 +781,8 @@ def subnet_update(
                 new_agent = None
             if new_agent is not None:
                 subnet.agent_id = new_agent.id
+        record(db, request, _manager(request, db), "subnet.update",
+               target=f"subnet:{subnet.id} {subnet.cidr}")
         db.commit()
         _flash(request, f"Subnet {subnet.cidr} updated.")
     return _redirect("/manage/agents")
@@ -763,6 +809,37 @@ def users_home(request: Request, db: Session = Depends(get_db)):
         user=_admin(request, db), users=users, clients=clients,
         roles=[r.value for r in m.UserRole],
         flash=_pop_flash(request),
+    )
+
+
+# --------------------------------------------------------------------------- #
+# Audit trail (admin only)
+# --------------------------------------------------------------------------- #
+@router.get("/audit", response_class=HTMLResponse)
+def audit_home(request: Request, q: str = "", db: Session = Depends(get_db)):
+    """Latest audit rows, newest first. ``?q=`` filters by substring across
+    action / target / username -- enough for 'what did tech2 touch last week'
+    without building a query designer."""
+    admin = _admin(request, db)
+    if admin is None:
+        return _redirect("/login" if _user(request, db) is None else "/")
+    stmt = select(m.AuditLog).order_by(m.AuditLog.ts.desc()).limit(200)
+    if q.strip():
+        needle = f"%{q.strip()}%"
+        stmt = (
+            select(m.AuditLog)
+            .where(
+                m.AuditLog.action.ilike(needle)
+                | m.AuditLog.target.ilike(needle)
+                | m.AuditLog.username.ilike(needle)
+            )
+            .order_by(m.AuditLog.ts.desc())
+            .limit(200)
+        )
+    rows = list(db.scalars(stmt))
+    return _tpl(
+        request, "audit.html", db,
+        user=admin, rows=rows, q=q.strip(),
     )
 
 
@@ -821,6 +898,8 @@ def user_create(
         auth_provider="local" if password else "oidc",
     )
     db.add(new_user)
+    record(db, request, _admin(request, db), "user.create",
+           target=f"user:{username}", detail=f"role={role_enum.value}")
     db.commit()
     _flash(request, f"User '{username}' created.")
     return _redirect("/manage/users")
@@ -858,6 +937,8 @@ def user_update(
     target.email = email.strip() or None
     target.role = new_role
     target.client_id = pinned_client_id if new_role == m.UserRole.client_readonly else None
+    record(db, request, actor, "user.update",
+           target=f"user:{target.username}", detail=f"role={new_role.value}")
     db.commit()
     _flash(request, f"User '{target.username}' updated.")
     return _redirect("/manage/users")
@@ -879,6 +960,8 @@ def user_reset_password(
         return _redirect(f"/manage/users/{user_id}/edit")
     target.password_hash = hash_password(new_password)
     target.auth_provider = "local"  # they can now sign in locally
+    record(db, request, _admin(request, db), "user.reset_password",
+           target=f"user:{target.username}")
     db.commit()
     _flash(request, f"Password reset for '{target.username}'.")
     return _redirect("/manage/users")
@@ -899,6 +982,8 @@ def user_delete(user_id: int, request: Request, db: Session = Depends(get_db)):
             and db.query(m.User).filter_by(role=m.UserRole.admin).count() <= 1):
         _flash(request, "Refused: this is the only admin.")
         return _redirect("/manage/users")
+    record(db, request, actor, "user.delete",
+           target=f"user:{target.username}", detail=f"role={target.role.value}")
     db.delete(target)
     db.commit()
     _flash(request, f"User '{target.username}' deleted.")

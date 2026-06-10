@@ -1,0 +1,50 @@
+{% extends "base.html" %}
+{% block title %}Audit · {{ app.name or 'Printer Nanny' }}{% endblock %}
+{% block body %}
+<div class="flex items-baseline justify-between mb-4 flex-wrap gap-2">
+  <h1 class="text-2xl font-semibold">Audit trail</h1>
+  <form method="get" action="/manage/audit" class="flex gap-2">
+    <input name="q" value="{{ q }}" placeholder="Filter by action / target / user"
+           class="border rounded px-3 py-1.5 text-sm w-64" />
+    <button class="bg-slate-900 text-white rounded px-3 py-1.5 text-sm">Filter</button>
+    {% if q %}<a href="/manage/audit" class="text-sm text-sky-700 self-center hover:underline">clear</a>{% endif %}
+  </form>
+</div>
+<p class="text-sm text-slate-500 mb-4">
+  Who did what, from where. Logins (including failures), settings changes,
+  user / agent / subnet / printer management, approvals, and alert actions.
+  Latest 200 entries{% if q %} matching "{{ q }}"{% endif %}.
+</p>
+
+<section class="bg-white rounded-lg shadow overflow-x-auto">
+  <table class="w-full text-sm">
+    <thead class="text-left text-xs text-slate-500 bg-slate-50">
+      <tr>
+        <th class="px-4 py-2 whitespace-nowrap">Time (UTC)</th>
+        <th class="py-2">User</th>
+        <th class="py-2">IP</th>
+        <th class="py-2">Action</th>
+        <th class="py-2">Target</th>
+        <th class="py-2">Detail</th>
+      </tr>
+    </thead>
+    <tbody>
+      {% for r in rows %}
+      <tr class="border-t align-top hover:bg-slate-50">
+        <td class="px-4 py-1.5 tabular-nums text-xs text-slate-500 whitespace-nowrap">{{ r.ts.strftime('%Y-%m-%d %H:%M:%S') }}</td>
+        <td class="py-1.5">{{ r.username or '—' }}</td>
+        <td class="py-1.5 tabular-nums text-xs text-slate-500">{{ r.ip or '—' }}</td>
+        <td class="py-1.5">
+          {% set danger = r.action in ('login.failed', 'user.delete', 'agent.delete', 'client.delete', 'printer.delete') %}
+          <span class="px-1.5 py-0.5 rounded text-xs {{ 'bg-red-100 text-red-700' if danger else 'bg-slate-100 text-slate-700' }}">{{ r.action }}</span>
+        </td>
+        <td class="py-1.5 text-xs">{{ r.target or '' }}</td>
+        <td class="py-1.5 text-xs text-slate-600 break-all max-w-md">{{ r.detail or '' }}</td>
+      </tr>
+      {% else %}
+      <tr><td class="px-4 py-3 text-slate-400" colspan="6">No audit entries{% if q %} match "{{ q }}"{% endif %}.</td></tr>
+      {% endfor %}
+    </tbody>
+  </table>
+</section>
+{% endblock %}
