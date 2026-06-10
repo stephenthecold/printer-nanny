@@ -82,11 +82,20 @@ def settings_page(
 
 @router.post("/settings")
 async def settings_save(request: Request, db: Session = Depends(get_db)):
+    from central.audit import record
+
     user = _admin(request, db)
     if user is None:
         return RedirectResponse("/login", status_code=303)
     form = dict(await request.form())
+    before = runtime.load_settings(db)
     runtime.save_settings(db, form)
+    after = runtime.load_settings(db)
+    # Audit the key NAMES that changed -- never the values (secrets!).
+    changed = sorted(k for k in after if before.get(k) != after.get(k))
+    if changed:
+        record(db, request, user, "settings.update", detail=", ".join(changed))
+        db.commit()
     request.session["flash"] = "Settings saved."
     return RedirectResponse("/settings", status_code=303)
 

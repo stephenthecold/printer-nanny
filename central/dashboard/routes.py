@@ -72,15 +72,27 @@ def login(
     password: str = Form(...),
     db: Session = Depends(get_db),
 ):
+    from central.audit import record, record_anonymous
+
     user = db.scalar(select(m.User).where(m.User.username == username))
     if user is None or not verify_password(password, user.password_hash):
+        record_anonymous(db, request, username, "login.failed")
+        db.commit()
         return _render(request, "login.html", db=db, error="Invalid credentials")
     request.session["user_id"] = user.id
+    record(db, request, user, "login")
+    db.commit()
     return RedirectResponse("/", status_code=303)
 
 
 @router.get("/logout")
-def logout(request: Request):
+def logout(request: Request, db: Session = Depends(get_db)):
+    from central.audit import record
+
+    user = _user(request, db)
+    if user is not None:
+        record(db, request, user, "logout")
+        db.commit()
     request.session.clear()
     return _login_redirect()
 
@@ -219,9 +231,13 @@ def approval_action(
         return RedirectResponse("/", status_code=303)
     printer = db.get(m.Printer, printer_id)
     if printer is not None and action in ("approve", "ignore"):
+        from central.audit import record
+
         printer.discovery_state = (
             m.DiscoveryState.approved if action == "approve" else m.DiscoveryState.ignored
         )
+        record(db, request, user, f"printer.{action}",
+               target=f"printer:{printer.id} {printer.ip}")
         db.commit()
     # HTMX swaps out the row; return empty so the row disappears.
     return HTMLResponse("")
@@ -254,11 +270,15 @@ def alert_action(alert_id: int, action: str, request: Request, db: Session = Dep
         return RedirectResponse("/", status_code=303)
     alert = db.get(m.Alert, alert_id)
     if alert is not None:
+        from central.audit import record
+
         if action == "ack":
             alert.state = m.AlertState.acknowledged
         elif action == "resolve":
             alert.state = m.AlertState.resolved
             alert.resolved_at = datetime.now(timezone.utc)
+        record(db, request, user, f"alert.{action}",
+               target=f"alert:{alert.id}", detail=alert.title or "")
         db.commit()
     return HTMLResponse("")
 
@@ -303,6 +323,9 @@ def account_change_password(
         request.session["account_error"] = "New password and confirmation don't match."
         return RedirectResponse("/account", status_code=303)
     user.password_hash = hash_password(new_password)
+    from central.audit import record
+
+    record(db, request, user, "account.password_change")
     db.commit()
     request.session["account_flash"] = "Password changed."
     return RedirectResponse("/account", status_code=303)

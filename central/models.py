@@ -524,6 +524,33 @@ class AppAsset(Base):
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
 
 
+class AuditLog(Base):
+    """Operator-action audit trail (who did what, from where, when).
+
+    Append-only; written by ``central.audit.record`` at security-relevant
+    boundaries: logins (success + failure), settings changes, user / agent /
+    subnet / printer CRUD, approvals, alert actions. ``username`` is
+    denormalized so the trail survives user deletion; ``user_id`` is the
+    join key while the account still exists.
+    """
+
+    __tablename__ = "audit_log"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    ts: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, index=True)
+    user_id: Mapped[Optional[int]] = mapped_column(
+        ForeignKey("users.id", ondelete="SET NULL"), default=None
+    )
+    username: Mapped[Optional[str]] = mapped_column(String(120), default=None)
+    ip: Mapped[Optional[str]] = mapped_column(String(64), default=None)
+    # Dotted action slug, e.g. "login", "login.failed", "settings.update",
+    # "user.create", "agent.update_queued", "printer.approve".
+    action: Mapped[str] = mapped_column(String(80), index=True)
+    # Human-readable object reference, e.g. "printer:42 10.4.1.120".
+    target: Mapped[Optional[str]] = mapped_column(String(300), default=None)
+    detail: Mapped[Optional[str]] = mapped_column(Text, default=None)
+
+
 class AppSetting(Base):
     """Key/value store for operator-managed runtime settings (edited in the UI).
 

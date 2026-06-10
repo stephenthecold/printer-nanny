@@ -24,6 +24,7 @@
     <a href="/alerts" class="hover:text-white/80 text-sm">Alerts</a>
     {% if user.role.value == 'admin' %}
     <a href="/manage/users" class="hover:text-white/80 text-sm">Users</a>
+    <a href="/manage/audit" class="hover:text-white/80 text-sm">Audit</a>
     <a href="/settings" class="hover:text-white/80 text-sm">Settings</a>
     {% endif %}
     <a href="/account" class="ml-auto text-sm text-slate-300 hover:text-white">{{ user.username }} ({{ user.role.value }})</a>
