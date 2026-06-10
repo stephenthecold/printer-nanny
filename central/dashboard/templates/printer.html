@@ -9,11 +9,14 @@
   <a href="/clients/{{ printer.client_id }}" class="text-sm text-sky-700 hover:underline"><- Client</a>
   <h1 class="text-2xl font-semibold">{{ printer.model or printer.hostname or 'Printer' }}</h1>
   {{ status_badge(printer.status) }}
+  {# Discovery-state badge only when it's actionable -- "approved" is the
+     normal state for every printer you'd browse to, so showing it is noise. #}
+  {% if is_pending or is_ignored %}
   <span class="text-xs px-2 py-0.5 rounded
-    {{ 'bg-amber-100 text-amber-800' if is_pending
-       else ('bg-slate-200 text-slate-700' if is_ignored else 'bg-emerald-100 text-emerald-800') }}">
+    {{ 'bg-amber-100 text-amber-800' if is_pending else 'bg-slate-200 text-slate-700' }}">
     {{ printer.discovery_state.value }}
   </span>
+  {% endif %}
   {% if can_manage %}
   <div class="ml-auto flex items-center gap-2">
     <form method="post" action="/manage/printers/{{ printer.id }}/poll" class="inline">
@@ -68,14 +71,11 @@
     {% endif %}
   </div>
   <div class="bg-white rounded-lg shadow p-4">
+    {# The old "? buckets only" Brother caveat is gone: the maintenance-blob
+       provider now reads exact percentages on every modern Brother, and the
+       Provider diagnostics card explains the data source per poll. #}
     <div class="flex items-center justify-between mb-2">
       <div class="text-slate-500 text-xs">Supplies</div>
-      {% if printer.brand and printer.brand.lower() == 'brother' %}
-      <span class="text-xs text-slate-400 italic"
-            title="Brother lasers do not have continuous toner sensors; firmware reports only OK / Low / Empty. The estimated percentage is derived from the printer's active alert. Use the printer's web UI for vendor-estimated percentages.">
-        ? buckets only
-      </span>
-      {% endif %}
     </div>
     {% for sup in supplies %}
     {# Prefer the vendor-provided description ("Black Toner Cartridge",

@@ -1,25 +1,31 @@
-"""Brother provider.
+"""Brother provider -- consolidated supply pipeline for every Brother device.
 
-Brother lasers (MFC, HL, DCP families) do not have a continuous toner fill
-sensor; their firmware only tracks OK / Low / Empty buckets. The standard
-Printer-MIB therefore reports `prtMarkerSuppliesLevel = -3` ("some remaining")
-for every toner -- correct, but useless to an operator who wants to know
-when to order. Brother's private MIB exposes the same fact more usefully:
-the current active alert is at `1.3.6.1.4.1.2435.2.3.9.4.2.1.5.4.5.2.0` as
-plain text like ``'Toner Low (BK)'`` / ``'Toner Empty (C)'``.
+One registered provider, one Provider-diagnostics row per poll. Internally it
+runs up to four passes, stopping the expensive ones as soon as real numbers
+exist (fewer network round-trips per poll on healthy fleets):
 
-This provider:
+  1. maintenance blob (brother_maintenance) -- the BRAdmin data path: exact
+     percentages for toner/drum/belt/fuser/laser/PF kits over read-only SNMP.
+     Works on every modern Brother (~2010+). When this succeeds, PJL and EWS
+     are skipped entirely.
+  2. status pass (this module) -- live active-alert text -> bucket hints
+     ("low"/"empty") for any toner still without a percentage, plus the
+     alert-history walk -> info events. Always runs (events are wanted even
+     when percentages are exact).
+  3. PJL over TCP/9100 (brother_pjl) -- only when a toner still lacks a real
+     percentage (legacy firmware without the maintenance blob).
+  4. EWS HTML scrape (brother_ews) -- last resort for the same gap.
 
-* Reads the current active alert and, if it names a toner color, upgrades
-  that supply's status_note from the generic "some remaining" to "low" or
-  "empty" so the dashboard can colour-code it.
-* Walks `brInfoMaintenance.51` (the last-10-alerts history table) and adds
-  the entries to the reading's `events` list as info-level events tagged
-  with the page count at which each occurred.
+The sub-modules keep their classes and parsers (unit-tested in isolation)
+but no longer self-register; this umbrella is the only Brother entry in the
+provider registry.
 
-Real numeric percentages on Brother require EWS HTML scraping (a future
-provider; the gauge HTML at /general/status.html varies by firmware and
-needs per-model testing). Documented in central/snmp.md.
+Diagnostic breadcrumbs (rendered in the Provider diagnostics card):
+  maintenance=...   what the blob decode found (or no-data / snmp-error)
+  alert=...         the live active-alert text
+  parsed=...        severity extracted from the alert (low/empty/none)
+  source=...        which channel supplied the percentages
+                    (maintenance | pjl | ews | buckets | none)
 """
 
 from __future__ import annotations
@@ -28,6 +34,9 @@ import re
 from typing import Dict, Optional
 
 from printer_nanny_agent.providers import PrinterProvider, register
+from printer_nanny_agent.providers.brother_ews import BrotherEwsProvider
+from printer_nanny_agent.providers.brother_maintenance import BrotherMaintenanceProvider
+from printer_nanny_agent.providers.brother_pjl import BrotherPjlProvider
 from printer_nanny_agent.snmp import SnmpBackend, SnmpError, SnmpParams
 
 # Active alert: human-readable text scalar (we read .0 as an instance).
@@ -101,6 +110,34 @@ def _parse_alert(text: Optional[str]) -> tuple[Optional[str], Optional[str]]:
     return severity, color
 
 
+def _toner_gaps(reading: dict) -> bool:
+    """True when any toner still lacks a REAL percentage (none, or only a
+    bucket estimate). Drives whether the PJL / EWS fallbacks are worth the
+    network round-trip."""
+    return any(
+        s.get("type") == "toner"
+        and (s.get("level_pct") is None or s.get("_brother_estimated"))
+        for s in reading.get("supplies", [])
+    )
+
+
+# Module-level pass instances. Each sub-provider keeps its own parsing and
+# error handling; the umbrella only sequences them.
+_MAINTENANCE = BrotherMaintenanceProvider()
+_PJL = BrotherPjlProvider()
+_EWS = BrotherEwsProvider()
+
+
+# Patchable seams: tests replace these to keep CI off the network (PJL opens
+# TCP/9100, EWS does HTTP GETs). Production code never touches them.
+async def _pjl_step(backend, ip, params, reading, sys_object_id) -> dict:
+    return await _PJL.augment(backend, ip, params, reading, sys_object_id)
+
+
+async def _ews_step(backend, ip, params, reading, sys_object_id) -> dict:
+    return await _EWS.augment(backend, ip, params, reading, sys_object_id)
+
+
 class BrotherProvider(PrinterProvider):
     name = "brother"
     enterprise_prefixes = ("2435",)
@@ -113,24 +150,50 @@ class BrotherProvider(PrinterProvider):
         reading: dict,
         sys_object_id: Optional[str],
     ) -> dict:
-        # --- Current alert -> toner status_note enrichment ---
+        # --- Pass 1: maintenance blob (exact percentages, read-only SNMP) ---
+        reading = await _MAINTENANCE.augment(backend, ip, params, reading, sys_object_id)
+
+        # --- Pass 2: live alert + history events (always) ---
+        reading = await self._status_pass(backend, ip, params, reading)
+
+        # --- Pass 3 + 4: legacy fallbacks, only when a toner still has no
+        # real percentage. On modern Brothers the maintenance blob already
+        # answered and these are skipped -- no 9100 connection, no HTTP. ---
+        if _toner_gaps(reading):
+            reading = await _pjl_step(backend, ip, params, reading, sys_object_id)
+        if _toner_gaps(reading):
+            reading = await _ews_step(backend, ip, params, reading, sys_object_id)
+
+        # --- Which channel ended up supplying the percentages? ---
+        supplies = reading.get("supplies", [])
+        if any(s.get("_maintenance_sourced") for s in supplies):
+            source = "maintenance"
+        elif any(s.get("_pjl_sourced") for s in supplies):
+            source = "pjl"
+        elif any(s.get("_ews_sourced") for s in supplies):
+            source = "ews"
+        elif any(s.get("_brother_estimated") for s in supplies):
+            source = "buckets"
+        else:
+            source = "none"
+        reading["_brother_source"] = source
+        return reading
+
+    async def _status_pass(
+        self, backend: SnmpBackend, ip: str, params: SnmpParams, reading: dict
+    ) -> dict:
+        """Live active-alert text -> bucket hints; alert history -> events.
+
+        The history is strictly a log: it never feeds current supply state
+        (Brother models keep stale 'No Toner @page 0' placeholders forever,
+        and a months-old 'Toner Low' says nothing about today's cartridge).
+        """
         try:
             ident = await backend.get(ip, [OID_ACTIVE_ALERT_TEXT + ".0"], params)
             alert_text = ident.get(OID_ACTIVE_ALERT_TEXT + ".0")
         except SnmpError:
             alert_text = None
 
-        # --- Recent alerts table -> events ---
-        # Walk the alert history so we can surface past events on the printer
-        # detail page. Earlier revisions of this provider ALSO used the history
-        # as a fallback source for current supply state when the live alert
-        # was idle ("Sleep" / "Ready") -- that proved unreliable. Brother MFC
-        # models keep stale "No Toner @page 0" placeholders forever, and a
-        # "Toner Low" event from 800+ pages ago doesn't reflect a cartridge
-        # that's since been replaced or kept printing. The dashboard now
-        # treats history strictly as a log; the live active-alert OID is the
-        # only source for the current supply state. Real percentages come
-        # from PJL / EWS scraping (separate providers).
         try:
             history_index = await backend.walk(ip, OID_ALERT_HISTORY_INDEX, params)
             history_descr = await backend.walk(ip, OID_ALERT_HISTORY_DESCR, params)
@@ -149,9 +212,6 @@ class BrotherProvider(PrinterProvider):
             # When the alert omits a color code, default to black -- this is
             # how mono printers (HL-L2370DW etc.) phrase their alerts
             # ("No Toner", "Replace Toner") since they have only one supply.
-            # For multi-toner color devices the regex normally matches the
-            # color, but the absent-color fallback still works as long as
-            # there's a single black toner to attach to.
             if color is None and toner_supplies:
                 if any(s.get("color") == "black" for s in toner_supplies):
                     color = "black"
@@ -160,7 +220,7 @@ class BrotherProvider(PrinterProvider):
             for supply in toner_supplies:
                 if supply.get("color") != color:
                     continue
-                # Only override when standard MIB had no real percentage.
+                # Only seed a bucket hint when no channel produced a real %.
                 if supply.get("level_pct") is None:
                     supply["status_note"] = severity  # "low" / "empty"
                     # Numeric hint so the bar can colour itself. Brother's
@@ -188,15 +248,11 @@ class BrotherProvider(PrinterProvider):
                 }
             )
 
-        # Diagnostic breadcrumb -- visible in the Provider diagnostics card.
-        # Shows what the live alert OID returned and whether the parser
-        # extracted a supply severity. Without this, "no changes" is opaque.
+        # Diagnostic breadcrumbs -- visible in the Provider diagnostics card.
         reading["_brother_active_alert"] = alert_text or "(empty)"
-        reading["_brother_alert_source"] = "live"
         reading["_brother_parsed_severity"] = severity or "none"
 
-        # Flag the reading so the UI knows to render the "buckets only" tooltip.
-        # setdefault: never downgrade the tag when the maintenance-blob provider
+        # setdefault: never downgrade the tag when the maintenance pass
         # already established real percentages ("brother_maintenance").
         reading.setdefault("_supply_precision", "brother_buckets")
         return reading

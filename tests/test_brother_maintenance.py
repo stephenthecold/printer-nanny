@@ -266,10 +266,22 @@ async def test_augment_no_blob_reports_no_data():
 
 # ---------- pipeline interactions ----------
 
-async def test_bucket_provider_does_not_clobber_maintenance_values():
-    """Pipeline order: maintenance first, bucket second. Even when the live
-    alert says 'Toner Low', the exact percentage must survive (the bucket
-    provider only fills when level_pct is None)."""
+async def test_umbrella_bucket_pass_does_not_clobber_maintenance_values(monkeypatch):
+    """Consolidated pipeline: maintenance pass first, bucket pass second --
+    inside the single registered BrotherProvider. Even when the live alert
+    says 'Toner Low', the exact percentage must survive (the bucket pass only
+    fills when level_pct is None)."""
+    from printer_nanny_agent.providers import brother as brother_mod
+
+    fallbacks_called = []
+
+    async def tracking_passthrough(backend, ip, params, reading, sys_object_id):
+        fallbacks_called.append("net")
+        return reading
+
+    monkeypatch.setattr(brother_mod, "_pjl_step", tracking_passthrough)
+    monkeypatch.setattr(brother_mod, "_ews_step", tracking_passthrough)
+
     reading = {
         "supplies": [
             {"type": "toner", "color": "black", "level_pct": None,
@@ -281,16 +293,54 @@ async def test_bucket_provider_does_not_clobber_maintenance_values():
         maintenance=blob(rec("6f", 1200)),  # genuinely low: 12%
         alert="Toner Low",
     )
-    out = await BrotherMaintenanceProvider().augment(
+    out = await BrotherProvider().augment(
         backend, "10.0.0.1", SnmpParams(), reading, SYS_OID,
     )
-    out = await BrotherProvider().augment(
-        backend, "10.0.0.1", SnmpParams(), out, SYS_OID,
-    )
-    black = out["supplies"][0]
+    black = next(s for s in out["supplies"] if s.get("color") == "black")
     assert black["level_pct"] == 12.0  # exact %, not the 15% bucket guess
-    # Precision tag not downgraded by the bucket provider.
+    # Precision tag not downgraded by the bucket pass.
     assert out["_supply_precision"] == "brother_maintenance"
+    assert out["_brother_source"] == "maintenance"
+    # Maintenance answered, so the network fallbacks were never attempted.
+    assert fallbacks_called == []
+
+
+async def test_umbrella_runs_fallbacks_only_when_toner_gaps_remain(monkeypatch):
+    """No maintenance blob + no live alert: the umbrella must give the legacy
+    channels (PJL then EWS) their chance, in order."""
+    from printer_nanny_agent.providers import brother as brother_mod
+
+    calls: list[str] = []
+
+    async def fake_pjl(backend, ip, params, reading, sys_object_id):
+        calls.append("pjl")
+        return reading  # PJL found nothing -> gap remains
+
+    async def fake_ews(backend, ip, params, reading, sys_object_id):
+        calls.append("ews")
+        for s in reading.get("supplies", []):
+            if s.get("type") == "toner":
+                s["level_pct"] = 64.0
+                s["_ews_sourced"] = True
+        return reading
+
+    monkeypatch.setattr(brother_mod, "_pjl_step", fake_pjl)
+    monkeypatch.setattr(brother_mod, "_ews_step", fake_ews)
+
+    reading = {
+        "supplies": [
+            {"type": "toner", "color": "black", "level_pct": None,
+             "status_note": "some remaining"},
+        ],
+        "events": [],
+    }
+    backend = _backend()  # no blob, no alert
+    out = await BrotherProvider().augment(
+        backend, "10.0.0.1", SnmpParams(), reading, SYS_OID,
+    )
+    assert calls == ["pjl", "ews"]
+    assert out["supplies"][0]["level_pct"] == 64.0
+    assert out["_brother_source"] == "ews"
 
 
 async def test_ews_defers_to_maintenance_sourced_values(monkeypatch):
