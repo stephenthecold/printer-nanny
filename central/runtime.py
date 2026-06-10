@@ -160,12 +160,21 @@ def default_settings() -> Dict[str, Any]:
 
 
 def load_settings(db: Session) -> Dict[str, Any]:
-    """Defaults overlaid with stored values (coerced to each spec's type)."""
+    """Defaults overlaid with stored values (coerced to each spec's type).
+
+    Secret-typed values are decrypted on the way out (central.secrets);
+    legacy plaintext rows pass through unchanged, so a fleet upgraded
+    mid-flight keeps working before its first re-save.
+    """
+    from central.secrets import decrypt_value
+
     merged = default_settings()
     for row in db.scalars(select(m.AppSetting)):
         spec = SPEC_BY_KEY.get(row.key)
-        if spec is not None and row.value is not None:
-            merged[row.key] = _coerce(spec, row.value)
+        if spec is None or row.value is None:
+            continue
+        raw = decrypt_value(row.value) if spec.type == "secret" else row.value
+        merged[row.key] = _coerce(spec, raw)
     return merged
 
 
@@ -174,7 +183,13 @@ def save_settings(db: Session, form: Dict[str, Any]) -> None:
 
     The page posts every section at once, so an absent checkbox means False.
     Secret fields left as the placeholder keep their stored value.
+
+    Secrets are encrypted at rest (central.secrets). Every save also sweeps
+    legacy plaintext secret rows and re-stores them encrypted -- the lazy
+    half of the encryption migration.
     """
+    from central.secrets import encrypt_value, is_encrypted
+
     existing = {row.key: row for row in db.scalars(select(m.AppSetting))}
     for spec in SPECS:
         if spec.type == "bool":
@@ -186,12 +201,45 @@ def save_settings(db: Session, form: Dict[str, Any]) -> None:
             if spec.type == "secret" and raw in (SECRET_PLACEHOLDER, ""):
                 continue  # leave the stored secret untouched
             value = _coerce(spec, raw)
+            if spec.type == "secret":
+                value = encrypt_value(str(value))
         row = existing.get(spec.key)
         if row is None:
             db.add(m.AppSetting(key=spec.key, value=value))
         else:
             row.value = value
+    # Sweep: re-encrypt any secret row still holding plaintext (pre-upgrade
+    # data, or rows written by code paths that predate encryption).
+    for spec in SPECS:
+        if spec.type != "secret":
+            continue
+        row = existing.get(spec.key)
+        if row is not None and isinstance(row.value, str) and row.value \
+                and not is_encrypted(row.value):
+            row.value = encrypt_value(row.value)
     db.commit()
+
+
+def encrypt_existing_settings(db: Session) -> int:
+    """One-shot startup migration: encrypt every plaintext secret row.
+
+    Idempotent (encrypted rows are skipped) and safe to race with the worker
+    (load_settings handles both forms). Returns the number of rows updated
+    so the caller can log it.
+    """
+    from central.secrets import encrypt_value, is_encrypted
+
+    updated = 0
+    for row in db.scalars(select(m.AppSetting)):
+        spec = SPEC_BY_KEY.get(row.key)
+        if spec is None or spec.type != "secret":
+            continue
+        if isinstance(row.value, str) and row.value and not is_encrypted(row.value):
+            row.value = encrypt_value(row.value)
+            updated += 1
+    if updated:
+        db.commit()
+    return updated
 
 
 def app_branding(db: Session) -> Dict[str, Any]:

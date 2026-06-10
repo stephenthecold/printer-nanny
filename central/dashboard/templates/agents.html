@@ -217,7 +217,7 @@
                 </label>
                 {% endif %}
               </div>
-              <p class="text-[10px] text-slate-400 mt-1">USM creds are stored in the DB. Encryption at rest is a planned follow-up; meanwhile, restrict access to the central server's database.</p>
+              <p class="text-[10px] text-slate-400 mt-1">USM passwords are encrypted at rest with a key derived from SECRET_KEY. Rotating SECRET_KEY makes stored secrets unreadable -- re-enter them after a rotation.</p>
             </details>
           </form>
           <form method="post" action="/manage/subnets/{{ s.id }}/delete" class="inline ml-2"

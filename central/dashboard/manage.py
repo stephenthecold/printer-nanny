@@ -586,16 +586,18 @@ def _build_v3_blob(
         "user": user,
         "security_level": security_level.strip() or "noAuthNoPriv",
     }
+    from central.secrets import encrypt_value
+
     if auth_protocol.strip():
         blob["auth_protocol"] = auth_protocol.strip()
     if auth_password:
-        # Password sent over the wire from the form. Stored plaintext today
-        # (encryption-at-rest is design-doc follow-up). Empty value => unset.
-        blob["auth_password"] = auth_password
+        # USM passwords are encrypted at rest; the agent-config endpoint
+        # decrypts them on the way out to the (authenticated) agent.
+        blob["auth_password"] = encrypt_value(auth_password)
     if priv_protocol.strip():
         blob["priv_protocol"] = priv_protocol.strip()
     if priv_password:
-        blob["priv_password"] = priv_password
+        blob["priv_password"] = encrypt_value(priv_password)
     if context_name.strip():
         blob["context_name"] = context_name.strip()
     return blob

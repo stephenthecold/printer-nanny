@@ -111,9 +111,13 @@ def test_subnet_form_creates_v3_blob(db):
     assert sub.snmp_v3["user"] == "noc-readonly"
     assert sub.snmp_v3["security_level"] == "authPriv"
     assert sub.snmp_v3["auth_protocol"] == "SHA256"
-    assert sub.snmp_v3["auth_password"] == "auth-secret"
     assert sub.snmp_v3["priv_protocol"] == "AES128"
-    assert sub.snmp_v3["priv_password"] == "priv-secret"
+    # USM passwords are encrypted at rest; they decrypt back to the form input.
+    from central.secrets import decrypt_value, is_encrypted
+    assert is_encrypted(sub.snmp_v3["auth_password"])
+    assert is_encrypted(sub.snmp_v3["priv_password"])
+    assert decrypt_value(sub.snmp_v3["auth_password"]) == "auth-secret"
+    assert decrypt_value(sub.snmp_v3["priv_password"]) == "priv-secret"
 
 
 def test_subnet_form_without_v3_user_leaves_blob_none(db):
