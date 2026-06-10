@@ -202,7 +202,8 @@ def test_agents_page_shows_pip_source_when_configured(db):
     cli = _login_admin(db)
     resp = cli.get("/manage/agents", follow_redirects=False)
     assert resp.status_code == 200
-    assert "Self-update will pip-install from" in resp.text
+    # Collapsed details block; the real source URL is still in the markup.
+    assert "Self-update source" in resp.text
     assert "github.com" in resp.text
 
 

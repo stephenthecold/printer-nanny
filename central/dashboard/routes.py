@@ -48,6 +48,14 @@ def _render(
     # Central server version surfaced in the footer of every page so operators
     # can verify a rollout landed without dropping to the shell.
     ctx.setdefault("central_version", _central_version)
+    # Pending-discovery count drives the conditional Approvals nav entry:
+    # the link only renders when there's actually something to approve.
+    if db is not None and "nav_pending" not in ctx:
+        ctx["nav_pending"] = db.scalar(
+            select(func.count())
+            .select_from(m.Printer)
+            .where(m.Printer.discovery_state == m.DiscoveryState.pending)
+        ) or 0
     return _templates.TemplateResponse(request, template, ctx)
 
 
@@ -146,6 +154,29 @@ def client_detail(client_id: int, request: Request, db: Session = Depends(get_db
             .order_by(m.Printer.site_id, m.Printer.ip)
         )
     )
+    # Days-until-order forecast per printer (min days-to-empty across its
+    # supplies) -- replaces the raw page count in the listing, which told the
+    # operator nothing actionable.
+    runway = queries.supply_runway(db, [p.id for p in printers])
+    # Per-site rollup chips: printers / down / low supplies / soonest order.
+    low_threshold = 20.0
+    site_stats: dict[int, dict] = {}
+    for p in printers:
+        stats = site_stats.setdefault(p.site_id, {
+            "printers": 0, "down": 0, "low_supplies": 0, "soonest_days": None,
+        })
+        stats["printers"] += 1
+        if p.status in (m.PrinterStatus.error, m.PrinterStatus.offline):
+            stats["down"] += 1
+        stats["low_supplies"] += sum(
+            1 for s in p.supplies
+            if s.level_pct is not None and s.level_pct <= low_threshold
+        )
+        days = runway.get(p.id)
+        if days is not None and (
+            stats["soonest_days"] is None or days < stats["soonest_days"]
+        ):
+            stats["soonest_days"] = days
     return _render(
         request,
         "client.html",
@@ -154,6 +185,8 @@ def client_detail(client_id: int, request: Request, db: Session = Depends(get_db
         client=client,
         sites=client.sites,
         printers=printers,
+        runway=runway,
+        site_stats=site_stats,
         printer_label=_printer_label,
     )
 
@@ -331,47 +364,13 @@ def account_change_password(
     return RedirectResponse("/account", status_code=303)
 
 
-# --- Discovery (local network scan status + per-subnet rescan) ------------- #
-@router.get("/discovery", response_class=HTMLResponse)
-def discovery_status(request: Request, db: Session = Depends(get_db)):
-    """Per-agent, per-subnet view of local discovery activity.
-
-    Shows: each agent at each site, its enrolled subnets, when each one last
-    reported a discovery batch, how many devices were found, how many were new,
-    and how many are currently pending approval. A Rescan button enqueues a
-    ``CommandType.rescan`` for the agent (handled by ``agent.runner:96``).
-    """
-    user = _user(request, db)
-    if user is None:
-        return _login_redirect()
-    if user.role == m.UserRole.client_readonly:
-        return RedirectResponse("/", status_code=303)
-    agents = list(db.scalars(select(m.Agent).order_by(m.Agent.site_id, m.Agent.id)))
-    sites = {s.id: s for s in db.scalars(select(m.Site))}
-    clients = {c.id: c for c in db.scalars(select(m.Client))}
-    # Subnets keyed by agent_id so the template doesn't trigger N+1 lazy loads.
-    subnets_by_agent: dict[int, list[m.Subnet]] = {}
-    for sub in db.scalars(select(m.Subnet)):
-        if sub.agent_id is not None:
-            subnets_by_agent.setdefault(sub.agent_id, []).append(sub)
-    # Per-site pending count — Printer doesn't carry a subnet_id today, so we
-    # group by site (good enough at the MSP scale; per-subnet pending would need
-    # a Printer→Subnet FK we don't have yet).
-    pending_by_site = {
-        site_id: count
-        for site_id, count in db.execute(
-            select(m.Printer.site_id, func.count())
-            .where(m.Printer.discovery_state == m.DiscoveryState.pending)
-            .group_by(m.Printer.site_id)
-        ).all()
-    }
-    return _render(
-        request, "discovery.html", db=db, user=user,
-        agents=agents, sites=sites, clients=clients,
-        subnets_by_agent=subnets_by_agent,
-        pending_by_site=pending_by_site,
-        flash=request.session.pop("discovery_flash", None),
-    )
+# --- Discovery ---------------------------------------------------------------
+# Folded into /manage/agents (each agent card carries its subnets' discovery
+# status + rescan). The old URL redirects so bookmarks keep working; the
+# rescan POST stays for anything that still targets it.
+@router.get("/discovery")
+def discovery_status(request: Request):
+    return RedirectResponse("/manage/agents", status_code=303)
 
 
 @router.post("/discovery/agents/{agent_id}/rescan")
@@ -381,13 +380,13 @@ def discovery_rescan(agent_id: int, request: Request, db: Session = Depends(get_
         return _login_redirect() if user is None else RedirectResponse("/", status_code=303)
     agent = db.get(m.Agent, agent_id)
     if agent is None:
-        return RedirectResponse("/discovery", status_code=303)
+        return RedirectResponse("/manage/agents", status_code=303)
     db.add(m.Command(agent_id=agent.id, type=m.CommandType.rescan, payload=None))
     db.commit()
-    request.session["discovery_flash"] = (
+    request.session["flash"] = (
         f"Rescan queued for {agent.name} — the agent will discover on its next heartbeat."
     )
-    return RedirectResponse("/discovery", status_code=303)
+    return RedirectResponse("/manage/agents", status_code=303)
 
 
 # --- helpers ---------------------------------------------------------------- #

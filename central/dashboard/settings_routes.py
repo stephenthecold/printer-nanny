@@ -36,18 +36,26 @@ def _admin(request: Request, db: Session) -> Optional[m.User]:
     return user
 
 
-def _sections(values: dict):
-    """Group specs by section for rendering, with masked secrets."""
+def _sections(values: dict, section_names: list):
+    """The given sections' specs grouped for rendering, secrets masked."""
     masked = runtime.masked_for_form(values)
     grouped: "OrderedDict[str, list]" = OrderedDict()
+    for name in section_names:
+        grouped[name] = []
     for spec in runtime.SPECS:
-        grouped.setdefault(spec.section, []).append({"spec": spec, "value": masked.get(spec.key)})
+        if spec.section in grouped:
+            grouped[spec.section].append({"spec": spec, "value": masked.get(spec.key)})
     return grouped
+
+
+def _resolve_group(group: str) -> str:
+    return group if group in runtime.SETTINGS_GROUPS else runtime.DEFAULT_SETTINGS_GROUP
 
 
 @router.get("/settings", response_class=HTMLResponse)
 def settings_page(
     request: Request,
+    group: str = "",
     smtp_oauth_error: str = "",
     db: Session = Depends(get_db),
 ):
@@ -56,6 +64,8 @@ def settings_page(
     user = _admin(request, db)
     if user is None:
         return RedirectResponse("/login", status_code=303)
+    active_group = _resolve_group(group)
+    _label, section_names = runtime.SETTINGS_GROUPS[active_group]
     values = runtime.load_settings(db)
     # Guard the AppAsset lookup: migration 0007 creates the table, but if an
     # operator restarted the api container before migrations finished (or
@@ -67,7 +77,10 @@ def settings_page(
     )
     return _templates.TemplateResponse(
         request, "settings.html",
-        {"user": user, "sections": _sections(values),
+        {"user": user,
+         "sections": _sections(values, section_names),
+         "groups": runtime.SETTINGS_GROUPS,
+         "active_group": active_group,
          "placeholder": runtime.SECRET_PLACEHOLDER,
          "app": runtime.app_branding(db),
          "flash": request.session.pop("flash", None),
@@ -88,8 +101,12 @@ async def settings_save(request: Request, db: Session = Depends(get_db)):
     if user is None:
         return RedirectResponse("/login", status_code=303)
     form = dict(await request.form())
+    # The grouped page posts one group at a time; scope the save to that
+    # group's sections so absent checkboxes elsewhere keep their values.
+    active_group = _resolve_group(str(form.pop("_group", "")))
+    _label, section_names = runtime.SETTINGS_GROUPS[active_group]
     before = runtime.load_settings(db)
-    runtime.save_settings(db, form)
+    runtime.save_settings(db, form, sections=set(section_names))
     after = runtime.load_settings(db)
     # Audit the key NAMES that changed -- never the values (secrets!).
     changed = sorted(k for k in after if before.get(k) != after.get(k))
@@ -97,7 +114,7 @@ async def settings_save(request: Request, db: Session = Depends(get_db)):
         record(db, request, user, "settings.update", detail=", ".join(changed))
         db.commit()
     request.session["flash"] = "Settings saved."
-    return RedirectResponse("/settings", status_code=303)
+    return RedirectResponse(f"/settings?group={active_group}", status_code=303)
 
 
 @router.post("/settings/branding/logo")

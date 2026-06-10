@@ -1,6 +1,19 @@
 {% extends "base.html" %}
 {% from "base.html" import status_badge %}
-{% block title %}{{ client.name }} · Printer Nanny{% endblock %}
+{% block title %}{{ client.name }} · {{ app.name or 'Printer Nanny' }}{% endblock %}
+
+{% macro runway_badge(days) -%}
+{%- if days is none -%}
+<span class="text-xs text-slate-400" title="Not enough polling history yet to forecast supply depletion">—</span>
+{%- elif days <= 7 -%}
+<span class="px-2 py-0.5 rounded text-xs font-medium bg-red-100 text-red-700" title="At the current consumption rate, a supply on this printer runs out in ~{{ '%.0f'|format(days) }} day(s)">order now (~{{ '%.0f'|format(days) }}d)</span>
+{%- elif days <= 21 -%}
+<span class="px-2 py-0.5 rounded text-xs font-medium bg-amber-100 text-amber-700" title="First supply runs out in ~{{ '%.0f'|format(days) }} days">~{{ '%.0f'|format(days) }} days</span>
+{%- else -%}
+<span class="text-xs text-slate-500 tabular-nums" title="First supply runs out in ~{{ '%.0f'|format(days) }} days">~{{ '%.0f'|format(days) }} days</span>
+{%- endif -%}
+{%- endmacro %}
+
 {% block body %}
 <div class="flex items-center gap-3 mb-4">
   <a href="/" class="text-sm text-sky-700 hover:underline">← Overview</a>
@@ -8,14 +21,34 @@
 </div>
 
 {% for site in sites %}
+{% set stats = site_stats.get(site.id) %}
 <section class="bg-white rounded-lg shadow mb-4">
-  <div class="px-4 py-3 border-b flex justify-between">
-    <h2 class="font-semibold">{{ site.name }}</h2>
+  <div class="px-4 py-3 border-b flex items-center justify-between flex-wrap gap-2">
+    <div class="flex items-center gap-3 flex-wrap">
+      <h2 class="font-semibold">{{ site.name }}</h2>
+      {% if stats %}
+      <span class="text-xs text-slate-500">{{ stats.printers }} printer(s)</span>
+      {% if stats.down %}
+      <span class="px-1.5 py-0.5 rounded text-xs bg-red-100 text-red-700">{{ stats.down }} down</span>
+      {% endif %}
+      {% if stats.low_supplies %}
+      <span class="px-1.5 py-0.5 rounded text-xs bg-amber-100 text-amber-700">{{ stats.low_supplies }} low suppl{{ 'y' if stats.low_supplies == 1 else 'ies' }}</span>
+      {% endif %}
+      {% if stats.soonest_days is not none and stats.soonest_days <= 21 %}
+      <span class="px-1.5 py-0.5 rounded text-xs bg-amber-100 text-amber-800" title="Soonest forecast supply depletion at this site">order in ~{{ '%.0f'|format(stats.soonest_days) }}d</span>
+      {% endif %}
+      {% endif %}
+    </div>
     <span class="text-xs text-slate-400">{{ site.address or '' }}</span>
   </div>
   <table class="w-full text-sm">
     <thead class="text-left text-slate-500">
-      <tr><th class="px-4 py-2">Printer</th><th class="py-2">IP</th><th class="py-2">Status</th><th class="py-2">Pages</th></tr>
+      <tr>
+        <th class="px-4 py-2">Printer</th>
+        <th class="py-2">IP</th>
+        <th class="py-2">Status</th>
+        <th class="py-2" title="Forecast days until a supply on this printer runs out, from its recent consumption rate">Supplies last</th>
+      </tr>
     </thead>
     <tbody>
       {% for p in printers if p.site_id == site.id %}
@@ -24,7 +57,7 @@
           <span class="text-slate-400">{{ p.location or '' }}</span></td>
         <td class="py-2 tabular-nums">{{ p.ip }}</td>
         <td class="py-2">{{ status_badge(p.status) }}</td>
-        <td class="py-2 tabular-nums">{{ '{:,}'.format(p.page_count) if p.page_count else '—' }}</td>
+        <td class="py-2">{{ runway_badge(runway.get(p.id)) }}</td>
       </tr>
       {% else %}
       <tr><td class="px-4 py-3 text-slate-400" colspan="4">No approved printers at this site.</td></tr>

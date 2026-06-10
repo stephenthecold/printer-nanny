@@ -69,7 +69,10 @@ def test_logout_is_audited(db):
 def test_settings_save_logs_changed_keys_but_never_values(db):
     _mk_user(db, "admin", m.UserRole.admin)
     cli = _login("admin")
+    # The grouped settings page posts one group at a time; SMTP lives under
+    # the notifications group.
     resp = cli.post("/settings", data={
+        "_group": "notifications",
         "smtp.host": "mail.example.com",
         "smtp.password": "super-secret-value",
     }, follow_redirects=False)
@@ -87,8 +90,10 @@ def test_settings_save_without_changes_logs_nothing(db):
     _mk_user(db, "admin", m.UserRole.admin)
     cli = _login("admin")
     # Save twice with the same content: second save changes nothing.
-    cli.post("/settings", data={"smtp.host": "mail.example.com"}, follow_redirects=False)
-    cli.post("/settings", data={"smtp.host": "mail.example.com"}, follow_redirects=False)
+    cli.post("/settings", data={"_group": "notifications",
+                                "smtp.host": "mail.example.com"}, follow_redirects=False)
+    cli.post("/settings", data={"_group": "notifications",
+                                "smtp.host": "mail.example.com"}, follow_redirects=False)
     assert len(_rows(db, "settings.update")) == 1
 
 

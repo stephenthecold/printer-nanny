@@ -19,8 +19,13 @@
     <a href="/" class="hover:text-white/80 text-sm">Overview</a>
     <a href="/manage" class="hover:text-white/80 text-sm">Manage</a>
     <a href="/manage/agents" class="hover:text-white/80 text-sm">Agents</a>
-    <a href="/approvals" class="hover:text-white/80 text-sm">Approvals</a>
-    <a href="/discovery" class="hover:text-white/80 text-sm">Discovery</a>
+    {# Approvals only appears when there is actually something to approve. #}
+    {% if nav_pending is defined and nav_pending %}
+    <a href="/approvals" class="hover:text-white/80 text-sm flex items-center gap-1">
+      Approvals
+      <span class="bg-amber-400 text-slate-900 rounded-full px-1.5 text-xs font-semibold">{{ nav_pending }}</span>
+    </a>
+    {% endif %}
     <a href="/alerts" class="hover:text-white/80 text-sm">Alerts</a>
     {% if user.role.value == 'admin' %}
     <a href="/manage/users" class="hover:text-white/80 text-sm">Users</a>

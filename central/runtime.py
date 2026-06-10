@@ -10,7 +10,7 @@ in the UI while only DATABASE_URL + SECRET_KEY remain in the environment.
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Optional
 
 from sqlalchemy import select
 from sqlalchemy.orm import Session
@@ -148,6 +148,23 @@ SPECS: List[Spec] = [
 
 SPEC_BY_KEY: Dict[str, Spec] = {s.key: s for s in SPECS}
 
+# Settings-page sub-menus: group slug -> (tab label, [Spec.section names]).
+# The page renders one group at a time; the save handler scopes its writes to
+# the posted group's sections so an absent checkbox in another group is NOT
+# misread as "unchecked" (bools outside the posted form must keep their value).
+SETTINGS_GROUPS: "Dict[str, tuple]" = {
+    "branding": ("Branding", ["Branding"]),
+    "notifications": (
+        "Notifications",
+        ["Email (SMTP)", "Microsoft Teams", "Slack", "Webhook (generic)", "FreeScout"],
+    ),
+    "alerts": ("Alerts & Reports", ["Alerts", "Reports"]),
+    "polling": ("Polling & SNMP", ["Polling", "SNMP defaults"]),
+    "auth": ("Authentication", ["Single sign-on (OIDC)"]),
+    "agents": ("Agents", ["Agent install"]),
+}
+DEFAULT_SETTINGS_GROUP = "branding"
+
 
 def _coerce(spec: Spec, raw: Any) -> Any:
     if raw is None:
@@ -189,20 +206,28 @@ def load_settings(db: Session) -> Dict[str, Any]:
     return merged
 
 
-def save_settings(db: Session, form: Dict[str, Any]) -> None:
-    """Upsert settings from a full settings-form submission.
+def save_settings(
+    db: Session, form: Dict[str, Any], sections: "Optional[set]" = None
+) -> None:
+    """Upsert settings from a settings-form submission.
 
-    The page posts every section at once, so an absent checkbox means False.
-    Secret fields left as the placeholder keep their stored value.
+    ``sections`` scopes the write to specs whose Spec.section is in the set --
+    required for the grouped settings page, where an absent checkbox must mean
+    "unchecked within THIS group", never "reset every bool on the system".
+    With sections=None (programmatic callers, tests) every spec is eligible
+    and an absent checkbox means False, as before.
 
-    Secrets are encrypted at rest (central.secrets). Every save also sweeps
-    legacy plaintext secret rows and re-stores them encrypted -- the lazy
-    half of the encryption migration.
+    Secret fields left as the placeholder keep their stored value. Secrets are
+    encrypted at rest (central.secrets); every save also sweeps legacy
+    plaintext secret rows into encrypted form -- the lazy half of the
+    encryption migration.
     """
     from central.secrets import encrypt_value, is_encrypted
 
     existing = {row.key: row for row in db.scalars(select(m.AppSetting))}
     for spec in SPECS:
+        if sections is not None and spec.section not in sections:
+            continue
         if spec.type == "bool":
             value: Any = spec.key in form  # checkbox present → checked
         elif spec.key not in form:
