@@ -102,6 +102,17 @@ SPECS: List[Spec] = [
     Spec("freescout.api_key", "secret", "FreeScout", "API key", _env.freescout_api_key,
          "From the API & Webhooks module"),
     Spec("freescout.mailbox_id", "int", "FreeScout", "Mailbox ID", _env.freescout_mailbox_id),
+    # Scheduled reports (sent by the worker through the email channel)
+    Spec("reports.weekly_enabled", "bool", "Reports", "Send a weekly fleet summary email", False),
+    Spec("reports.weekly_day", "str", "Reports", "Weekly report day", "mon",
+         "mon | tue | wed | thu | fri | sat | sun (UTC)"),
+    Spec("reports.monthly_enabled", "bool", "Reports",
+         "Send a monthly billing CSV (inventory + page counts)", False),
+    Spec("reports.monthly_day", "int", "Reports", "Monthly report day of month", 1,
+         "1-28 -- sent on the first worker cycle after the send hour that day"),
+    Spec("reports.send_hour", "int", "Reports", "Send hour (UTC, 0-23)", 7),
+    Spec("reports.recipients", "str", "Reports", "Report recipients", "",
+         "Comma-separated. Leave blank to use the alert email recipients."),
     # Alerts
     Spec("alerts.low_supply_pct", "float", "Alerts", "Low-supply threshold (%)", 20.0,
          "Default supply level that counts as 'low' in the dashboard"),

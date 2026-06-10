@@ -18,6 +18,11 @@ class Notification:
     site_name: Optional[str] = None
     printer_label: Optional[str] = None  # e.g. "HP M404 @ 10.10.0.12"
     alert_id: Optional[int] = None
+    # Optional file attachments: (filename, content_type, payload bytes).
+    # Channels that can't carry files (Slack webhook, Teams, generic webhook)
+    # simply ignore them; the email channel attaches them. Used by scheduled
+    # reports (monthly billing CSV).
+    attachments: Optional[list] = None
 
 
 @dataclass
