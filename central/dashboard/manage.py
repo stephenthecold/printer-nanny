@@ -12,7 +12,7 @@ from typing import Optional
 from fastapi import APIRouter, Depends, Form, Request
 from fastapi.responses import HTMLResponse, RedirectResponse
 from fastapi.templating import Jinja2Templates
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
 from central import models as m
@@ -73,6 +73,13 @@ def _tpl(request: Request, template: str, db: Session, **ctx) -> HTMLResponse:
 
     ctx.setdefault("app", app_branding(db))
     ctx.setdefault("central_version", _central_version)
+    # Conditional Approvals nav: link only renders when something is pending.
+    if "nav_pending" not in ctx:
+        ctx["nav_pending"] = db.scalar(
+            select(func.count())
+            .select_from(m.Printer)
+            .where(m.Printer.discovery_state == m.DiscoveryState.pending)
+        ) or 0
     return _templates.TemplateResponse(request, template, ctx)
 
 
@@ -422,11 +429,23 @@ def agents_home(request: Request, db: Session = Depends(get_db)):
     sites_by_client: dict[int, list[m.Site]] = {}
     for site in sites:
         sites_by_client.setdefault(site.client_id, []).append(site)
+    # Discovery status lives here now (the standalone Discovery page folded
+    # in): per-site pending-approval counts so each subnet row can show how
+    # many discovered devices are waiting.
+    pending_by_site = {
+        site_id: count
+        for site_id, count in db.execute(
+            select(m.Printer.site_id, func.count())
+            .where(m.Printer.discovery_state == m.DiscoveryState.pending)
+            .group_by(m.Printer.site_id)
+        ).all()
+    }
     return _tpl(
         request, "agents.html", db,
         user=user, agents=agents, sites=sites,
         clients=clients,
         sites_by_client=sites_by_client,
+        pending_by_site=pending_by_site,
         new_key=_keystore.pop(request.session.pop("new_agent_key_token", None)),
         central_url=public_url,
         pip_source=rt["agent.pip_source"],

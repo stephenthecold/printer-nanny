@@ -18,10 +18,17 @@
     <div class="text-3xl font-semibold text-red-600">{{ s.by_status.error + s.by_status.offline }}</div>
     <div class="text-xs text-slate-500 mt-1">Error / Offline</div>
   </div>
+  {% if s.pending_discovery %}
   <a href="/approvals" class="bg-white rounded-lg shadow p-4 hover:ring-2 hover:ring-sky-300 block">
     <div class="text-3xl font-semibold text-sky-600">{{ s.pending_discovery }}</div>
     <div class="text-xs text-slate-500 mt-1">Pending discovery</div>
   </a>
+  {% else %}
+  <div class="bg-white rounded-lg shadow p-4">
+    <div class="text-3xl font-semibold text-slate-300">0</div>
+    <div class="text-xs text-slate-500 mt-1">Pending discovery</div>
+  </div>
+  {% endif %}
   <a href="/alerts" class="bg-white rounded-lg shadow p-4 hover:ring-2 hover:ring-amber-300 block">
     <div class="text-3xl font-semibold text-amber-600">{{ s.open_alerts }}</div>
     <div class="text-xs text-slate-500 mt-1">Open alerts</div>
@@ -80,7 +87,12 @@
       <tbody>
       {% for sup in low %}
       <tr class="border-t">
-        <td class="py-1.5"><a href="/printers/{{ sup.printer_id }}" class="text-sky-700 hover:underline">{{ sup.color or sup.type.value }}</a></td>
+        <td class="py-1.5">
+          <a href="/printers/{{ sup.printer_id }}" class="text-sky-700 hover:underline">{{ sup.description or sup.color or sup.type.value }}</a>
+          {% if sup.printer %}
+          <div class="text-xs text-slate-400">{{ sup.printer.model or sup.printer.hostname or 'printer' }} @ {{ sup.printer.ip }}</div>
+          {% endif %}
+        </td>
         <td class="py-1.5 text-right">{{ level_bar(sup.level_pct) }}</td>
       </tr>
       {% else %}<tr><td class="py-2 text-slate-400">All supplies healthy.</td></tr>{% endfor %}

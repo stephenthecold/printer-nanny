@@ -113,22 +113,27 @@ def test_apply_discovered_batch_aggregates_per_subnet(env, db):
     assert sub.last_discovery_new_count == 1
 
 
-def test_discovery_page_shows_subnet_status(env, db):
+def test_discovery_status_shows_on_agents_page(env, db):
+    """Discovery folded into /manage/agents: each subnet row carries the last
+    scan time + found/new counters; the old /discovery URL redirects there."""
     services.update_subnet_discovery_stats(
         db, env["site_id"], "10.10.0.0/24", found=4, new=2
     )
     db.commit()
-    resp = env["http"].get("/discovery")
-    assert resp.status_code == 200
-    body = resp.text
+    # Old URL redirects (bookmarks keep working).
+    resp = env["http"].get("/discovery", follow_redirects=False)
+    assert resp.status_code == 303
+    assert resp.headers["location"] == "/manage/agents"
+    # The agents page carries the discovery status now.
+    body = env["http"].get("/manage/agents").text
     assert "hq-agent" in body
     assert "10.10.0.0/24" in body
-    # found / new counters and an action button.
-    assert ">4<" in body or "tabular-nums\">4<" in body
-    assert "Rescan now" in body
+    assert "4 found" in body
+    assert "2 new" in body
+    assert "Rescan" in body
 
 
-def test_discovery_page_forbidden_for_client_readonly(db):
+def test_discovery_redirect_then_agents_bounces_client_readonly(db):
     client = m.Client(name="C")
     db.add(client)
     db.flush()
@@ -139,9 +144,14 @@ def test_discovery_page_forbidden_for_client_readonly(db):
     db.commit()
     http = TestClient(app)
     _login(http, "ro", "ro")
+    # /discovery is just a redirect now; the agents page it lands on is what
+    # enforces the manager-only gate.
     resp = http.get("/discovery", follow_redirects=False)
     assert resp.status_code == 303
-    assert resp.headers["location"] == "/"
+    assert resp.headers["location"] == "/manage/agents"
+    resp = http.get("/manage/agents", follow_redirects=False)
+    assert resp.status_code == 303
+    assert resp.headers["location"] == "/login"
 
 
 def test_rescan_enqueues_command(env, db):

@@ -6,10 +6,10 @@
   <span class="text-xs text-slate-400 tabular-nums" title="Central server version">central v{{ central_version }}</span>
 </div>
 <p class="text-sm text-slate-500 mb-4">
-  Each site usually runs one agent, but a single agent can collect for several
-  client sites if their networks are bridged at HQ -- assign a subnet to a
-  different client's site below, plus a bind-IP for overlapping CIDRs.
-  Agents pull commands on heartbeat (~60s), so force actions take effect within ~1 minute.
+  One agent per site normally; one agent can also collect for several client
+  sites bridged at HQ (assign a subnet to another client's site + a bind-IP).
+  Commands are pulled on heartbeat, so force actions land within ~1 minute.
+  Discovery status lives on each subnet row.
 </p>
 
 {% if 'your-org' in pip_source or not pip_source %}
@@ -17,17 +17,20 @@
   <strong>Self-update is configured against the placeholder pip source</strong>
   (<code class="text-xs">{{ pip_source or '(empty)' }}</code>).
   Clicking <em>Update</em> will fail. Set
-  <a class="underline" href="/settings">Settings &rarr; Agent install &rarr; Pip install source</a>
+  <a class="underline" href="/settings?group=agents">Settings &rarr; Agents &rarr; Pip install source</a>
   to your real repo URL, e.g.
   <code class="text-xs">git+https://github.com/stephenthecold/printer-nanny.git#subdirectory=agent</code>.
 </div>
 {% else %}
-<div class="mb-4 rounded border border-slate-200 bg-slate-50 px-3 py-2 text-xs text-slate-600">
-  Self-update will pip-install from
-  <code class="bg-white px-1 rounded text-slate-800 break-all">{{ pip_source }}</code>
-  (configured in <a class="underline" href="/settings">Settings &rarr; Agent install</a>).
-  After clicking Update, watch each agent's version suffix change -- that's the install timestamp.
-</div>
+<details class="mb-4 rounded border border-slate-200 bg-slate-50 px-3 py-2 text-xs text-slate-600">
+  <summary class="cursor-pointer">Self-update source (click to expand)</summary>
+  <div class="mt-1">
+    Updates pip-install from
+    <code class="bg-white px-1 rounded text-slate-800 break-all">{{ pip_source }}</code>
+    (configured in <a class="underline" href="/settings?group=agents">Settings &rarr; Agents</a>).
+    After clicking Update, watch the agent's version suffix change -- that's the install timestamp.
+  </div>
+</details>
 {% endif %}
 
 {% if new_key %}
@@ -63,7 +66,7 @@
     </div>
   </details>
   {% if 'your-org' in pip_source %}
-  <p class="text-xs text-amber-800 mt-2">⚠ Set your published repo under <a href="/settings" class="underline">Settings -> Agent install</a> so the command points at your GitHub.</p>
+  <p class="text-xs text-amber-800 mt-2">⚠ Set your published repo under <a href="/settings?group=agents" class="underline">Settings -> Agents</a> so the command points at your GitHub.</p>
   {% endif %}
 </div>
 {% endif %}
@@ -72,238 +75,268 @@
   <section class="md:col-span-2 space-y-4">
     {% for a in agents %}
     <div class="bg-white rounded-lg shadow">
-      <div class="px-4 py-3 border-b flex items-center justify-between flex-wrap gap-2">
-        <div>
-          <span class="font-medium">{{ a.name }}</span>
-          <span class="text-xs text-slate-400">agent #{{ a.id }} · home {{ a.site.client.name ~ ' / ' ~ a.site.name if a.site and a.site.client else 'site?' }}</span>
-          {% if a.version %}
-          <span class="ml-2 text-xs text-slate-400 tabular-nums" title="Self-reported on heartbeat. Suffix after '+' is the install timestamp -- it changes when self-update actually replaces the package files.">v{{ a.version }}</span>
-          {% else %}
-          <span class="ml-2 text-xs text-slate-400">v?</span>
-          {% endif %}
-          {% if a.last_heartbeat %}
-          <div class="text-xs text-slate-400 mt-0.5">last seen {{ a.last_heartbeat.strftime('%Y-%m-%d %H:%M:%S UTC') }}</div>
-          {% endif %}
-          {% if a.install_path %}
-          <div class="text-xs text-slate-400 mt-0.5 truncate max-w-md" title="Where the agent package was loaded from -- helps diagnose 'pip installed to the wrong place'">install: <code>{{ a.install_path }}</code></div>
-          {% endif %}
-          {% if a.last_update_result %}
-          {% set ur = a.last_update_result %}
-          {% set ok = ur.get('status') == 'ok' %}
-          <div class="mt-1 text-xs">
-            <span class="px-1.5 py-0.5 rounded {{ 'bg-emerald-100 text-emerald-800' if ok else 'bg-red-100 text-red-800' }}">
-              last update: {{ ur.get('status', 'unknown') }}
-            </span>
-            <span class="text-slate-500 ml-1">at {{ ur.get('ts', '') }}</span>
-            {% if ur.get('detail') %}
-            <div class="text-slate-500 mt-0.5 break-all">{{ ur.get('detail') }}</div>
+      {# --- Agent header: one tidy line of identity + one of actions --- #}
+      <div class="px-4 py-3 border-b">
+        <div class="flex items-center justify-between flex-wrap gap-2">
+          <div class="flex items-center gap-2 flex-wrap">
+            <span class="font-medium">{{ a.name }}</span>
+            <span class="px-2 py-0.5 rounded text-xs {{ 'bg-green-100 text-green-700' if a.status.value=='online' else ('bg-red-100 text-red-700' if a.status.value=='offline' else 'bg-slate-100 text-slate-500') }}">{{ a.status.value }}</span>
+            <span class="text-xs text-slate-400">{{ a.site.client.name ~ ' / ' ~ a.site.name if a.site and a.site.client else 'site?' }}</span>
+            <span class="text-xs text-slate-400 tabular-nums" title="Self-reported on heartbeat. Suffix after '+' is the install timestamp -- it changes when self-update replaces the package files.">{{ 'v' ~ a.version if a.version else 'v?' }}</span>
+            {% if a.last_update_result and a.last_update_result.get('status') != 'ok' %}
+            <span class="px-1.5 py-0.5 rounded text-xs bg-red-100 text-red-800"
+                  title="{{ a.last_update_result.get('detail', '') }}">last update: {{ a.last_update_result.get('status') }}</span>
             {% endif %}
           </div>
-          {% endif %}
+          <div class="flex items-center gap-3 flex-wrap text-xs">
+            <form method="post" action="/manage/agents/{{ a.id }}/poll-now" title="Queue a full poll cycle (next heartbeat, ~60s).">
+              <button class="text-sky-700 hover:underline">Poll now</button>
+            </form>
+            <form method="post" action="/manage/agents/{{ a.id }}/rescan" title="Queue a discovery sweep across all assigned subnets.">
+              <button class="text-sky-700 hover:underline">Rescan</button>
+            </form>
+            <form method="post" action="/manage/agents/{{ a.id }}/rotate-key" onsubmit="return confirm('Issue a new key for {{ a.name }}? The old key stops working.')">
+              <button class="text-sky-700 hover:underline">Rotate key</button>
+            </form>
+            <form method="post" action="/manage/agents/{{ a.id }}/update"
+                  onsubmit="return confirm('Push the latest agent build to {{ a.name }}? Agent pip-installs the new package and restarts. Takes ~60s.')">
+              <button class="text-emerald-700 hover:underline" title="After the next heartbeat the version timestamp changes -- that's the rollout confirmation.">Update</button>
+            </form>
+            {% if user.role.value == 'admin' %}
+            <form method="post" action="/manage/agents/{{ a.id }}/delete" onsubmit="return confirm('Delete agent {{ a.name }}?')">
+              <button class="text-red-600 hover:underline">Delete</button>
+            </form>
+            {% endif %}
+          </div>
         </div>
-        <div class="flex items-center gap-3 flex-wrap">
-          <span class="px-2 py-0.5 rounded text-xs {{ 'bg-green-100 text-green-700' if a.status.value=='online' else ('bg-red-100 text-red-700' if a.status.value=='offline' else 'bg-slate-100 text-slate-500') }}">{{ a.status.value }}</span>
-          <form method="post" action="/manage/agents/{{ a.id }}/poll-now" title="Queue a full poll cycle. Picks up on next heartbeat (~60s).">
-            <button class="text-xs text-sky-700 hover:underline">Poll now</button>
-          </form>
-          <form method="post" action="/manage/agents/{{ a.id }}/rescan" title="Queue a discovery sweep across all assigned subnets.">
-            <button class="text-xs text-sky-700 hover:underline">Rescan</button>
-          </form>
-          <form method="post" action="/manage/agents/{{ a.id }}/rotate-key" onsubmit="return confirm('Issue a new key for {{ a.name }}? The old key stops working.')">
-            <button class="text-xs text-sky-700 hover:underline">Rotate key</button>
-          </form>
-          <form method="post" action="/manage/agents/{{ a.id }}/update"
-                onsubmit="return confirm('Push the latest agent build to {{ a.name }}? Agent pip-installs the new package and restarts. Takes ~60s.')">
-            <button class="text-xs text-emerald-700 hover:underline" title="Queue an update_agent command. After the next heartbeat, the agent's version field updates to show the new build.">Update</button>
-          </form>
-          {% if user.role.value == 'admin' %}
-          <form method="post" action="/manage/agents/{{ a.id }}/delete" onsubmit="return confirm('Delete agent {{ a.name }}?')">
-            <button class="text-xs text-red-600 hover:underline">Delete</button>
-          </form>
-          {% endif %}
-        </div>
+        <details class="mt-1">
+          <summary class="text-xs text-slate-400 cursor-pointer">
+            agent #{{ a.id }} · last seen {{ a.last_heartbeat.strftime('%Y-%m-%d %H:%M UTC') if a.last_heartbeat else 'never' }} · diagnostics
+          </summary>
+          <div class="text-xs text-slate-500 mt-1 space-y-0.5">
+            {% if a.install_path %}
+            <div title="Where the agent package was loaded from">install: <code class="break-all">{{ a.install_path }}</code></div>
+            {% endif %}
+            {% if a.last_update_result %}
+            {% set ur = a.last_update_result %}
+            <div>
+              last update: <span class="{{ 'text-emerald-700' if ur.get('status') == 'ok' else 'text-red-700' }}">{{ ur.get('status') }}</span>
+              at {{ ur.get('ts', '') }}
+              {% if ur.get('detail') %}<span class="text-slate-400">— {{ ur.get('detail') }}</span>{% endif %}
+            </div>
+            {% endif %}
+          </div>
+        </details>
       </div>
+
+      {# --- Subnets as a compact table. Row inputs bind to per-row <form>
+           elements (declared below the table) via the HTML5 form= attribute,
+           which keeps the markup a clean table without nesting forms. --- #}
       <div class="px-4 py-3">
-        <div class="text-xs text-slate-500 mb-1">Subnets</div>
-        {% for s in a.subnets %}
-        {% set serves_other_client = s.site and a.site and s.site.client_id != a.site.client_id %}
-        <div class="text-sm py-1 border-t first:border-t-0">
-          <form method="post" action="/manage/subnets/{{ s.id }}" class="flex items-center gap-2 flex-wrap">
-            <span class="tabular-nums font-medium"
-                  title="Site: {{ s.site.client.name ~ ' / ' ~ s.site.name if s.site and s.site.client else 'unknown' }}">{{ s.cidr }}</span>
-            {% if serves_other_client %}
-            <span class="px-1.5 py-0.5 rounded text-[10px] bg-violet-100 text-violet-700"
-                  title="Multi-client: this subnet is at {{ s.site.client.name }}/{{ s.site.name }} but is collected by an agent whose home is {{ a.site.client.name }}/{{ a.site.name }}.">
-              cross-client → {{ s.site.client.name }}
-            </span>
-            {% endif %}
-            <input name="label" value="{{ s.label or '' }}" placeholder="Label (e.g. VLAN 10)"
-                   class="border rounded px-2 py-1 text-xs flex-1 min-w-[120px]" />
-            <input name="snmp_community" value="{{ s.snmp_community }}"
-                   class="border rounded px-2 py-1 text-xs w-24" />
-            <select name="snmp_version" class="border rounded px-2 py-1 text-xs">
-              <option value="2c" {% if s.snmp_version == '2c' %}selected{% endif %}>v2c</option>
-              <option value="1" {% if s.snmp_version == '1' %}selected{% endif %}>v1</option>
-              <option value="3" {% if s.snmp_version == '3' %}selected{% endif %}>v3</option>
-            </select>
-            <input name="bind_interface" value="{{ s.bind_interface or '' }}"
-                   placeholder="Bind IP (optional)" title="Source IP this agent should bind to when scanning. Lets one agent serve multiple clients with overlapping CIDRs -- leave empty to use the OS default route."
-                   class="border rounded px-2 py-1 text-xs w-32" />
-            {% if s.last_discovery_at %}
-            <span class="text-xs text-slate-400">last {{ s.last_discovery_at.strftime('%m-%d %H:%M') }}</span>
-            {% endif %}
-            <button class="text-xs bg-slate-700 text-white rounded px-2 py-1">Save</button>
-            <details class="w-full mt-1">
-              <summary class="text-xs text-slate-500 cursor-pointer">
-                {% if s.snmp_v3 %}
-                SNMPv3 (configured: user <code class="bg-slate-100 px-1">{{ s.snmp_v3.get('user') }}</code>, {{ s.snmp_v3.get('security_level','noAuthNoPriv') }})
-                {% else %}
-                SNMPv3 advanced (USM credentials, used when version=v3)
+        <table class="w-full text-xs">
+          <thead class="text-left text-slate-400">
+            <tr>
+              <th class="py-1 pr-2">Subnet</th>
+              <th class="py-1 pr-2">Label</th>
+              <th class="py-1 pr-2">Community</th>
+              <th class="py-1 pr-2">Ver</th>
+              <th class="py-1 pr-2">Bind IP</th>
+              <th class="py-1 pr-2">Last discovery</th>
+              <th class="py-1"></th>
+            </tr>
+          </thead>
+          <tbody>
+            {% for s in a.subnets %}
+            {% set serves_other_client = s.site and a.site and s.site.client_id != a.site.client_id %}
+            {% set pending = pending_by_site.get(s.site_id, 0) %}
+            <tr class="border-t align-middle">
+              <td class="py-1.5 pr-2 whitespace-nowrap">
+                <span class="tabular-nums font-medium text-sm"
+                      title="Site: {{ s.site.client.name ~ ' / ' ~ s.site.name if s.site and s.site.client else 'unknown' }}">{{ s.cidr }}</span>
+                {% if serves_other_client %}
+                <span class="ml-1 px-1.5 py-0.5 rounded text-[10px] bg-violet-100 text-violet-700"
+                      title="Collected by this agent for {{ s.site.client.name }}/{{ s.site.name }}">→ {{ s.site.client.name }}</span>
                 {% endif %}
-              </summary>
+              </td>
+              <td class="py-1.5 pr-2"><input form="subnet-{{ s.id }}" name="label" value="{{ s.label or '' }}" placeholder="VLAN 10" class="border rounded px-2 py-1 w-28" /></td>
+              <td class="py-1.5 pr-2"><input form="subnet-{{ s.id }}" name="snmp_community" value="{{ s.snmp_community }}" class="border rounded px-2 py-1 w-20" /></td>
+              <td class="py-1.5 pr-2">
+                <select form="subnet-{{ s.id }}" name="snmp_version" class="border rounded px-1 py-1">
+                  <option value="2c" {% if s.snmp_version == '2c' %}selected{% endif %}>2c</option>
+                  <option value="1" {% if s.snmp_version == '1' %}selected{% endif %}>1</option>
+                  <option value="3" {% if s.snmp_version == '3' %}selected{% endif %}>3</option>
+                </select>
+              </td>
+              <td class="py-1.5 pr-2"><input form="subnet-{{ s.id }}" name="bind_interface" value="{{ s.bind_interface or '' }}" placeholder="—" title="Source IP to bind when scanning (multi-client overlap). Empty = OS default route." class="border rounded px-2 py-1 w-24" /></td>
+              <td class="py-1.5 pr-2 text-slate-500 whitespace-nowrap">
+                {% if s.last_discovery_at %}
+                {{ s.last_discovery_at.strftime('%m-%d %H:%M') }}
+                {% if s.last_discovery_found_count is not none %}
+                · {{ s.last_discovery_found_count }} found{% if s.last_discovery_new_count %} / <span class="text-sky-700">{{ s.last_discovery_new_count }} new</span>{% endif %}
+                {% endif %}
+                {% else %}never{% endif %}
+                {% if pending %}
+                <a href="/approvals" class="ml-1 px-1.5 py-0.5 rounded text-[10px] bg-amber-100 text-amber-800 hover:bg-amber-200">{{ pending }} pending</a>
+                {% endif %}
+              </td>
+              <td class="py-1.5 whitespace-nowrap text-right">
+                <button form="subnet-{{ s.id }}" class="bg-slate-700 text-white rounded px-2 py-1">Save</button>
+                <button form="subnet-del-{{ s.id }}" class="text-red-600 hover:underline ml-1"
+                        onclick="return confirm('Remove subnet {{ s.cidr }}?')">remove</button>
+              </td>
+            </tr>
+            <tr class="border-none">
+              <td colspan="7" class="pb-1.5">
+                <details>
+                  <summary class="text-[11px] text-slate-400 cursor-pointer">
+                    {% if s.snmp_v3 %}SNMPv3: user <code class="bg-slate-100 px-1">{{ s.snmp_v3.get('user') }}</code> ({{ s.snmp_v3.get('security_level','noAuthNoPriv') }}){% else %}SNMPv3 credentials (used when version=3){% endif %}
+                  </summary>
+                  <div class="grid grid-cols-2 md:grid-cols-3 gap-2 mt-2 text-xs max-w-2xl">
+                    <label class="block">
+                      <span class="text-slate-500">Security name (user)</span>
+                      <input form="subnet-{{ s.id }}" name="snmp_v3_user" value="{{ s.snmp_v3.get('user','') if s.snmp_v3 else '' }}" class="w-full border rounded px-2 py-1" />
+                    </label>
+                    <label class="block">
+                      <span class="text-slate-500">Security level</span>
+                      <select form="subnet-{{ s.id }}" name="snmp_v3_security_level" class="w-full border rounded px-2 py-1">
+                        {% set lvl = (s.snmp_v3.get('security_level') if s.snmp_v3 else '') or 'noAuthNoPriv' %}
+                        <option value="noAuthNoPriv" {% if lvl == 'noAuthNoPriv' %}selected{% endif %}>noAuthNoPriv</option>
+                        <option value="authNoPriv" {% if lvl == 'authNoPriv' %}selected{% endif %}>authNoPriv</option>
+                        <option value="authPriv" {% if lvl == 'authPriv' %}selected{% endif %}>authPriv</option>
+                      </select>
+                    </label>
+                    <label class="block">
+                      <span class="text-slate-500">Auth protocol</span>
+                      <select form="subnet-{{ s.id }}" name="snmp_v3_auth_protocol" class="w-full border rounded px-2 py-1">
+                        {% set ap = (s.snmp_v3.get('auth_protocol') if s.snmp_v3 else '') or 'SHA' %}
+                        {% for opt in ['SHA','SHA256','SHA512','MD5','SHA224','SHA384'] %}
+                        <option value="{{ opt }}" {% if ap == opt %}selected{% endif %}>{{ opt }}</option>
+                        {% endfor %}
+                      </select>
+                    </label>
+                    <label class="block">
+                      <span class="text-slate-500">Auth password</span>
+                      <input form="subnet-{{ s.id }}" name="snmp_v3_auth_password" type="password"
+                             placeholder="{% if s.snmp_v3 and s.snmp_v3.get('auth_password') %}•••• unchanged ••••{% endif %}"
+                             class="w-full border rounded px-2 py-1" />
+                    </label>
+                    <label class="block">
+                      <span class="text-slate-500">Priv protocol</span>
+                      <select form="subnet-{{ s.id }}" name="snmp_v3_priv_protocol" class="w-full border rounded px-2 py-1">
+                        {% set pp = (s.snmp_v3.get('priv_protocol') if s.snmp_v3 else '') or 'AES128' %}
+                        {% for opt in ['AES128','AES192','AES256','DES','3DES'] %}
+                        <option value="{{ opt }}" {% if pp == opt %}selected{% endif %}>{{ opt }}</option>
+                        {% endfor %}
+                      </select>
+                    </label>
+                    <label class="block">
+                      <span class="text-slate-500">Priv password</span>
+                      <input form="subnet-{{ s.id }}" name="snmp_v3_priv_password" type="password"
+                             placeholder="{% if s.snmp_v3 and s.snmp_v3.get('priv_password') %}•••• unchanged ••••{% endif %}"
+                             class="w-full border rounded px-2 py-1" />
+                    </label>
+                    <label class="block">
+                      <span class="text-slate-500">Context name (optional)</span>
+                      <input form="subnet-{{ s.id }}" name="snmp_v3_context_name" value="{{ s.snmp_v3.get('context_name','') if s.snmp_v3 else '' }}" class="w-full border rounded px-2 py-1" />
+                    </label>
+                    {% if s.snmp_v3 %}
+                    <label class="block text-amber-700 self-end">
+                      <input form="subnet-{{ s.id }}" type="checkbox" name="snmp_v3_clear" value="1" /> Clear v3 creds on save
+                    </label>
+                    {% endif %}
+                  </div>
+                  <p class="text-[10px] text-slate-400 mt-1">USM passwords are encrypted at rest (key derived from SECRET_KEY); rotating SECRET_KEY requires re-entering them.</p>
+                </details>
+              </td>
+            </tr>
+            {% else %}
+            <tr><td colspan="7" class="py-2 text-slate-400 text-sm">No subnets assigned.</td></tr>
+            {% endfor %}
+          </tbody>
+        </table>
+        {# Row form targets (HTML5 form= pattern -- forms can't nest inside table rows). #}
+        {% for s in a.subnets %}
+        <form id="subnet-{{ s.id }}" method="post" action="/manage/subnets/{{ s.id }}"></form>
+        <form id="subnet-del-{{ s.id }}" method="post" action="/manage/subnets/{{ s.id }}/delete"></form>
+        {% endfor %}
+
+        <details class="mt-2 border-t pt-2">
+          <summary class="text-xs text-sky-700 cursor-pointer font-medium">+ Assign subnet</summary>
+          <form method="post" action="/manage/agents/{{ a.id }}/subnets" class="mt-2 space-y-2">
+            <div class="grid grid-cols-4 gap-2">
+              <input name="cidr" placeholder="10.10.0.0/24" required class="col-span-2 border rounded px-2 py-1 text-sm tabular-nums" />
+              <input name="snmp_community" value="public" class="border rounded px-2 py-1 text-sm" />
+              <select name="snmp_version" class="border rounded px-2 py-1 text-sm">
+                <option value="2c">v2c</option>
+                <option value="1">v1</option>
+                <option value="3">v3</option>
+              </select>
+              <input name="bind_interface" placeholder="Bind IP (optional)"
+                     title="For multi-client agents: which local IP to bind to when scanning this subnet"
+                     class="col-span-2 border rounded px-2 py-1 text-sm" />
+              <select name="site_id" class="col-span-2 border rounded px-2 py-1 text-sm"
+                      title="Where this subnet lives. Defaults to the agent's home site; pick a different client/site for the multi-client pattern.">
+                <option value="">— Same site as agent ({{ a.site.client.name ~ ' / ' ~ a.site.name if a.site and a.site.client else '?' }}) —</option>
+                {% for client in clients %}
+                {% for site in sites_by_client.get(client.id, []) %}
+                <option value="{{ site.id }}">{{ client.name }} / {{ site.name }}</option>
+                {% endfor %}
+                {% endfor %}
+              </select>
+            </div>
+            <details>
+              <summary class="text-xs text-slate-500 cursor-pointer">SNMPv3 credentials (used when version=3)</summary>
               <div class="grid grid-cols-2 gap-2 mt-2 text-xs">
                 <label class="block col-span-2 md:col-span-1">
                   <span class="text-slate-500">Security name (user)</span>
-                  <input name="snmp_v3_user" value="{{ s.snmp_v3.get('user','') if s.snmp_v3 else '' }}"
-                         class="w-full border rounded px-2 py-1" />
+                  <input name="snmp_v3_user" class="w-full border rounded px-2 py-1" />
                 </label>
                 <label class="block">
                   <span class="text-slate-500">Security level</span>
                   <select name="snmp_v3_security_level" class="w-full border rounded px-2 py-1">
-                    {% set lvl = (s.snmp_v3.get('security_level') if s.snmp_v3 else '') or 'noAuthNoPriv' %}
-                    <option value="noAuthNoPriv" {% if lvl == 'noAuthNoPriv' %}selected{% endif %}>noAuthNoPriv</option>
-                    <option value="authNoPriv" {% if lvl == 'authNoPriv' %}selected{% endif %}>authNoPriv</option>
-                    <option value="authPriv" {% if lvl == 'authPriv' %}selected{% endif %}>authPriv</option>
+                    <option value="noAuthNoPriv">noAuthNoPriv</option>
+                    <option value="authNoPriv">authNoPriv</option>
+                    <option value="authPriv">authPriv</option>
                   </select>
                 </label>
                 <label class="block">
                   <span class="text-slate-500">Auth protocol</span>
                   <select name="snmp_v3_auth_protocol" class="w-full border rounded px-2 py-1">
-                    {% set ap = (s.snmp_v3.get('auth_protocol') if s.snmp_v3 else '') or 'SHA' %}
-                    {% for opt in ['SHA','SHA256','SHA512','MD5','SHA224','SHA384'] %}
-                    <option value="{{ opt }}" {% if ap == opt %}selected{% endif %}>{{ opt }}</option>
-                    {% endfor %}
+                    <option value="SHA">SHA</option>
+                    <option value="SHA256">SHA256</option>
+                    <option value="SHA512">SHA512</option>
+                    <option value="MD5">MD5</option>
+                    <option value="SHA224">SHA224</option>
+                    <option value="SHA384">SHA384</option>
                   </select>
                 </label>
                 <label class="block">
                   <span class="text-slate-500">Auth password</span>
-                  <input name="snmp_v3_auth_password" type="password"
-                         placeholder="{% if s.snmp_v3 and s.snmp_v3.get('auth_password') %}•••• unchanged ••••{% endif %}"
-                         class="w-full border rounded px-2 py-1" />
+                  <input name="snmp_v3_auth_password" type="password" class="w-full border rounded px-2 py-1" />
                 </label>
                 <label class="block">
                   <span class="text-slate-500">Priv protocol</span>
                   <select name="snmp_v3_priv_protocol" class="w-full border rounded px-2 py-1">
-                    {% set pp = (s.snmp_v3.get('priv_protocol') if s.snmp_v3 else '') or 'AES128' %}
-                    {% for opt in ['AES128','AES192','AES256','DES','3DES'] %}
-                    <option value="{{ opt }}" {% if pp == opt %}selected{% endif %}>{{ opt }}</option>
-                    {% endfor %}
+                    <option value="AES128">AES128</option>
+                    <option value="AES192">AES192</option>
+                    <option value="AES256">AES256</option>
+                    <option value="DES">DES</option>
+                    <option value="3DES">3DES</option>
                   </select>
                 </label>
                 <label class="block">
                   <span class="text-slate-500">Priv password</span>
-                  <input name="snmp_v3_priv_password" type="password"
-                         placeholder="{% if s.snmp_v3 and s.snmp_v3.get('priv_password') %}•••• unchanged ••••{% endif %}"
-                         class="w-full border rounded px-2 py-1" />
+                  <input name="snmp_v3_priv_password" type="password" class="w-full border rounded px-2 py-1" />
                 </label>
                 <label class="block col-span-2">
-                  <span class="text-slate-500">Context name (optional engine context)</span>
-                  <input name="snmp_v3_context_name" value="{{ s.snmp_v3.get('context_name','') if s.snmp_v3 else '' }}"
-                         class="w-full border rounded px-2 py-1" />
+                  <span class="text-slate-500">Context name (optional)</span>
+                  <input name="snmp_v3_context_name" class="w-full border rounded px-2 py-1" />
                 </label>
-                {% if s.snmp_v3 %}
-                <label class="block col-span-2 text-amber-700">
-                  <input type="checkbox" name="snmp_v3_clear" value="1" /> Clear all v3 creds on save
-                </label>
-                {% endif %}
               </div>
-              <p class="text-[10px] text-slate-400 mt-1">USM passwords are encrypted at rest with a key derived from SECRET_KEY. Rotating SECRET_KEY makes stored secrets unreadable -- re-enter them after a rotation.</p>
             </details>
+            <button class="bg-slate-700 text-white rounded px-4 py-1.5 text-xs">Assign subnet</button>
           </form>
-          <form method="post" action="/manage/subnets/{{ s.id }}/delete" class="inline ml-2"
-                onsubmit="return confirm('Remove subnet {{ s.cidr }}?')">
-            <button class="text-xs text-red-600 hover:underline">remove</button>
-          </form>
-        </div>
-        {% else %}
-        <div class="text-sm text-slate-400">No subnets assigned.</div>
-        {% endfor %}
-        <form method="post" action="/manage/agents/{{ a.id }}/subnets" class="mt-3 space-y-2 border-t pt-3">
-          <div class="grid grid-cols-4 gap-2">
-            <input name="cidr" placeholder="10.10.0.0/24" required class="col-span-2 border rounded px-2 py-1 text-sm tabular-nums" />
-            <input name="snmp_community" value="public" class="border rounded px-2 py-1 text-sm" />
-            <select name="snmp_version" class="border rounded px-2 py-1 text-sm">
-              <option value="2c">v2c</option>
-              <option value="1">v1</option>
-              <option value="3">v3</option>
-            </select>
-            <input name="bind_interface" placeholder="Bind IP (optional)"
-                   title="For multi-client agents: which local IP to bind to when scanning this subnet"
-                   class="col-span-2 border rounded px-2 py-1 text-sm" />
-            <select name="site_id" class="col-span-2 border rounded px-2 py-1 text-sm"
-                    title="Where this subnet lives. Defaults to the agent's home site; pick a different client/site for the multi-client pattern.">
-              <option value="">— Same site as agent ({{ a.site.client.name ~ ' / ' ~ a.site.name if a.site and a.site.client else '?' }}) —</option>
-              {% for client in clients %}
-              {% for site in sites_by_client.get(client.id, []) %}
-              <option value="{{ site.id }}" {% if a.site and site.id == a.site.id %}selected{% endif %}>
-                {{ client.name }} / {{ site.name }}
-              </option>
-              {% endfor %}
-              {% endfor %}
-            </select>
-          </div>
-          <details>
-            <summary class="text-xs text-slate-500 cursor-pointer">SNMPv3 advanced (used when version=v3)</summary>
-            <div class="grid grid-cols-2 gap-2 mt-2 text-xs">
-              <label class="block col-span-2 md:col-span-1">
-                <span class="text-slate-500">Security name (user)</span>
-                <input name="snmp_v3_user" class="w-full border rounded px-2 py-1" />
-              </label>
-              <label class="block">
-                <span class="text-slate-500">Security level</span>
-                <select name="snmp_v3_security_level" class="w-full border rounded px-2 py-1">
-                  <option value="noAuthNoPriv">noAuthNoPriv</option>
-                  <option value="authNoPriv">authNoPriv</option>
-                  <option value="authPriv">authPriv</option>
-                </select>
-              </label>
-              <label class="block">
-                <span class="text-slate-500">Auth protocol</span>
-                <select name="snmp_v3_auth_protocol" class="w-full border rounded px-2 py-1">
-                  <option value="SHA">SHA</option>
-                  <option value="SHA256">SHA256</option>
-                  <option value="SHA512">SHA512</option>
-                  <option value="MD5">MD5</option>
-                  <option value="SHA224">SHA224</option>
-                  <option value="SHA384">SHA384</option>
-                </select>
-              </label>
-              <label class="block">
-                <span class="text-slate-500">Auth password</span>
-                <input name="snmp_v3_auth_password" type="password" class="w-full border rounded px-2 py-1" />
-              </label>
-              <label class="block">
-                <span class="text-slate-500">Priv protocol</span>
-                <select name="snmp_v3_priv_protocol" class="w-full border rounded px-2 py-1">
-                  <option value="AES128">AES128</option>
-                  <option value="AES192">AES192</option>
-                  <option value="AES256">AES256</option>
-                  <option value="DES">DES</option>
-                  <option value="3DES">3DES</option>
-                </select>
-              </label>
-              <label class="block">
-                <span class="text-slate-500">Priv password</span>
-                <input name="snmp_v3_priv_password" type="password" class="w-full border rounded px-2 py-1" />
-              </label>
-              <label class="block col-span-2">
-                <span class="text-slate-500">Context name (optional)</span>
-                <input name="snmp_v3_context_name" class="w-full border rounded px-2 py-1" />
-              </label>
-            </div>
-          </details>
-          <button class="w-full bg-slate-700 text-white rounded py-1.5 text-xs">Assign subnet</button>
-        </form>
+        </details>
       </div>
     </div>
     {% else %}
@@ -311,34 +344,36 @@
     {% endfor %}
   </section>
 
-  <section class="bg-white rounded-lg shadow p-4 h-fit">
-    <h2 class="font-semibold mb-3">Enroll agent</h2>
-    <form method="post" action="/manage/agents" class="space-y-2">
-      <label class="block">
-        <span class="text-xs text-slate-500">Home site</span>
-        <select name="site_id" required class="w-full border rounded px-3 py-2 text-sm">
-          {% for client in clients %}
-          {% for site in sites_by_client.get(client.id, []) %}
-          <option value="{{ site.id }}">{{ client.name }} / {{ site.name }}</option>
-          {% endfor %}
-          {% endfor %}
-        </select>
-      </label>
-      <input name="name" placeholder="Agent name" required class="w-full border rounded px-3 py-2 text-sm" />
-      <button class="w-full bg-slate-900 text-white rounded py-2 text-sm font-medium">Create &amp; show key</button>
-      <p class="text-xs text-slate-400">After creating, assign subnets above -- you can mix subnets from any client/site to support the multi-client pattern.</p>
-    </form>
-  </section>
+  <div class="space-y-6">
+    <section class="bg-white rounded-lg shadow p-4 h-fit">
+      <h2 class="font-semibold mb-3">Enroll agent</h2>
+      <form method="post" action="/manage/agents" class="space-y-2">
+        <label class="block">
+          <span class="text-xs text-slate-500">Home site</span>
+          <select name="site_id" required class="w-full border rounded px-3 py-2 text-sm">
+            {% for client in clients %}
+            {% for site in sites_by_client.get(client.id, []) %}
+            <option value="{{ site.id }}">{{ client.name }} / {{ site.name }}</option>
+            {% endfor %}
+            {% endfor %}
+          </select>
+        </label>
+        <input name="name" placeholder="Agent name" required class="w-full border rounded px-3 py-2 text-sm" />
+        <button class="w-full bg-slate-900 text-white rounded py-2 text-sm font-medium">Create &amp; show key</button>
+        <p class="text-xs text-slate-400">After creating, assign subnets -- you can mix subnets from any client/site (multi-client pattern).</p>
+      </form>
+    </section>
 
-  {% if user.role.value == 'admin' and agents %}
-  <section class="bg-white rounded-lg shadow p-4 h-fit">
-    <h2 class="font-semibold mb-2">Update all agents</h2>
-    <p class="text-xs text-slate-500 mb-3">Pushes the latest agent build (Settings -&gt; Agent install -&gt; Pip source) to every enrolled agent. Each one pip-installs and restarts on its next heartbeat (~60s).</p>
-    <form method="post" action="/manage/agents/update-all"
-          onsubmit="return confirm('Push the latest agent build to ALL {{ agents|length }} enrolled agents? Each restarts independently within ~60s.')">
-      <button class="w-full bg-emerald-700 text-white rounded py-2 text-sm font-medium">Update all ({{ agents|length }})</button>
-    </form>
-  </section>
-  {% endif %}
+    {% if user.role.value == 'admin' and agents %}
+    <section class="bg-white rounded-lg shadow p-4 h-fit">
+      <h2 class="font-semibold mb-2">Update all agents</h2>
+      <p class="text-xs text-slate-500 mb-3">Pushes the latest agent build to every enrolled agent; each pip-installs and restarts on its next heartbeat (~60s).</p>
+      <form method="post" action="/manage/agents/update-all"
+            onsubmit="return confirm('Push the latest agent build to ALL {{ agents|length }} enrolled agents? Each restarts independently within ~60s.')">
+        <button class="w-full bg-emerald-700 text-white rounded py-2 text-sm font-medium">Update all ({{ agents|length }})</button>
+      </form>
+    </section>
+    {% endif %}
+  </div>
 </div>
 {% endblock %}

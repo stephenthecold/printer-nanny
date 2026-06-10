@@ -2,7 +2,17 @@
 {% block title %}Settings · {{ app.name or 'Printer Nanny' }}{% endblock %}
 {% block body %}
 <h1 class="text-2xl font-semibold mb-1">Settings</h1>
-<p class="text-sm text-slate-500 mb-4">Operator-managed config — stored in the database, no env vars needed. Only DATABASE_URL and SECRET_KEY live in the environment.</p>
+<p class="text-sm text-slate-500 mb-4">Operator-managed config — stored in the database. Only DATABASE_URL and SECRET_KEY live in the environment.</p>
+
+{# --- Sub-menu: one group at a time keeps the page scannable. --- #}
+<nav class="flex gap-1 mb-6 border-b flex-wrap">
+  {% for slug, (label, _secs) in groups.items() %}
+  <a href="/settings?group={{ slug }}"
+     class="px-4 py-2 text-sm rounded-t {{ 'bg-white border border-b-white font-medium text-slate-900 -mb-px' if slug == active_group else 'text-slate-500 hover:text-slate-800' }}">
+    {{ label }}
+  </a>
+  {% endfor %}
+</nav>
 
 {% if smtp_oauth_error %}
 <div class="mb-4 rounded bg-red-50 border border-red-200 text-red-700 text-sm px-3 py-2">
@@ -15,6 +25,7 @@
 </div>
 {% endif %}
 
+{% if active_group == 'branding' %}
 <section class="bg-white rounded-lg shadow max-w-3xl mb-6">
   <div class="px-4 py-3 border-b font-semibold">Logo</div>
   <div class="p-4 grid md:grid-cols-2 gap-4 items-center">
@@ -44,8 +55,10 @@
     </div>
   </div>
 </section>
+{% endif %}
 
 <form method="post" action="/settings" class="space-y-6 max-w-3xl">
+  <input type="hidden" name="_group" value="{{ active_group }}" />
   {% for section, fields in sections.items() %}
   <section class="bg-white rounded-lg shadow">
     <div class="px-4 py-3 border-b font-semibold">{{ section }}</div>
@@ -79,6 +92,7 @@
   </div>
 </form>
 
+{% if active_group == 'notifications' %}
 <form method="post" action="/settings/test-notification" class="max-w-3xl mt-4">
   <button class="border border-slate-300 bg-white rounded px-4 py-2 text-sm">Send test notification</button>
   <span class="text-xs text-slate-400 ml-2">Fires a test alert through every enabled channel (save first).</span>
@@ -112,4 +126,5 @@
     </div>
   </div>
 </section>
+{% endif %}
 {% endblock %}

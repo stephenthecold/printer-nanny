@@ -63,6 +63,47 @@ def low_supplies(db: Session, threshold: float = DEFAULT_LOW_SUPPLY_PCT) -> list
     )
 
 
+def supply_runway(db: Session, printer_ids: list[int]) -> dict:
+    """{printer_id: days_until_first_supply_empty | None} for the given printers.
+
+    Linear extrapolation from each printer's supply_snapshot history (same
+    math the worker's forecast job uses, refill-aware). The per-printer value
+    is the MINIMUM days-to-empty across its supplies -- i.e. "you'll need to
+    order something for this printer in ~N days". None when there isn't
+    enough history or nothing is depleting.
+
+    Caps history at the most recent 60 snapshot readings per printer so a
+    long-lived fleet page stays cheap.
+    """
+    from central.worker.jobs import forecast_days_to_empty  # lazy: avoid cycle
+
+    out: dict = {}
+    for pid in printer_ids:
+        rows = list(
+            db.scalars(
+                select(m.Reading)
+                .where(m.Reading.printer_id == pid, m.Reading.supply_snapshot.is_not(None))
+                .order_by(m.Reading.ts.desc())
+                .limit(60)
+            )
+        )
+        series: dict = {}
+        for r in rows:
+            ts = r.ts if r.ts.tzinfo else r.ts.replace(tzinfo=timezone.utc)
+            for snap in r.supply_snapshot or []:
+                lvl = snap.get("level_pct")
+                if lvl is None:
+                    continue
+                key = f"{snap.get('type')}:{snap.get('color')}"
+                series.setdefault(key, []).append((ts, float(lvl)))
+        days = [
+            d for d in (forecast_days_to_empty(points) for points in series.values())
+            if d is not None
+        ]
+        out[pid] = min(days) if days else None
+    return out
+
+
 def recent_errors(db: Session, limit: int = 50) -> list[m.PrinterEvent]:
     return list(
         db.scalars(
@@ -169,6 +210,12 @@ def recent_activity(db: Session, limit: int = 8) -> list[dict]:
     Each row carries a ts, a kind ('event'|'alert'|'discovery'), a severity,
     a one-line message, and a destination link. Sorted newest first.
     """
+    def _label(printer_id) -> str:
+        printer = db.get(m.Printer, printer_id) if printer_id else None
+        if printer is None:
+            return ""
+        return f"{printer.model or printer.hostname or 'printer'} @ {printer.ip}"
+
     items: list[dict] = []
     for ev in db.scalars(
         select(m.PrinterEvent)
@@ -176,11 +223,14 @@ def recent_activity(db: Session, limit: int = 8) -> list[dict]:
         .order_by(m.PrinterEvent.ts.desc())
         .limit(limit)
     ):
+        where = _label(ev.printer_id)
         items.append({
             "ts": ev.ts,
             "kind": "event",
             "severity": ev.severity.value,
-            "message": ev.message,
+            # Always say WHICH printer -- a bare "Replace Drum" times twelve
+            # is exactly the vagueness operators complain about.
+            "message": f"{ev.message} — {where}" if where else ev.message,
             "link": f"/printers/{ev.printer_id}",
         })
     for alert in db.scalars(
@@ -213,7 +263,17 @@ def recent_activity(db: Session, limit: int = 8) -> list[dict]:
         key=lambda r: r["ts"] or datetime.min.replace(tzinfo=timezone.utc),
         reverse=True,
     )
-    return items[:limit]
+    # Dedupe identical messages (a printer re-reporting the same condition
+    # every poll would otherwise fill the whole card with one line).
+    seen: set = set()
+    unique: list[dict] = []
+    for item in items:
+        key = (item["kind"], item["message"])
+        if key in seen:
+            continue
+        seen.add(key)
+        unique.append(item)
+    return unique[:limit]
 
 
 def page_count_history(db: Session, printer_id: int, limit: int = 90) -> list[m.Reading]:
