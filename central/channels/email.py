@@ -62,6 +62,13 @@ class EmailChannel(NotificationChannel):
         if note.client_name:
             lines.append(f"Client: {note.client_name}")
         msg.set_content("\n".join(lines))
+        # File attachments (scheduled reports' CSVs). (filename, mime, bytes).
+        for filename, content_type, payload in note.attachments or []:
+            maintype, _, subtype = (content_type or "application/octet-stream").partition("/")
+            msg.add_attachment(
+                payload, maintype=maintype, subtype=subtype or "octet-stream",
+                filename=filename,
+            )
         return msg
 
     def _auth_type(self) -> str:

@@ -13,6 +13,7 @@ from typing import Optional
 
 from central.config import settings
 from central.db import SessionLocal, create_all
+from central.reports import run_scheduled_reports
 from central.worker import jobs
 
 log = logging.getLogger("printer_nanny.worker")
@@ -22,6 +23,8 @@ JOBS = (
     jobs.evaluate_alerts,
     jobs.check_maintenance_due,
     jobs.forecast_supplies,
+    # Cheap no-op unless a weekly/monthly report is due (marker-gated).
+    run_scheduled_reports,
 )
 
 
