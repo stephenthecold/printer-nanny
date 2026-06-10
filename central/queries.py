@@ -63,20 +63,31 @@ def low_supplies(db: Session, threshold: float = DEFAULT_LOW_SUPPLY_PCT) -> list
     )
 
 
-def supply_runway(db: Session, printer_ids: list[int]) -> dict:
-    """{printer_id: days_until_first_supply_empty | None} for the given printers.
+# Days of polling history a printer needs before the consumption slope is
+# trustworthy enough to display. Below this, the UI shows "est. in ~Nd".
+RUNWAY_MIN_HISTORY_DAYS = 3.0
 
-    Linear extrapolation from each printer's supply_snapshot history (same
-    math the worker's forecast job uses, refill-aware). The per-printer value
-    is the MINIMUM days-to-empty across its supplies -- i.e. "you'll need to
-    order something for this printer in ~N days". None when there isn't
-    enough history or nothing is depleting.
+
+def supply_runway(db: Session, printer_ids: list[int]) -> dict:
+    """Per-printer supply-depletion forecast for fleet listings.
+
+    Returns {printer_id: {"days": float|None, "history_days": float|None}}:
+
+      days          minimum days-to-empty across the printer's supplies
+                    (refill-aware linear extrapolation, same math as the
+                    worker's forecast job); None when not yet computable or
+                    nothing is depleting.
+      history_days  age of the oldest supply snapshot we hold -- lets the UI
+                    say "estimate available in ~N days" while history builds
+                    instead of an unexplained dash, and "stable" when there
+                    IS enough history but no measurable depletion.
 
     Caps history at the most recent 60 snapshot readings per printer so a
     long-lived fleet page stays cheap.
     """
     from central.worker.jobs import forecast_days_to_empty  # lazy: avoid cycle
 
+    now = datetime.now(timezone.utc)
     out: dict = {}
     for pid in printer_ids:
         rows = list(
@@ -88,6 +99,7 @@ def supply_runway(db: Session, printer_ids: list[int]) -> dict:
             )
         )
         series: dict = {}
+        oldest_ts = None
         for r in rows:
             ts = r.ts if r.ts.tzinfo else r.ts.replace(tzinfo=timezone.utc)
             for snap in r.supply_snapshot or []:
@@ -96,11 +108,18 @@ def supply_runway(db: Session, printer_ids: list[int]) -> dict:
                     continue
                 key = f"{snap.get('type')}:{snap.get('color')}"
                 series.setdefault(key, []).append((ts, float(lvl)))
+                if oldest_ts is None or ts < oldest_ts:
+                    oldest_ts = ts
         days = [
             d for d in (forecast_days_to_empty(points) for points in series.values())
             if d is not None
         ]
-        out[pid] = min(days) if days else None
+        out[pid] = {
+            "days": min(days) if days else None,
+            "history_days": (
+                (now - oldest_ts).total_seconds() / 86400.0 if oldest_ts else None
+            ),
+        }
     return out
 
 
@@ -214,7 +233,8 @@ def recent_activity(db: Session, limit: int = 8) -> list[dict]:
         printer = db.get(m.Printer, printer_id) if printer_id else None
         if printer is None:
             return ""
-        return f"{printer.model or printer.hostname or 'printer'} @ {printer.ip}"
+        name = printer.display_name or printer.model or printer.hostname or "printer"
+        return f"{name} @ {printer.ip}"
 
     items: list[dict] = []
     for ev in db.scalars(

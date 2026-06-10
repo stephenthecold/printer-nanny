@@ -254,12 +254,14 @@ def printer_create(
     serial: str = Form(""), location: str = Form(""),
     snmp_version: str = Form("2c"), snmp_community: str = Form("public"),
     asset_tag: str = Form(""), tags: str = Form(""), notes: str = Form(""),
+    display_name: str = Form(""),
     db: Session = Depends(get_db),
 ):
     if _manager(request, db) is None:
         return _redirect("/login")
     printer = m.Printer(
         client_id=client_id, site_id=site_id, ip=ip.strip(),
+        display_name=display_name.strip() or None,
         hostname=hostname.strip() or None, brand=brand.strip() or None,
         model=model.strip() or None, serial=serial.strip() or None,
         location=location.strip() or None, snmp_version=snmp_version,
@@ -286,6 +288,7 @@ def printer_update(
     snmp_community: str = Form("public"),
     asset_tag: str = Form(""), tags: str = Form(""), notes: str = Form(""),
     approve: str = Form(""),
+    display_name: str = Form(""),
     db: Session = Depends(get_db),
 ):
     """Save printer edits. If ``approve=1`` and the printer is pending, also approve it."""
@@ -295,6 +298,7 @@ def printer_update(
     if printer:
         printer.site_id = site_id
         printer.ip = ip.strip()
+        printer.display_name = display_name.strip() or None
         printer.hostname = hostname.strip() or None
         printer.brand = brand.strip() or None
         printer.model = model.strip() or None

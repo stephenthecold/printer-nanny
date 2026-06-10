@@ -63,7 +63,7 @@ def mark_offline_agents(db: Session, now: Optional[datetime] = None) -> dict:
 # Alert evaluation
 # --------------------------------------------------------------------------- #
 def _printer_label(printer: m.Printer) -> str:
-    name = printer.model or printer.hostname or "printer"
+    name = printer.display_name or printer.model or printer.hostname or "printer"
     return f"{name} @ {printer.ip}"
 
 

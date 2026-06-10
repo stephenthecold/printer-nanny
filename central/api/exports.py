@@ -107,7 +107,7 @@ def export_inventory(
     header = [
         "client", "site", "ip", "hostname", "brand", "model", "serial",
         "mac", "location", "asset_tag", "status", "page_count",
-        "last_seen_utc", "created_at_utc", "tags",
+        "last_seen_utc", "created_at_utc", "tags", "display_name",
     ]
 
     def rows():
@@ -128,6 +128,7 @@ def export_inventory(
                 p.last_seen.isoformat() if p.last_seen else "",
                 p.created_at.isoformat() if p.created_at else "",
                 ",".join(p.tags or []),
+                p.display_name or "",
             ]
 
     return _csv_response(f"printer-nanny-inventory-{_datestamp()}.csv", header, rows())

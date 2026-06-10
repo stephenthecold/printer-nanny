@@ -58,12 +58,15 @@ def _seed_printer(db, *, with_history: bool = False):
 def test_supply_runway_forecasts_days(db):
     _client, _site, printer = _seed_printer(db, with_history=True)
     runway = queries.supply_runway(db, [printer.id])
-    assert runway[printer.id] == 10.0  # 30% left at 3%/day
+    assert runway[printer.id]["days"] == 10.0  # 30% left at 3%/day
+    assert runway[printer.id]["history_days"] >= 9.9  # ten days of snapshots
 
 
 def test_supply_runway_none_without_history(db):
     _client, _site, printer = _seed_printer(db, with_history=False)
-    assert queries.supply_runway(db, [printer.id])[printer.id] is None
+    info = queries.supply_runway(db, [printer.id])[printer.id]
+    assert info["days"] is None
+    assert info["history_days"] is None  # no snapshot readings at all
 
 
 def test_client_page_shows_runway_not_page_count(db):
@@ -76,11 +79,14 @@ def test_client_page_shows_runway_not_page_count(db):
     assert "1,000" not in body  # page count no longer in the listing
 
 
-def test_client_page_runway_unknown_renders_dash(db):
+def test_client_page_runway_unknown_says_collecting(db):
+    """No snapshots at all -> 'collecting data' with an explanation, not a
+    bare dash the operator has to guess about."""
     client, _site, _printer = _seed_printer(db, with_history=False)
     cli = _admin(db)
     body = cli.get(f"/clients/{client.id}").text
-    assert "Not enough polling history" in body
+    assert "collecting data" in body
+    assert "No supply readings collected yet" in body
 
 
 def test_client_page_site_chips(db):

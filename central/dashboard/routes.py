@@ -158,25 +158,52 @@ def client_detail(client_id: int, request: Request, db: Session = Depends(get_db
     # supplies) -- replaces the raw page count in the listing, which told the
     # operator nothing actionable.
     runway = queries.supply_runway(db, [p.id for p in printers])
-    # Per-site rollup chips: printers / down / low supplies / soonest order.
+    # Lowest supply per printer so the listing shows actual levels, not just
+    # the forecast: (label, pct) of the most-depleted supply.
+    lowest_supply: dict[int, tuple] = {}
     low_threshold = 20.0
+    # Per-site rollup chips: printers / down / warnings / low supplies /
+    # soonest order. Plus a client-level total across all sites.
     site_stats: dict[int, dict] = {}
+    client_stats = {
+        "printers": 0, "down": 0, "warnings": 0, "low_supplies": 0,
+        "soonest_days": None,
+    }
     for p in printers:
         stats = site_stats.setdefault(p.site_id, {
-            "printers": 0, "down": 0, "low_supplies": 0, "soonest_days": None,
+            "printers": 0, "down": 0, "warnings": 0, "low_supplies": 0,
+            "soonest_days": None,
         })
         stats["printers"] += 1
+        client_stats["printers"] += 1
         if p.status in (m.PrinterStatus.error, m.PrinterStatus.offline):
             stats["down"] += 1
-        stats["low_supplies"] += sum(
-            1 for s in p.supplies
-            if s.level_pct is not None and s.level_pct <= low_threshold
-        )
-        days = runway.get(p.id)
-        if days is not None and (
-            stats["soonest_days"] is None or days < stats["soonest_days"]
-        ):
-            stats["soonest_days"] = days
+            client_stats["down"] += 1
+        elif p.status == m.PrinterStatus.warning:
+            stats["warnings"] += 1
+            client_stats["warnings"] += 1
+        leveled = [s for s in p.supplies if s.level_pct is not None]
+        if leveled:
+            worst = min(leveled, key=lambda s: s.level_pct)
+            lowest_supply[p.id] = (
+                worst.description or worst.color or worst.type.value,
+                worst.level_pct,
+            )
+        low_count = sum(1 for s in leveled if s.level_pct <= low_threshold)
+        stats["low_supplies"] += low_count
+        client_stats["low_supplies"] += low_count
+        days = (runway.get(p.id) or {}).get("days")
+        if days is not None:
+            if stats["soonest_days"] is None or days < stats["soonest_days"]:
+                stats["soonest_days"] = days
+            if client_stats["soonest_days"] is None or days < client_stats["soonest_days"]:
+                client_stats["soonest_days"] = days
+    client_stats["open_alerts"] = db.scalar(
+        select(func.count())
+        .select_from(m.Alert)
+        .join(m.Printer, m.Printer.id == m.Alert.printer_id)
+        .where(m.Printer.client_id == client_id, m.Alert.state == m.AlertState.open)
+    ) or 0
     return _render(
         request,
         "client.html",
@@ -186,7 +213,9 @@ def client_detail(client_id: int, request: Request, db: Session = Depends(get_db
         sites=client.sites,
         printers=printers,
         runway=runway,
+        lowest_supply=lowest_supply,
         site_stats=site_stats,
+        client_stats=client_stats,
         printer_label=_printer_label,
     )
 
@@ -391,7 +420,9 @@ def discovery_rescan(agent_id: int, request: Request, db: Session = Depends(get_
 
 # --- helpers ---------------------------------------------------------------- #
 def _printer_label(printer: m.Printer) -> str:
-    name = printer.model or printer.hostname or "printer"
+    # Friendly name first: operators name printers so alerts and dashboards
+    # say "Front Desk" instead of a model number + IP.
+    name = printer.display_name or printer.model or printer.hostname or "printer"
     return f"{name} @ {printer.ip}"
 
 

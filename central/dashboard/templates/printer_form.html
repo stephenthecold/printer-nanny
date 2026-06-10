@@ -47,6 +47,13 @@
              class="w-full border rounded px-3 py-2 text-sm tabular-nums" />
     </label>
     <label class="block">
+      <span class="text-xs text-slate-500">Friendly name</span>
+      <input name="display_name" value="{{ printer.display_name if printer else '' }}"
+             placeholder="Front Desk, Lab Copier, ..."
+             class="w-full border rounded px-3 py-2 text-sm" />
+      <span class="block text-xs text-slate-400 mt-0.5">Used in dashboards and alert emails instead of the model/IP.</span>
+    </label>
+    <label class="block">
       <span class="text-xs text-slate-500">Hostname</span>
       <input name="hostname" value="{{ printer.hostname if printer else '' }}" class="w-full border rounded px-3 py-2 text-sm" />
     </label>
