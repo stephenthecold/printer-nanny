@@ -48,9 +48,30 @@ def healthz():
 
 @app.on_event("startup")
 def _startup() -> None:
+    import logging
+
     # Refuse to boot a production deployment with a default/blank SECRET_KEY.
     settings.assert_secure()
     # On SQLite (local dev) create tables automatically. On Postgres, migrations own
     # the schema, but create_all is a harmless no-op if they've already run.
     if settings.is_sqlite:
         create_all()
+    # One-shot lazy migration: encrypt any plaintext secret rows left over
+    # from before encryption-at-rest shipped. Idempotent; guarded so a stack
+    # mid-migration (app_settings table not created yet) doesn't fail boot.
+    try:
+        from sqlalchemy import inspect as sa_inspect
+
+        from central import models as m
+        from central.db import SessionLocal
+        from central.runtime import encrypt_existing_settings
+
+        with SessionLocal() as db:
+            if sa_inspect(db.get_bind()).has_table(m.AppSetting.__tablename__):
+                updated = encrypt_existing_settings(db)
+                if updated:
+                    logging.getLogger("central").info(
+                        "encrypted %d legacy plaintext secret setting(s)", updated
+                    )
+    except Exception:  # noqa: BLE001 - never block boot on the sweep
+        logging.getLogger("central").exception("secret-encryption sweep failed")

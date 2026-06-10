@@ -20,6 +20,9 @@ dependencies = [
     "passlib>=1.7",
     "itsdangerous>=2.1",
     "authlib>=1.3",
+    # Encryption-at-rest for stored credentials (central/secrets.py). Already
+    # a transitive dep via authlib; pinned explicitly because we import it.
+    "cryptography>=42",
 ]
 
 [project.optional-dependencies]

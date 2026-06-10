@@ -17,6 +17,22 @@ from central.deps import authenticated_agent, touch_heartbeat
 router = APIRouter(prefix="/api/v1/agents/{agent_id}", tags=["ingest"])
 
 
+def _decrypt_v3_blob(blob):
+    """SNMPv3 USM passwords are encrypted at rest; the agent needs the real
+    values to authenticate against printers. Decrypt them for delivery to
+    the (Bearer-authenticated, HTTPS) agent. Plaintext legacy blobs pass
+    through unchanged."""
+    if not blob:
+        return None
+    from central.secrets import decrypt_value
+
+    out = dict(blob)
+    for key in ("auth_password", "priv_password"):
+        if key in out:
+            out[key] = decrypt_value(out[key])
+    return out
+
+
 @router.post("/heartbeat", response_model=s.AgentOut)
 def heartbeat(
     payload: s.HeartbeatIn,
@@ -120,7 +136,7 @@ def get_agent_config(
                 snmp_community=sub.snmp_community,
                 snmp_version=sub.snmp_version,
                 bind_interface=sub.bind_interface,
-                snmp_v3=sub.snmp_v3 or None,
+                snmp_v3=_decrypt_v3_blob(sub.snmp_v3),
             )
             for sub in subnets
         ],
