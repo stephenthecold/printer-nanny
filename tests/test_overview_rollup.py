@@ -149,7 +149,11 @@ def test_client_readonly_only_sees_their_client_in_rollup(db):
     cli = TestClient(app)
     cli.post("/login", data={"username": "reader", "password": "pw"},
              follow_redirects=False)
+    # client_readonly users now land on the trimmed portal at /portal;
+    # the dense /overview rollup is for admin/tech.
     resp = cli.get("/", follow_redirects=False)
-    body = resp.text
+    assert resp.status_code == 303
+    assert resp.headers["location"] == "/portal"
+    body = cli.get("/portal", follow_redirects=False).text
     assert "Acme" in body
     assert "Beta" not in body

@@ -1,0 +1,113 @@
+{% extends "base.html" %}
+{% from "base.html" import status_badge, level_bar %}
+{% block title %}{{ client.name }} · {{ app.name or 'Printer Nanny' }}{% endblock %}
+{% block body %}
+{% if portal_flash %}
+<div class="mb-4 rounded bg-emerald-50 border border-emerald-200 text-emerald-800 text-sm px-3 py-2">{{ portal_flash }}</div>
+{% endif %}
+
+<div class="flex items-baseline gap-3 mb-4 flex-wrap">
+  <h1 class="text-2xl font-semibold">{{ client.name }}</h1>
+  <span class="text-sm text-slate-500">your printer fleet</span>
+</div>
+
+<div class="grid md:grid-cols-3 gap-6 mb-6">
+  <section class="bg-white rounded-lg shadow p-4 md:col-span-2">
+    <h2 class="font-semibold mb-3">Your printers</h2>
+    {% if printers %}
+    <table class="w-full text-sm">
+      <thead class="text-left text-xs text-slate-500">
+        <tr>
+          <th class="py-1">Printer</th>
+          <th class="py-1">Where</th>
+          <th class="py-1">Status</th>
+          <th class="py-1" title="Forecast days until a supply on this printer runs out">Supplies last</th>
+        </tr>
+      </thead>
+      <tbody>
+        {% for p in printers %}
+        {% set info = runway.get(p.id) %}
+        {% set days = info.days if info else none %}
+        <tr class="border-t">
+          <td class="py-1.5 font-medium">{{ p.display_name or p.model or p.hostname or 'printer' }}</td>
+          <td class="py-1.5 text-xs text-slate-500">{{ p.location or '' }}</td>
+          <td class="py-1.5">{{ status_badge(p.status) }}</td>
+          <td class="py-1.5">
+            {% if days is not none %}
+              {% if days <= 7 %}
+              <span class="px-2 py-0.5 rounded text-xs font-medium bg-red-100 text-red-700">order soon (~{{ '%.0f'|format(days) }}d)</span>
+              {% elif days <= 21 %}
+              <span class="px-2 py-0.5 rounded text-xs bg-amber-100 text-amber-700">~{{ '%.0f'|format(days) }} days</span>
+              {% else %}
+              <span class="text-xs text-slate-500">~{{ '%.0f'|format(days) }} days</span>
+              {% endif %}
+            {% elif info and info.history_days is not none and info.history_days >= 3 %}
+              <span class="text-xs text-emerald-700">stable</span>
+            {% else %}
+              <span class="text-xs text-slate-400 italic">building forecast</span>
+            {% endif %}
+          </td>
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+    {% else %}
+    <p class="text-slate-400">No printers yet.</p>
+    {% endif %}
+  </section>
+
+  <section class="bg-white rounded-lg shadow p-4 h-fit">
+    <h2 class="font-semibold mb-2">Report a problem</h2>
+    {% if freescout_enabled %}
+    <p class="text-xs text-slate-500 mb-3">Opens a support ticket. We'll see your name, the printer, and your message.</p>
+    {% else %}
+    <p class="text-xs text-slate-500 mb-3">Sends an email to your support team.</p>
+    {% endif %}
+    <form method="post" action="/portal/report" class="space-y-2">
+      <label class="block">
+        <span class="text-xs text-slate-500">Printer (optional)</span>
+        <select name="printer_id" class="w-full border rounded px-3 py-2 text-sm">
+          <option value="">— pick one or leave blank —</option>
+          {% for p in printers %}
+          <option value="{{ p.id }}">{{ p.display_name or p.model or p.hostname or 'printer' }} ({{ p.ip }})</option>
+          {% endfor %}
+        </select>
+      </label>
+      <input name="subject" required placeholder="What's wrong?" class="w-full border rounded px-3 py-2 text-sm" />
+      <textarea name="body" required rows="4" placeholder="Describe the issue..." class="w-full border rounded px-3 py-2 text-sm"></textarea>
+      <button class="w-full bg-slate-900 text-white rounded py-2 text-sm font-medium">Send to support</button>
+    </form>
+  </section>
+</div>
+
+<div class="grid md:grid-cols-2 gap-6">
+  <section class="bg-white rounded-lg shadow p-4">
+    <h2 class="font-semibold mb-3">Low supplies</h2>
+    <table class="w-full text-sm">
+      <tbody>
+      {% for sup in low_supplies %}
+      <tr class="border-t">
+        <td class="py-1.5">
+          {{ sup.description or sup.color or sup.type.value }}
+          {% if sup.printer %}<div class="text-xs text-slate-400">{{ sup.printer.display_name or sup.printer.model or sup.printer.ip }}</div>{% endif %}
+        </td>
+        <td class="py-1.5 text-right">{{ level_bar(sup.level_pct) }}</td>
+      </tr>
+      {% else %}<tr><td class="py-2 text-slate-400">All supplies healthy.</td></tr>{% endfor %}
+      </tbody>
+    </table>
+  </section>
+
+  <section class="bg-white rounded-lg shadow p-4">
+    <h2 class="font-semibold mb-3">Open issues</h2>
+    <ul class="space-y-2 text-sm">
+      {% for a in open_alerts %}
+      <li class="flex gap-2">
+        <span class="px-1.5 py-0.5 rounded text-xs h-fit {{ 'bg-red-100 text-red-700' if a.severity.value=='critical' else 'bg-amber-100 text-amber-700' }}">{{ a.severity.value }}</span>
+        <span>{{ a.title }}</span>
+      </li>
+      {% else %}<li class="text-slate-400">No open issues right now.</li>{% endfor %}
+    </ul>
+  </section>
+</div>
+{% endblock %}

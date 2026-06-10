@@ -157,3 +157,7 @@ async def run_providers(
 from printer_nanny_agent.providers import brother  # noqa: E402,F401
 from printer_nanny_agent.providers import hp  # noqa: E402,F401
 from printer_nanny_agent.providers import lexmark  # noqa: E402,F401
+# Long-tail vendor providers (Xerox / Kyocera / Canon / Ricoh / Konica
+# Minolta): brand tag + front-panel status text. Real percentages still
+# come from the standard Printer-MIB on these.
+from printer_nanny_agent.providers import _vendors  # noqa: E402,F401

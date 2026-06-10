@@ -27,9 +27,11 @@
     </a>
     {% endif %}
     <a href="/alerts" class="hover:text-white/80 text-sm">Alerts</a>
+    <a href="/manage/maintenance" class="hover:text-white/80 text-sm">Maintenance</a>
     {% if user.role.value == 'admin' %}
     <a href="/manage/users" class="hover:text-white/80 text-sm">Users</a>
     <a href="/manage/audit" class="hover:text-white/80 text-sm">Audit</a>
+    <a href="/admin/backup" class="hover:text-white/80 text-sm">Backup</a>
     <a href="/settings" class="hover:text-white/80 text-sm">Settings</a>
     {% endif %}
     <a href="/account" class="ml-auto text-sm text-slate-300 hover:text-white">{{ user.username }} ({{ user.role.value }})</a>

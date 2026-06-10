@@ -9,7 +9,7 @@ from uvicorn.middleware.proxy_headers import ProxyHeadersMiddleware
 from central import auth_oauth_smtp, auth_oidc
 from central.api import exports, ingest, management, reporting
 from central.config import settings
-from central.dashboard import installer, manage, routes as dashboard, settings_routes
+from central.dashboard import backup_routes, installer, manage, routes as dashboard, settings_routes
 from central.db import create_all
 
 app = FastAPI(title="Printer Nanny", version="0.1.0")
@@ -36,6 +36,7 @@ app.include_router(exports.router)
 app.include_router(dashboard.router)
 app.include_router(manage.router)
 app.include_router(settings_routes.router)
+app.include_router(backup_routes.router)
 app.include_router(auth_oidc.router)
 app.include_router(auth_oauth_smtp.router)
 app.include_router(installer.router)

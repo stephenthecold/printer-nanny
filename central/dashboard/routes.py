@@ -111,11 +111,12 @@ def overview(request: Request, db: Session = Depends(get_db)):
     user = _user(request, db)
     if user is None:
         return _login_redirect()
+    # client_readonly users get the trimmed portal -- one fleet, one view, a
+    # "Report a problem" button. The dense admin/tech overview would just be
+    # noise for them.
+    if user.role == m.UserRole.client_readonly:
+        return RedirectResponse("/portal", status_code=303)
     client_filter = user.client_id if user.role == m.UserRole.client_readonly else None
-    # For admin/tech: per-client roll-up + cross-fleet recent activity. For
-    # client_readonly: the same view scoped to their pinned client (the
-    # roll-up still returns just their client, and recent_activity is filtered
-    # post-hoc since the printer_events join honors Printer FK).
     rollup = queries.per_client_rollup(db)
     if user.role == m.UserRole.client_readonly:
         rollup = [r for r in rollup if r["client"].id == user.client_id]
@@ -133,6 +134,124 @@ def overview(request: Request, db: Session = Depends(get_db)):
         recent_activity=queries.recent_activity(db, 12),
         printer_label=_printer_label,
     )
+
+
+# --- Customer portal (client_readonly only) --------------------------------- #
+@router.get("/portal", response_class=HTMLResponse)
+def customer_portal(request: Request, db: Session = Depends(get_db)):
+    """Trimmed view for client_readonly users: their fleet status, low
+    supplies with "your supplies last ~Nd" forecasts, open alerts, and a
+    'Report a problem' form that opens a FreeScout ticket via the existing
+    channel (no extra credential plumbing)."""
+    user = _user(request, db)
+    if user is None:
+        return _login_redirect()
+    if user.role == m.UserRole.client_readonly and user.client_id is None:
+        # Misconfigured account -- send them to their account screen.
+        return RedirectResponse("/account", status_code=303)
+    client_id = user.client_id if user.role == m.UserRole.client_readonly \
+        else int(request.query_params.get("client_id") or 0) or None
+    if client_id is None and user.role != m.UserRole.client_readonly:
+        # Admins/techs land on /portal for previewing; pick a client.
+        first = db.scalar(select(m.Client).order_by(m.Client.name))
+        if first is None:
+            return RedirectResponse("/", status_code=303)
+        client_id = first.id
+    client = db.get(m.Client, client_id)
+    if client is None:
+        return RedirectResponse("/", status_code=303)
+    printers = list(db.scalars(
+        select(m.Printer)
+        .where(m.Printer.client_id == client.id,
+               m.Printer.discovery_state == m.DiscoveryState.approved)
+        .order_by(m.Printer.site_id, m.Printer.ip)
+    ))
+    runway = queries.supply_runway(db, [p.id for p in printers])
+    low = [
+        s for s in queries.low_supplies(db)
+        if s.printer and s.printer.client_id == client.id
+    ][:10]
+    alerts = [
+        a for a in queries.open_alerts(db, 30)
+        if a.printer_id and db.get(m.Printer, a.printer_id).client_id == client.id
+    ][:10]
+    from central.runtime import load_settings as _ls
+    rt = _ls(db)
+    freescout_on = bool(rt.get("freescout.enabled"))
+    return _render(
+        request, "portal.html", db=db, user=user,
+        client=client, printers=printers, runway=runway,
+        low_supplies=low, open_alerts=alerts,
+        freescout_enabled=freescout_on,
+        printer_label=_printer_label,
+        portal_flash=request.session.pop("portal_flash", None),
+    )
+
+
+@router.post("/portal/report")
+def portal_report(
+    request: Request,
+    printer_id: str = Form(""),
+    subject: str = Form(...),
+    body: str = Form(...),
+    db: Session = Depends(get_db),
+):
+    """Open a FreeScout ticket from the portal. Falls back to the alert
+    email channel if FreeScout isn't configured -- whichever the operator
+    wired up, the report lands somewhere actionable."""
+    user = _user(request, db)
+    if user is None or user.role != m.UserRole.client_readonly:
+        return RedirectResponse("/", status_code=303)
+    if not subject.strip() or not body.strip():
+        request.session["portal_flash"] = "Subject and description are required."
+        return RedirectResponse("/portal", status_code=303)
+    client = db.get(m.Client, user.client_id) if user.client_id else None
+    printer = None
+    if printer_id.strip():
+        try:
+            p = db.get(m.Printer, int(printer_id))
+            if p and p.client_id == (user.client_id or -1):
+                printer = p
+        except ValueError:
+            printer = None
+    from central.channels import Notification
+    from central.channels.email import EmailChannel
+    from central.channels.freescout import FreeScoutChannel
+    from central.runtime import load_settings as _ls
+
+    rt = _ls(db)
+    note = Notification(
+        title=f"[Portal report] {subject.strip()}",
+        body=f"From: {user.username}\n\n{body.strip()}",
+        severity="info",
+        client_name=client.name if client else None,
+        printer_label=f"{printer.display_name or printer.model or 'printer'} @ {printer.ip}"
+            if printer else None,
+    )
+    sent_via = None
+    if rt.get("freescout.enabled"):
+        result = FreeScoutChannel("FreeScout", {}, rt).send(note)
+        if result.ok:
+            sent_via = "ticket"
+    if sent_via is None and rt.get("email.default_recipients"):
+        from central.db import SessionLocal
+        channel = EmailChannel(
+            "Reports", {"to": rt["email.default_recipients"]},
+            runtime=rt, db_factory=SessionLocal,
+        )
+        result = channel.send(note)
+        if result.ok:
+            sent_via = "email"
+    from central.audit import record
+    record(db, request, user, "portal.report",
+           target=f"client:{client.id} {client.name}" if client else "no-client",
+           detail=f"via:{sent_via or 'none'}; subject={subject[:80]}")
+    db.commit()
+    request.session["portal_flash"] = (
+        "Thanks -- your request was sent to support." if sent_via
+        else "Could not deliver the report. Your operator has not configured a ticket channel yet."
+    )
+    return RedirectResponse("/portal", status_code=303)
 
 
 # --- Client drill-down ------------------------------------------------------ #
