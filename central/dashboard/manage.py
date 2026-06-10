@@ -812,6 +812,228 @@ def subnet_update(
 
 
 # --------------------------------------------------------------------------- #
+# Maintenance schedules (admin/tech) + service-log entries
+# --------------------------------------------------------------------------- #
+def _parse_date(raw: str):
+    """YYYY-MM-DD -> tz-aware datetime, or None. The form's <input type='date'>
+    posts in that shape; tolerated naive bare-date strings just as well."""
+    from datetime import datetime as _dt
+    from datetime import timezone as _tz
+
+    if not raw or not raw.strip():
+        return None
+    try:
+        d = _dt.strptime(raw.strip(), "%Y-%m-%d")
+        return d.replace(tzinfo=_tz.utc)
+    except ValueError:
+        return None
+
+
+@router.get("/maintenance", response_class=HTMLResponse)
+def maintenance_home(request: Request, db: Session = Depends(get_db)):
+    """All schedules (per-printer or model-wide) + recent service-log entries.
+
+    Drives the operator side of the worker's maintenance-due alert
+    pipeline: rolling next_due forward (by logging a service entry, or
+    editing inline) auto-resolves the corresponding alert on the next
+    worker cycle.
+    """
+    user = _manager(request, db)
+    if user is None:
+        return _redirect("/login")
+    schedules = list(
+        db.scalars(
+            select(m.MaintenanceSchedule).order_by(
+                m.MaintenanceSchedule.next_due.asc().nulls_last(),
+                m.MaintenanceSchedule.id.desc(),
+            )
+        )
+    )
+    printers = list(db.scalars(
+        select(m.Printer)
+        .where(m.Printer.discovery_state == m.DiscoveryState.approved)
+        .order_by(m.Printer.client_id, m.Printer.site_id, m.Printer.ip)
+    ))
+    records = list(
+        db.scalars(
+            select(m.MaintenanceRecord)
+            .order_by(m.MaintenanceRecord.performed_at.desc())
+            .limit(50)
+        )
+    )
+    printers_by_id = {p.id: p for p in db.scalars(select(m.Printer))}
+    return _tpl(
+        request, "maintenance.html", db,
+        user=user, schedules=schedules, printers=printers,
+        records=records, printers_by_id=printers_by_id,
+        types=[t.value for t in m.MaintenanceType],
+        flash=_pop_flash(request),
+    )
+
+
+@router.post("/maintenance/schedules")
+def schedule_create(
+    request: Request,
+    name: str = Form(...),
+    printer_id: str = Form(""),
+    model: str = Form(""),
+    interval_days: str = Form(""),
+    page_threshold: str = Form(""),
+    next_due: str = Form(""),
+    db: Session = Depends(get_db),
+):
+    """Either printer_id or model identifies the scope; both empty -> a
+    model-wide schedule that matches every printer with that model. interval
+    OR page threshold drives the worker's due-check (the worker considers
+    a schedule due when next_due <= now AND page_count >= threshold)."""
+    actor = _manager(request, db)
+    if actor is None:
+        return _redirect("/login")
+    name = name.strip()
+    if not name:
+        _flash(request, "Schedule name is required.")
+        return _redirect("/manage/maintenance")
+    pid: Optional[int] = None
+    if printer_id.strip():
+        try:
+            pid = int(printer_id)
+        except ValueError:
+            pid = None
+    try:
+        interval = int(interval_days) if interval_days.strip() else None
+    except ValueError:
+        interval = None
+    try:
+        threshold = int(page_threshold) if page_threshold.strip() else None
+    except ValueError:
+        threshold = None
+    sched = m.MaintenanceSchedule(
+        name=name, printer_id=pid,
+        model=model.strip() or None,
+        interval_days=interval, page_threshold=threshold,
+        next_due=_parse_date(next_due),
+    )
+    db.add(sched)
+    record(db, request, actor, "maintenance_schedule.create",
+           target=f"sched:{name}",
+           detail=f"printer:{pid or '-'} model:{model.strip() or '-'} "
+                  f"every:{interval or '-'}d threshold:{threshold or '-'}")
+    db.commit()
+    _flash(request, f"Schedule '{name}' added.")
+    return _redirect("/manage/maintenance")
+
+
+@router.post("/maintenance/schedules/{sched_id}")
+def schedule_update(
+    sched_id: int, request: Request,
+    name: str = Form(""),
+    interval_days: str = Form(""),
+    page_threshold: str = Form(""),
+    next_due: str = Form(""),
+    db: Session = Depends(get_db),
+):
+    actor = _manager(request, db)
+    if actor is None:
+        return _redirect("/login")
+    sched = db.get(m.MaintenanceSchedule, sched_id)
+    if sched is None:
+        return _redirect("/manage/maintenance")
+    if name.strip():
+        sched.name = name.strip()
+    try:
+        sched.interval_days = int(interval_days) if interval_days.strip() else None
+    except ValueError:
+        pass
+    try:
+        sched.page_threshold = int(page_threshold) if page_threshold.strip() else None
+    except ValueError:
+        pass
+    parsed = _parse_date(next_due)
+    if parsed is not None or next_due == "":
+        sched.next_due = parsed
+    record(db, request, actor, "maintenance_schedule.update",
+           target=f"sched:{sched.id} {sched.name}")
+    db.commit()
+    _flash(request, f"Schedule '{sched.name}' updated.")
+    return _redirect("/manage/maintenance")
+
+
+@router.post("/maintenance/schedules/{sched_id}/delete")
+def schedule_delete(sched_id: int, request: Request, db: Session = Depends(get_db)):
+    actor = _manager(request, db)
+    if actor is None:
+        return _redirect("/login")
+    sched = db.get(m.MaintenanceSchedule, sched_id)
+    if sched is not None:
+        record(db, request, actor, "maintenance_schedule.delete",
+               target=f"sched:{sched.id} {sched.name}")
+        db.delete(sched)
+        db.commit()
+        _flash(request, f"Schedule '{sched.name}' removed.")
+    return _redirect("/manage/maintenance")
+
+
+@router.post("/maintenance/schedules/{sched_id}/log")
+def schedule_log_service(
+    sched_id: int, request: Request,
+    performed_by: str = Form(""),
+    notes: str = Form(""),
+    db: Session = Depends(get_db),
+):
+    """Operator clicked 'Mark serviced': record a MaintenanceRecord and roll
+    next_due forward by interval_days (when set). The worker's reconcile pass
+    will see next_due > now on the next cycle and auto-resolve the
+    maintenance-due alert."""
+    from datetime import datetime as _dt
+    from datetime import timedelta as _td
+    from datetime import timezone as _tz
+
+    actor = _manager(request, db)
+    if actor is None:
+        return _redirect("/login")
+    sched = db.get(m.MaintenanceSchedule, sched_id)
+    if sched is None:
+        return _redirect("/manage/maintenance")
+    now = _dt.now(_tz.utc)
+    next_due = (
+        now + _td(days=sched.interval_days) if sched.interval_days else None
+    )
+    rec = m.MaintenanceRecord(
+        printer_id=sched.printer_id,
+        type=m.MaintenanceType.scheduled,
+        performed_by=performed_by.strip() or actor.username,
+        performed_at=now,
+        notes=(notes.strip() or sched.name) + f" (schedule #{sched.id})",
+        next_due=next_due,
+    )
+    db.add(rec)
+    if next_due is not None:
+        sched.next_due = next_due
+    record(db, request, actor, "maintenance.log",
+           target=f"sched:{sched.id} {sched.name}",
+           detail=f"by:{performed_by.strip() or actor.username}")
+    db.commit()
+    _flash(request, f"Service logged for '{sched.name}'.")
+    return _redirect("/manage/maintenance")
+
+
+@router.post("/maintenance/records/{rec_id}/delete")
+def record_delete(rec_id: int, request: Request, db: Session = Depends(get_db)):
+    actor = _manager(request, db)
+    if actor is None or actor.role != m.UserRole.admin:
+        _flash(request, "Only admins can remove service records.")
+        return _redirect("/manage/maintenance")
+    rec = db.get(m.MaintenanceRecord, rec_id)
+    if rec is not None:
+        record(db, request, actor, "maintenance.record_delete",
+               target=f"record:{rec.id} printer:{rec.printer_id}")
+        db.delete(rec)
+        db.commit()
+        _flash(request, "Service record removed.")
+    return _redirect("/manage/maintenance")
+
+
+# --------------------------------------------------------------------------- #
 # Users (admin only)
 # --------------------------------------------------------------------------- #
 def _coerce_role(raw: str) -> m.UserRole:
@@ -819,6 +1041,7 @@ def _coerce_role(raw: str) -> m.UserRole:
         return m.UserRole(raw)
     except ValueError:
         return m.UserRole.tech
+
 
 
 @router.get("/users", response_class=HTMLResponse)

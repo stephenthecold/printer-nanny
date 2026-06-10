@@ -1,0 +1,153 @@
+{% extends "base.html" %}
+{% block title %}Maintenance · {{ app.name or 'Printer Nanny' }}{% endblock %}
+{% block body %}
+<h1 class="text-2xl font-semibold mb-1">Maintenance</h1>
+<p class="text-sm text-slate-500 mb-4">
+  Per-printer or model-wide schedules. The worker opens a "Maintenance due"
+  alert when a schedule's <em>next due</em> date passes (and the page count, when
+  set, has been reached). Logging service rolls <em>next due</em> forward and
+  auto-resolves the open alert on the next worker cycle.
+</p>
+
+<div class="grid md:grid-cols-3 gap-6">
+  <section class="md:col-span-2 bg-white rounded-lg shadow overflow-x-auto">
+    <div class="px-4 py-3 border-b font-semibold">Schedules</div>
+    {% if schedules %}
+    <table class="w-full text-sm">
+      <thead class="text-left text-xs text-slate-500 bg-slate-50">
+        <tr>
+          <th class="px-4 py-2">Name</th>
+          <th class="py-2">Scope</th>
+          <th class="py-2">Every</th>
+          <th class="py-2">At page</th>
+          <th class="py-2">Next due</th>
+          <th class="py-2 w-44 text-right pr-4"></th>
+        </tr>
+      </thead>
+      <tbody>
+        {% for s in schedules %}
+        {% set p = printers_by_id.get(s.printer_id) %}
+        {% set overdue = s.next_due and s.next_due.replace(tzinfo=None) < (s.next_due.utcnow() if s.next_due else None) %}
+        <tr class="border-t align-top">
+          <td class="px-4 py-2 font-medium">{{ s.name }}</td>
+          <td class="py-2 text-xs">
+            {% if p %}
+            <a href="/printers/{{ p.id }}" class="text-sky-700 hover:underline">{{ p.display_name or p.model or p.hostname or p.ip }}</a>
+            <div class="text-slate-400">{{ p.ip }}</div>
+            {% elif s.model %}
+            <span class="text-slate-600">model: <code>{{ s.model }}</code></span>
+            <div class="text-slate-400">all printers</div>
+            {% else %}
+            <span class="text-slate-400">fleet-wide</span>
+            {% endif %}
+          </td>
+          <td class="py-2 text-xs tabular-nums">{{ (s.interval_days|string ~ ' day(s)') if s.interval_days else '—' }}</td>
+          <td class="py-2 text-xs tabular-nums">{{ '{:,}'.format(s.page_threshold) if s.page_threshold else '—' }}</td>
+          <td class="py-2 text-xs tabular-nums">
+            <form method="post" action="/manage/maintenance/schedules/{{ s.id }}" class="flex items-center gap-1">
+              <input type="date" name="next_due" value="{{ s.next_due.strftime('%Y-%m-%d') if s.next_due else '' }}" class="border rounded px-1 py-0.5 text-xs" />
+              <input type="hidden" name="interval_days" value="{{ s.interval_days or '' }}" />
+              <input type="hidden" name="page_threshold" value="{{ s.page_threshold or '' }}" />
+              <button class="text-xs bg-slate-700 text-white rounded px-2 py-0.5">Save</button>
+            </form>
+          </td>
+          <td class="py-2 pr-4 text-right text-xs">
+            <form method="post" action="/manage/maintenance/schedules/{{ s.id }}/log" class="inline">
+              <input name="performed_by" placeholder="Tech name (opt)" class="border rounded px-1 py-0.5 text-xs w-24" />
+              <button class="bg-emerald-600 text-white rounded px-2 py-0.5 ml-1">Mark serviced</button>
+            </form>
+            <form method="post" action="/manage/maintenance/schedules/{{ s.id }}/delete" class="inline ml-1"
+                  onsubmit="return confirm('Delete schedule {{ s.name }}?')">
+              <button class="text-red-600 hover:underline">remove</button>
+            </form>
+          </td>
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+    {% else %}
+    <p class="px-4 py-3 text-slate-400 text-sm">No schedules yet.</p>
+    {% endif %}
+  </section>
+
+  <section class="bg-white rounded-lg shadow p-4 h-fit">
+    <h2 class="font-semibold mb-3">Add schedule</h2>
+    <form method="post" action="/manage/maintenance/schedules" class="space-y-2">
+      <label class="block">
+        <span class="text-xs text-slate-500">Name</span>
+        <input name="name" required placeholder="Quarterly clean, Fuser kit, ..." class="w-full border rounded px-3 py-2 text-sm" />
+      </label>
+      <label class="block">
+        <span class="text-xs text-slate-500">Printer (specific)</span>
+        <select name="printer_id" class="w-full border rounded px-3 py-2 text-sm">
+          <option value="">— or a model below —</option>
+          {% for p in printers %}
+          <option value="{{ p.id }}">{{ p.display_name or p.model or p.hostname or 'printer' }} @ {{ p.ip }}</option>
+          {% endfor %}
+        </select>
+      </label>
+      <label class="block">
+        <span class="text-xs text-slate-500">Model (fleet-wide)</span>
+        <input name="model" placeholder="HP LaserJet M404" class="w-full border rounded px-3 py-2 text-sm" />
+        <span class="block text-xs text-slate-400">Substring match. Leave both empty for a manual reminder.</span>
+      </label>
+      <div class="grid grid-cols-2 gap-2">
+        <label class="block">
+          <span class="text-xs text-slate-500">Every N days</span>
+          <input name="interval_days" type="number" min="1" placeholder="90" class="w-full border rounded px-3 py-2 text-sm" />
+        </label>
+        <label class="block">
+          <span class="text-xs text-slate-500">At page count</span>
+          <input name="page_threshold" type="number" min="1" placeholder="50000" class="w-full border rounded px-3 py-2 text-sm" />
+        </label>
+      </div>
+      <label class="block">
+        <span class="text-xs text-slate-500">Next due</span>
+        <input name="next_due" type="date" class="w-full border rounded px-3 py-2 text-sm" />
+      </label>
+      <button class="w-full bg-slate-900 text-white rounded py-2 text-sm font-medium">Add schedule</button>
+    </form>
+  </section>
+</div>
+
+{% if records %}
+<section class="bg-white rounded-lg shadow mt-6 overflow-x-auto">
+  <div class="px-4 py-3 border-b font-semibold">Recent service log</div>
+  <table class="w-full text-sm">
+    <thead class="text-left text-xs text-slate-500 bg-slate-50">
+      <tr>
+        <th class="px-4 py-2 whitespace-nowrap">When (UTC)</th>
+        <th class="py-2">Printer</th>
+        <th class="py-2">Type</th>
+        <th class="py-2">By</th>
+        <th class="py-2">Notes</th>
+        {% if user.role.value == 'admin' %}
+        <th class="py-2 text-right pr-4"></th>
+        {% endif %}
+      </tr>
+    </thead>
+    <tbody>
+      {% for r in records %}
+      {% set p = printers_by_id.get(r.printer_id) %}
+      <tr class="border-t align-top">
+        <td class="px-4 py-2 text-xs tabular-nums whitespace-nowrap">{{ r.performed_at.strftime('%Y-%m-%d %H:%M') }}</td>
+        <td class="py-2 text-xs">
+          {% if p %}<a href="/printers/{{ p.id }}" class="text-sky-700 hover:underline">{{ p.display_name or p.model or p.hostname or p.ip }}</a><div class="text-slate-400">{{ p.ip }}</div>{% else %}<span class="text-slate-400">fleet</span>{% endif %}
+        </td>
+        <td class="py-2 text-xs"><span class="px-1.5 py-0.5 rounded bg-sky-100 text-sky-700">{{ r.type.value }}</span></td>
+        <td class="py-2 text-xs">{{ r.performed_by or '—' }}</td>
+        <td class="py-2 text-xs text-slate-600 break-all max-w-md">{{ r.notes or '' }}</td>
+        {% if user.role.value == 'admin' %}
+        <td class="py-2 pr-4 text-right text-xs">
+          <form method="post" action="/manage/maintenance/records/{{ r.id }}/delete" onsubmit="return confirm('Remove this service record?')">
+            <button class="text-red-600 hover:underline">remove</button>
+          </form>
+        </td>
+        {% endif %}
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+</section>
+{% endif %}
+{% endblock %}
