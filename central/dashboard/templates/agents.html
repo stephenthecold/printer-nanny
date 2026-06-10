@@ -132,17 +132,17 @@
       {# --- Subnets as a compact table. Row inputs bind to per-row <form>
            elements (declared below the table) via the HTML5 form= attribute,
            which keeps the markup a clean table without nesting forms. --- #}
-      <div class="px-4 py-3">
-        <table class="w-full text-xs">
+      <div class="px-4 py-3 overflow-x-auto">
+        <table class="w-full text-xs table-fixed min-w-[640px]">
           <thead class="text-left text-slate-400">
             <tr>
-              <th class="py-1 pr-2">Subnet</th>
+              <th class="py-1 pr-2 w-44">Subnet</th>
               <th class="py-1 pr-2">Label</th>
-              <th class="py-1 pr-2">Community</th>
-              <th class="py-1 pr-2">Ver</th>
-              <th class="py-1 pr-2">Bind IP</th>
-              <th class="py-1 pr-2">Last discovery</th>
-              <th class="py-1"></th>
+              <th class="py-1 pr-2 w-20">Community</th>
+              <th class="py-1 pr-2 w-14">Ver</th>
+              <th class="py-1 pr-2 w-24">Bind IP</th>
+              <th class="py-1 pr-2 w-44">Last discovery</th>
+              <th class="py-1 w-16"></th>
             </tr>
           </thead>
           <tbody>
@@ -150,16 +150,16 @@
             {% set serves_other_client = s.site and a.site and s.site.client_id != a.site.client_id %}
             {% set pending = pending_by_site.get(s.site_id, 0) %}
             <tr class="border-t align-middle">
-              <td class="py-1.5 pr-2 whitespace-nowrap">
-                <span class="tabular-nums font-medium text-sm"
-                      title="Site: {{ s.site.client.name ~ ' / ' ~ s.site.name if s.site and s.site.client else 'unknown' }}">{{ s.cidr }}</span>
+              <td class="py-1.5 pr-2">
+                <div class="tabular-nums font-medium text-sm"
+                     title="Site: {{ s.site.client.name ~ ' / ' ~ s.site.name if s.site and s.site.client else 'unknown' }}">{{ s.cidr }}</div>
                 {% if serves_other_client %}
-                <span class="ml-1 px-1.5 py-0.5 rounded text-[10px] bg-violet-100 text-violet-700"
-                      title="Collected by this agent for {{ s.site.client.name }}/{{ s.site.name }}">→ {{ s.site.client.name }}</span>
+                <div class="mt-0.5"><span class="px-1.5 py-0.5 rounded text-[10px] bg-violet-100 text-violet-700"
+                      title="Collected by this agent for {{ s.site.client.name }}/{{ s.site.name }}">→ {{ s.site.client.name }}</span></div>
                 {% endif %}
               </td>
-              <td class="py-1.5 pr-2"><input form="subnet-{{ s.id }}" name="label" value="{{ s.label or '' }}" placeholder="VLAN 10" class="border rounded px-2 py-1 w-28" /></td>
-              <td class="py-1.5 pr-2"><input form="subnet-{{ s.id }}" name="snmp_community" value="{{ s.snmp_community }}" class="border rounded px-2 py-1 w-20" /></td>
+              <td class="py-1.5 pr-2"><input form="subnet-{{ s.id }}" name="label" value="{{ s.label or '' }}" placeholder="VLAN 10" class="border rounded px-2 py-1 w-full" /></td>
+              <td class="py-1.5 pr-2"><input form="subnet-{{ s.id }}" name="snmp_community" value="{{ s.snmp_community }}" class="border rounded px-2 py-1 w-full" /></td>
               <td class="py-1.5 pr-2">
                 <select form="subnet-{{ s.id }}" name="snmp_version" class="border rounded px-1 py-1">
                   <option value="2c" {% if s.snmp_version == '2c' %}selected{% endif %}>2c</option>
@@ -167,8 +167,8 @@
                   <option value="3" {% if s.snmp_version == '3' %}selected{% endif %}>3</option>
                 </select>
               </td>
-              <td class="py-1.5 pr-2"><input form="subnet-{{ s.id }}" name="bind_interface" value="{{ s.bind_interface or '' }}" placeholder="—" title="Source IP to bind when scanning (multi-client overlap). Empty = OS default route." class="border rounded px-2 py-1 w-24" /></td>
-              <td class="py-1.5 pr-2 text-slate-500 whitespace-nowrap">
+              <td class="py-1.5 pr-2"><input form="subnet-{{ s.id }}" name="bind_interface" value="{{ s.bind_interface or '' }}" placeholder="—" title="Source IP to bind when scanning (multi-client overlap). Empty = OS default route." class="border rounded px-2 py-1 w-full" /></td>
+              <td class="py-1.5 pr-2 text-slate-500">
                 {% if s.last_discovery_at %}
                 {{ s.last_discovery_at.strftime('%m-%d %H:%M') }}
                 {% if s.last_discovery_found_count is not none %}
@@ -179,9 +179,9 @@
                 <a href="/approvals" class="ml-1 px-1.5 py-0.5 rounded text-[10px] bg-amber-100 text-amber-800 hover:bg-amber-200">{{ pending }} pending</a>
                 {% endif %}
               </td>
-              <td class="py-1.5 whitespace-nowrap text-right">
-                <button form="subnet-{{ s.id }}" class="bg-slate-700 text-white rounded px-2 py-1">Save</button>
-                <button form="subnet-del-{{ s.id }}" class="text-red-600 hover:underline ml-1"
+              <td class="py-1.5 text-right align-top">
+                <button form="subnet-{{ s.id }}" class="bg-slate-700 text-white rounded px-2 py-1 w-full">Save</button>
+                <button form="subnet-del-{{ s.id }}" class="block w-full text-red-600 hover:underline mt-0.5 text-center"
                         onclick="return confirm('Remove subnet {{ s.cidr }}?')">remove</button>
               </td>
             </tr>

@@ -88,8 +88,10 @@ def build_weekly_summary(db: Session) -> Tuple[str, str]:
     if low:
         for sup in low:
             printer = db.get(m.Printer, sup.printer_id)
-            where = f"{printer.model or printer.hostname or 'printer'} @ {printer.ip}" \
-                if printer else f"printer:{sup.printer_id}"
+            where = (
+                f"{printer.display_name or printer.model or printer.hostname or 'printer'}"
+                f" @ {printer.ip}"
+            ) if printer else f"printer:{sup.printer_id}"
             label = sup.description or sup.color or sup.type.value
             lines.append(f"  {label:<28} {sup.level_pct:>5.0f}%  {where}")
     else:

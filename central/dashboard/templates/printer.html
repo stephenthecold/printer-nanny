@@ -7,7 +7,7 @@
 {% set is_ignored = printer.discovery_state.value == 'ignored' %}
 <div class="flex items-center gap-3 mb-4 flex-wrap">
   <a href="/clients/{{ printer.client_id }}" class="text-sm text-sky-700 hover:underline"><- Client</a>
-  <h1 class="text-2xl font-semibold">{{ printer.model or printer.hostname or 'Printer' }}</h1>
+  <h1 class="text-2xl font-semibold">{{ printer.display_name or printer.model or printer.hostname or 'Printer' }}</h1>
   {{ status_badge(printer.status) }}
   {# Discovery-state badge only when it's actionable -- "approved" is the
      normal state for every printer you'd browse to, so showing it is noise. #}

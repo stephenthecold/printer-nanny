@@ -269,6 +269,11 @@ class Printer(Base):
     ip: Mapped[str] = mapped_column(String(64), index=True)
     mac: Mapped[Optional[str]] = mapped_column(String(32), default=None)
     hostname: Mapped[Optional[str]] = mapped_column(String(200), default=None)
+    # Operator-chosen friendly name ("Front Desk", "Lab Copier"). Preferred
+    # over model/hostname everywhere a printer is named -- dashboards, alert
+    # titles, notification emails -- so alerts read "Front Desk toner low"
+    # instead of a bare model number and IP.
+    display_name: Mapped[Optional[str]] = mapped_column(String(200), default=None)
     brand: Mapped[Optional[str]] = mapped_column(String(100), default=None)
     model: Mapped[Optional[str]] = mapped_column(String(200), default=None)
     serial: Mapped[Optional[str]] = mapped_column(String(120), default=None)
