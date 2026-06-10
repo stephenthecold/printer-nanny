@@ -133,8 +133,8 @@ async def run_providers(
             for key, label in (
                 ("_brother_maintenance", "maintenance"),
                 ("_brother_active_alert", "alert"),
-                ("_brother_alert_source", "source"),
                 ("_brother_parsed_severity", "parsed"),
+                ("_brother_source", "source"),
             ):
                 val = reading.get(key)
                 if val is not None:
@@ -146,22 +146,14 @@ async def run_providers(
 
 # Import side-effect: every provider module that wants to be registered
 # imports `register` and calls it at module load. Built-in providers are
-# loaded here so they're always available. Order matters within a vendor:
-#  1. brother_maintenance (SNMP private-MIB binary blobs): the data path
-#     BRAdmin Pro uses -- exact percentages straight from firmware counters.
-#     Runs first so everything downstream only fills gaps.
-#  2. brother (SNMP MIB): seeds bucket-state UI hints from the active-alert
-#     text for supplies that still have no real percentage.
-#  3. brother_pjl (TCP/9100 PJL): same firmware counters over the print
-#     port; agrees with the maintenance blob when both respond.
-#  4. brother_ews (HTTP scrape): fragile per-model gauge math, last resort,
-#     defers to maintenance- and PJL-sourced values.
+# loaded here so they're always available.
 #
-# Other vendor providers fire only for their own sysObjectID enterprise
-# prefix, so their order relative to Brother is irrelevant.
-from printer_nanny_agent.providers import brother_maintenance  # noqa: E402,F401
+# Brother is ONE consolidated provider (brother.py) that internally
+# sequences four passes -- maintenance blob, alert/status, PJL, EWS --
+# skipping the network-heavy fallbacks once real percentages exist. The
+# sub-modules (brother_maintenance / brother_pjl / brother_ews) keep their
+# classes and parsers for unit testing but do not self-register, so a
+# Brother printer produces one diagnostics row instead of four.
 from printer_nanny_agent.providers import brother  # noqa: E402,F401
-from printer_nanny_agent.providers import brother_pjl  # noqa: E402,F401
-from printer_nanny_agent.providers import brother_ews  # noqa: E402,F401
 from printer_nanny_agent.providers import hp  # noqa: E402,F401
 from printer_nanny_agent.providers import lexmark  # noqa: E402,F401

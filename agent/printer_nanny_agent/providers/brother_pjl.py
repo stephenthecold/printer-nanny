@@ -35,7 +35,7 @@ import logging
 import re
 from typing import Dict, Optional
 
-from printer_nanny_agent.providers import PrinterProvider, register
+from printer_nanny_agent.providers import PrinterProvider
 from printer_nanny_agent.snmp import SnmpBackend, SnmpParams
 
 log = logging.getLogger("printer_nanny_agent.providers.brother_pjl")
@@ -264,4 +264,6 @@ class BrotherPjlProvider(PrinterProvider):
         return reading
 
 
-register(BrotherPjlProvider())
+# Not registered standalone: the consolidated BrotherProvider (brother.py)
+# invokes this as a fallback pass so a Brother printer produces ONE
+# diagnostics row instead of four.

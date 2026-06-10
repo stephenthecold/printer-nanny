@@ -47,7 +47,7 @@ from __future__ import annotations
 import logging
 from typing import Dict, Optional, Tuple
 
-from printer_nanny_agent.providers import PrinterProvider, register
+from printer_nanny_agent.providers import PrinterProvider
 from printer_nanny_agent.snmp import SnmpBackend, SnmpError, SnmpParams
 
 log = logging.getLogger("printer_nanny_agent.providers.brother_maintenance")
@@ -293,4 +293,6 @@ class BrotherMaintenanceProvider(PrinterProvider):
         return reading
 
 
-register(BrotherMaintenanceProvider())
+# Not registered standalone: the consolidated BrotherProvider (brother.py)
+# runs this as its first pass so a Brother printer produces ONE diagnostics
+# row instead of four.

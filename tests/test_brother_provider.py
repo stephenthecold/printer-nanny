@@ -1,13 +1,16 @@
-"""Brother provider enriches toner supplies and surfaces alert history.
+"""Consolidated Brother provider: alert-text bucket hints + history events.
 
-The MFC-L8900CDW class of Brother lasers does not have a continuous toner
-sensor; standard Printer-MIB reports level=-3 for every toner. Brother's
-private MIB exposes 'Toner Low (BK)' as a plain text scalar -- we use that
-to upgrade the toner's status_note from generic "some remaining" to "low".
+These tests exercise the umbrella's status pass and bucket logic. The
+maintenance blob is absent in every fixture (FakeSnmpBackend returns None
+for its OIDs), so the umbrella exercises the alert/bucket path; the PJL and
+EWS fallback seams are stubbed out below so tests never touch the network.
 """
 
 from __future__ import annotations
 
+import pytest
+
+from printer_nanny_agent.providers import brother as brother_mod
 from printer_nanny_agent.providers.brother import (
     BrotherProvider,
     OID_ACTIVE_ALERT_TEXT,
@@ -19,6 +22,19 @@ from printer_nanny_agent.providers.brother import (
 from printer_nanny_agent.snmp import SnmpParams
 
 from tests.fakes import FakeSnmpBackend
+
+
+@pytest.fixture(autouse=True)
+def _no_network_fallbacks(monkeypatch):
+    """Stub the PJL (TCP/9100) and EWS (HTTP) fallback seams.
+
+    The bucket fixtures leave toner gaps, so the umbrella would otherwise
+    attempt real connections to the fixture IPs from CI."""
+    async def passthrough(backend, ip, params, reading, sys_object_id):
+        return reading
+
+    monkeypatch.setattr(brother_mod, "_pjl_step", passthrough)
+    monkeypatch.setattr(brother_mod, "_ews_step", passthrough)
 
 
 def test_parse_alert_matches_brother_formats():
@@ -214,10 +230,10 @@ async def test_augment_does_not_use_history_as_fallback_when_live_is_idle():
     # No false-positive fired -- supply preserved as the standard MIB reported.
     assert black["status_note"] == "some remaining"
     assert black["level_pct"] is None
-    # Diagnostic breadcrumb explains: live=Sleep, source=live, parsed=none
+    # Diagnostic breadcrumb explains: alert=Sleep, parsed=none, source=none
     assert out["_brother_active_alert"] == "Sleep"
-    assert out["_brother_alert_source"] == "live"
     assert out["_brother_parsed_severity"] == "none"
+    assert out["_brother_source"] == "none"
     # But the history still feeds the events list (Error history card).
     messages = [e["message"] for e in out["events"]]
     assert any("Toner Low" in m for m in messages)
@@ -249,8 +265,8 @@ async def test_augment_records_diagnostics_even_when_live_alert_has_no_severity(
     assert black["level_pct"] is None
     # But the diagnostic breadcrumb explains why.
     assert out["_brother_active_alert"] == "Jam Inside"
-    assert out["_brother_alert_source"] == "live"
     assert out["_brother_parsed_severity"] == "none"
+    assert out["_brother_source"] == "none"
 
 
 async def test_augment_swallows_snmp_errors():
