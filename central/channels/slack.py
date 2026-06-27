@@ -32,7 +32,6 @@ _SEVERITY_EMOJI = {
     "warning": ":warning:",
     "critical": ":rotating_light:",
 }
-_SEVERITY_RANK = {"info": 0, "warning": 1, "critical": 2}
 
 
 class SlackChannel(NotificationChannel):
@@ -41,11 +40,14 @@ class SlackChannel(NotificationChannel):
     def _webhook(self) -> str:
         return str(self.config.get("webhook_url") or self.setting("slack.webhook_url") or "")
 
-    def _min_severity(self) -> str:
+    def min_severity(self) -> str:
         return str(self.setting("slack.min_severity", "info") or "info").lower()
 
+    def _min_severity(self) -> str:  # backward-compatible alias
+        return self.min_severity()
+
     def _meets_threshold(self, severity: str) -> bool:
-        return _SEVERITY_RANK.get(severity, 0) >= _SEVERITY_RANK.get(self._min_severity(), 0)
+        return self.meets_severity(severity)
 
     def build_payload(self, note: Notification) -> dict:
         emoji = _SEVERITY_EMOJI.get(note.severity, "")

@@ -122,6 +122,9 @@ SPECS: List[Spec] = [
          "takes to arrive so you order before the printer goes dark"),
     Spec("alerts.offline_grace_seconds", "int", "Alerts", "Agent offline grace (seconds)",
          _env.agent_offline_grace_seconds, "Mark an agent offline after this long without a heartbeat"),
+    Spec("alerts.escalate_after_minutes", "int", "Alerts", "Re-notify after (minutes)", 0,
+         "Re-send an alert that's still unresolved after this many minutes "
+         "(bumps its escalation level). 0 disables escalation re-notifies."),
     # ESG / Sustainability — turn page-count history into estimated print
     # footprint (paper, CO2e, energy, trees). Every factor is operator-tunable
     # so a customer can plug in their own paper stock / grid figures. Defaults

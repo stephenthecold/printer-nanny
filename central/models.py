@@ -515,6 +515,14 @@ class Alert(Base):
     # conversation/ticket id). Persisted so the closed-loop resolver can post a
     # "resolved" note + close that exact ticket when the alert auto-resolves.
     external_ref: Mapped[Optional[str]] = mapped_column(String(120), default=None)
+    # Escalation / re-notify bookkeeping. ``last_notified_at`` is stamped on
+    # every dispatch (initial open + each escalation re-send); ``escalation_level``
+    # starts at 0 on open and increments each time the worker re-notifies an
+    # alert that has stayed unresolved past ``alerts.escalate_after_minutes``.
+    last_notified_at: Mapped[Optional[datetime]] = mapped_column(
+        DateTime(timezone=True), default=None
+    )
+    escalation_level: Mapped[int] = mapped_column(Integer, default=0)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
     resolved_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), default=None)
 

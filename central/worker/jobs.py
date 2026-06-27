@@ -13,11 +13,20 @@ from sqlalchemy.orm import Session
 
 from central import models as m
 from central import queries
-from central.channels import Notification, active_channels
+from central.channels import (
+    Notification,
+    routable_channels,
+    route_channels,
+)
 from central.channels.delivery import record_dispatch
 from central.channels.delivery import retry_due as _retry_due
 from central.channels.freescout import FreeScoutChannel
 from central.runtime import load_settings
+
+# Alert states that still represent an outstanding condition. An ACKNOWLEDGED
+# alert is "seen but not fixed", so a cleared condition must resolve it too --
+# otherwise an ack'd alert whose condition clears is stuck open forever.
+_LIVE_STATES = (m.AlertState.open, m.AlertState.acknowledged)
 
 _SEVERITY_RANK = {
     m.EventSeverity.info: 0,
@@ -97,11 +106,65 @@ def _external_ref_from(results, channels) -> Optional[str]:
 
 
 def _find_open_alert(db: Session, dedupe_key: str) -> Optional[m.Alert]:
+    """Find a still-live (open OR acknowledged) alert for this dedupe key.
+
+    Acknowledged is included so acking an alert doesn't make the worker re-open
+    a fresh duplicate on the next cycle while the condition still holds.
+    """
     return db.scalar(
         select(m.Alert).where(
-            m.Alert.dedupe_key == dedupe_key, m.Alert.state == m.AlertState.open
+            m.Alert.dedupe_key == dedupe_key,
+            m.Alert.state.in_(_LIVE_STATES),
         )
     )
+
+
+def _notify_alert(
+    db: Session,
+    alert: m.Alert,
+    *,
+    rule: Optional[m.AlertRule],
+    printer: Optional[m.Printer],
+    candidates: list,
+    now: datetime,
+    runtime: Optional[dict] = None,
+) -> None:
+    """Build the notification, route it, deliver durably, and stamp bookkeeping.
+
+    Routing honors ``rule.channel_ids`` and per-channel scope/severity (see
+    central.channels.route_channels); the routed channels are then delivered
+    through ``record_dispatch`` so a transient channel outage is retried by
+    retry_deliveries instead of being silently dropped. Captures the FreeScout
+    ticket id on ``external_ref`` and sets ``last_notified_at`` so the escalation
+    pass can measure how long an alert has gone un-escalated.
+    """
+    client_name = site_name = None
+    if printer is not None:
+        client = db.get(m.Client, printer.client_id)
+        site = db.get(m.Site, printer.site_id)
+        client_name = client.name if client else None
+        site_name = site.name if site else None
+
+    note = Notification(
+        title=alert.title,
+        body=alert.detail or "",
+        severity=alert.severity.value,
+        client_name=client_name,
+        site_name=site_name,
+        printer_label=_printer_label(printer) if printer else None,
+        alert_id=alert.id,
+    )
+    channels = route_channels(
+        candidates, rule=rule, printer=printer, severity=alert.severity.value
+    )
+    results = record_dispatch(
+        db, alert.id, note, channels, runtime=runtime or load_settings(db)
+    )
+    alert.notified_channels = [
+        {"channel": name, "ok": res.ok, "detail": res.detail} for name, res in results
+    ]
+    alert.external_ref = _external_ref_from(results, channels)
+    alert.last_notified_at = now
 
 
 def _open_alert(
@@ -113,12 +176,14 @@ def _open_alert(
     *,
     printer: Optional[m.Printer] = None,
     agent: Optional[m.Agent] = None,
-    channels: Optional[list] = None,
+    candidates: Optional[list] = None,
+    now: Optional[datetime] = None,
     runtime: Optional[dict] = None,
 ) -> Optional[m.Alert]:
-    """Open an alert if one isn't already open for this dedupe_key. Returns it (or None)."""
+    """Open an alert if one isn't already live for this dedupe_key. Returns it (or None)."""
     if _find_open_alert(db, dedupe_key) is not None:
         return None
+    now = now or _now()
     alert = m.Alert(
         rule_id=rule.id,
         printer_id=printer.id if printer else None,
@@ -129,35 +194,19 @@ def _open_alert(
         title=title,
         detail=detail,
         dedupe_key=dedupe_key,
+        escalation_level=0,
     )
     db.add(alert)
     db.flush()  # assign alert.id
-
-    client_name = site_name = None
-    if printer is not None:
-        client = db.get(m.Client, printer.client_id)
-        site = db.get(m.Site, printer.site_id)
-        client_name = client.name if client else None
-        site_name = site.name if site else None
-
-    note = Notification(
-        title=title,
-        body=detail,
-        severity=rule.severity.value,
-        client_name=client_name,
-        site_name=site_name,
-        printer_label=_printer_label(printer) if printer else None,
-        alert_id=alert.id,
+    _notify_alert(
+        db,
+        alert,
+        rule=rule,
+        printer=printer,
+        candidates=candidates or [],
+        now=now,
+        runtime=runtime,
     )
-    # Persist a retryable delivery per channel so a transient channel outage is
-    # re-tried by retry_deliveries instead of being silently dropped.
-    results = record_dispatch(
-        db, alert.id, note, channels or [], runtime=runtime or load_settings(db)
-    )
-    alert.notified_channels = [
-        {"channel": name, "ok": res.ok, "detail": res.detail} for name, res in results
-    ]
-    alert.external_ref = _external_ref_from(results, channels or [])
     return alert
 
 
@@ -191,17 +240,18 @@ def _close_ticket_for(alert: m.Alert, channels) -> Optional[dict]:
 
 
 def _resolve_stale(db: Session, active_keys: set[str], channels=None) -> int:
-    """Resolve open rule-driven alerts whose condition no longer holds this run.
+    """Resolve live rule-driven alerts whose condition no longer holds this run.
 
     Covers both cleared conditions (key not re-added) and alerts orphaned by a
-    rule that was disabled/deleted (its key is never re-added). Maintenance and
-    predicted-depletion alerts have their own lifecycles (check_maintenance_due /
-    forecast_supplies) and are left untouched here -- evaluate_alerts never
-    re-adds their keys, so reconciling them from this pass would wrongly resolve
-    every open one each cycle.
+    rule that was disabled/deleted (its key is never re-added). Resolves alerts
+    in BOTH open and acknowledged states -- an ack'd alert whose condition clears
+    must still auto-resolve, otherwise it's stuck open forever. Maintenance and
+    predicted-depletion alerts own their own lifecycle (check_maintenance_due /
+    forecast_supplies) and are skipped; a resolved alert that opened a FreeScout
+    ticket gets it auto-closed.
     """
     resolved = 0
-    stmt = select(m.Alert).where(m.Alert.state == m.AlertState.open)
+    stmt = select(m.Alert).where(m.Alert.state.in_(_LIVE_STATES))
     for alert in db.scalars(stmt):
         if alert.type in (
             m.AlertConditionType.maintenance_due,
@@ -220,7 +270,7 @@ def evaluate_alerts(db: Session, now: Optional[datetime] = None) -> dict:
     now = now or _now()
     rules = list(db.scalars(select(m.AlertRule).where(m.AlertRule.enabled.is_(True))))
     runtime = load_settings(db)
-    channels = active_channels(runtime)
+    candidates = routable_channels(db, runtime)
     opened = 0
     active_keys: set[str] = set()
 
@@ -238,7 +288,7 @@ def evaluate_alerts(db: Session, now: Optional[datetime] = None) -> dict:
                         f"(last: {last.isoformat() if last else 'never'})."
                     )
                     if _open_alert(db, rule, key, title, detail, agent=agent,
-                                   channels=channels, runtime=runtime):
+                                   candidates=candidates, now=now, runtime=runtime):
                         opened += 1
             continue
 
@@ -253,7 +303,7 @@ def evaluate_alerts(db: Session, now: Optional[datetime] = None) -> dict:
                         title = f"Low {label} on {_printer_label(printer)}"
                         detail = f"{label} at {supply.level_pct:.0f}% (threshold {threshold:.0f}%)."
                         if _open_alert(db, rule, key, title, detail, printer=printer,
-                                       channels=channels, runtime=runtime):
+                                       candidates=candidates, now=now, runtime=runtime):
                             opened += 1
 
             elif rule.condition_type == m.AlertConditionType.error_severity:
@@ -270,12 +320,58 @@ def evaluate_alerts(db: Session, now: Optional[datetime] = None) -> dict:
                     title = f"Error on {_printer_label(printer)}"
                     detail = f"{latest.severity.value}: {latest.message}"
                     if _open_alert(db, rule, key, title, detail, printer=printer,
-                                   channels=channels, runtime=runtime):
+                                   candidates=candidates, now=now, runtime=runtime):
                         opened += 1
 
-    resolved = _resolve_stale(db, active_keys, channels)
+    # Pass the unwrapped candidate channels so a resolved alert's FreeScout
+    # ticket can be auto-closed (route metadata isn't needed to close a ticket).
+    close_channels = [rc.channel for rc in candidates]
+    resolved = _resolve_stale(db, active_keys, close_channels)
+    # Flush the resolutions so the escalation query (run on a session with
+    # autoflush off) doesn't re-notify alerts we just resolved this same pass.
+    db.flush()
+    escalated = _escalate_alerts(db, runtime, candidates, now)
     db.commit()
-    return {"alerts_opened": opened, "alerts_resolved": resolved}
+    return {
+        "alerts_opened": opened,
+        "alerts_resolved": resolved,
+        "alerts_escalated": escalated,
+    }
+
+
+def _escalate_alerts(
+    db: Session, runtime: dict, candidates: list, now: datetime
+) -> int:
+    """Re-notify still-live alerts that have gone unresolved past the window.
+
+    Controlled by ``alerts.escalate_after_minutes`` (0 = off). For each live
+    (open or acknowledged) alert whose last notification is older than the
+    window, re-dispatch through the same routing, bump ``escalation_level``,
+    and stamp ``last_notified_at`` so the next escalation is measured from now.
+
+    This is a deliberate re-send, distinct from dedupe suppression: dedupe stops
+    a *duplicate OPEN* of the same condition, while escalation re-notifies an
+    *already-open* alert that nobody has resolved.
+    """
+    minutes = int(runtime.get("alerts.escalate_after_minutes", 0) or 0)
+    if minutes <= 0:
+        return 0
+    window = timedelta(minutes=minutes)
+    escalated = 0
+    for alert in db.scalars(select(m.Alert).where(m.Alert.state.in_(_LIVE_STATES))):
+        # Baseline: an alert never (re)notified uses its creation time.
+        baseline = _aware(alert.last_notified_at) or _aware(alert.created_at)
+        if baseline is not None and (now - baseline) < window:
+            continue
+        rule = db.get(m.AlertRule, alert.rule_id) if alert.rule_id else None
+        printer = db.get(m.Printer, alert.printer_id) if alert.printer_id else None
+        alert.escalation_level = (alert.escalation_level or 0) + 1
+        _notify_alert(
+            db, alert, rule=rule, printer=printer,
+            candidates=candidates, now=now, runtime=runtime,
+        )
+        escalated += 1
+    return escalated
 
 
 # --------------------------------------------------------------------------- #
@@ -317,12 +413,17 @@ def _component_schedule_printers(db: Session, sched: m.MaintenanceSchedule):
 def check_maintenance_due(db: Session, now: Optional[datetime] = None) -> dict:
     now = now or _now()
     runtime = load_settings(db)
-    channels = active_channels(runtime)
+    candidates = routable_channels(db, runtime)
     opened = 0
     active_keys: set[str] = set()
 
     def _open_maintenance_alert(key, title, detail, printer):
-        """Open + dispatch a maintenance-due alert for ``key`` unless one's already open."""
+        """Open a maintenance-due alert for ``key`` unless one's already live.
+
+        Routes by the printer's scope (no AlertRule), delivers durably, captures
+        the FreeScout ticket id, and stamps escalation bookkeeping via
+        ``_notify_alert`` -- same path as rule-driven alerts.
+        """
         if _find_open_alert(db, key) is not None:
             return False
         alert = m.Alert(
@@ -334,19 +435,14 @@ def check_maintenance_due(db: Session, now: Optional[datetime] = None) -> dict:
             title=title,
             detail=detail,
             dedupe_key=key,
+            escalation_level=0,
         )
         db.add(alert)
         db.flush()
-        note = Notification(
-            title=alert.title, body=alert.detail, severity="warning",
-            printer_label=_printer_label(printer) if printer else None, alert_id=alert.id,
+        _notify_alert(
+            db, alert, rule=None, printer=printer,
+            candidates=candidates, now=now, runtime=runtime,
         )
-        results = record_dispatch(db, alert.id, note, channels, runtime=runtime)
-        alert.notified_channels = [
-            {"channel": n, "ok": r.ok, "detail": r.detail} for n, r in results
-        ]
-        # Capture the FreeScout ticket id so the resolver can auto-close it.
-        alert.external_ref = _external_ref_from(results, channels)
         return True
 
     for sched in queries.maintenance_due(db, now):
@@ -401,17 +497,20 @@ def check_maintenance_due(db: Session, now: Optional[datetime] = None) -> dict:
 
     # Resolve maintenance alerts whose schedule is no longer due (next_due rolled
     # forward, or a component's life climbed back above threshold / was serviced).
+    # Resolve in both open AND acknowledged states so an ack'd maintenance alert
+    # clears once serviced.
+    close_channels = [rc.channel for rc in candidates]
     resolved = 0
     for alert in db.scalars(
         select(m.Alert).where(
-            m.Alert.state == m.AlertState.open,
+            m.Alert.state.in_(_LIVE_STATES),
             m.Alert.type == m.AlertConditionType.maintenance_due,
         )
     ):
         if alert.dedupe_key not in active_keys:
             alert.state = m.AlertState.resolved
             alert.resolved_at = now
-            _close_ticket_for(alert, channels)
+            _close_ticket_for(alert, close_channels)
             resolved += 1
 
     db.commit()
@@ -510,7 +609,7 @@ def forecast_supplies(db: Session, now: Optional[datetime] = None) -> dict:
     """
     now = now or _now()
     runtime = load_settings(db)
-    channels = active_channels(runtime)
+    candidates = routable_channels(db, runtime)
     lead_days = runtime.get("alerts.reorder_lead_days", 14)
 
     flagged = 0
@@ -565,11 +664,12 @@ def forecast_supplies(db: Session, now: Optional[datetime] = None) -> dict:
             )
             if _open_forecast_alert(
                 db, dedupe_key, title, detail, printer=printer,
-                channels=channels, runtime=runtime,
+                candidates=candidates, now=now, runtime=runtime,
             ):
                 opened += 1
 
-    resolved = _resolve_stale_forecasts(db, active_keys, now, channels)
+    close_channels = [rc.channel for rc in candidates]
+    resolved = _resolve_stale_forecasts(db, active_keys, now, close_channels)
     db.commit()
     # ``supplies_forecast_low`` keeps its historical meaning (count at/under the
     # lead-time threshold) so existing callers/tests reading that key still work.
@@ -603,19 +703,20 @@ def _open_forecast_alert(
     detail: str,
     *,
     printer: m.Printer,
-    channels: Optional[list] = None,
+    candidates: Optional[list] = None,
+    now: Optional[datetime] = None,
     runtime: Optional[dict] = None,
 ) -> Optional[m.Alert]:
-    """Open a predicted-depletion alert if one isn't already open for the key.
+    """Open a predicted-depletion alert if one isn't already live for the key.
 
-    Rule-less (forecast alerts aren't driven by an AlertRule), so it mirrors the
-    open/dispatch bookkeeping of ``_open_alert`` directly instead of going
-    through it. Sends go through ``record_dispatch`` so a transient channel
-    outage is retried by ``retry_deliveries`` rather than silently dropped.
-    Returns the new alert, or ``None`` if one was already open.
+    Rule-less (no AlertRule), so it routes by the printer's scope and delivers
+    durably via ``_notify_alert`` -- the same path as rule-driven and maintenance
+    alerts (per-tenant routing, retry/dead-letter, FreeScout ticket capture, and
+    escalation bookkeeping). Returns the new alert, or ``None`` if one was open.
     """
     if _find_open_alert(db, dedupe_key) is not None:
         return None
+    now = now or _now()
     alert = m.Alert(
         rule_id=None,
         printer_id=printer.id,
@@ -625,31 +726,14 @@ def _open_forecast_alert(
         title=title,
         detail=detail,
         dedupe_key=dedupe_key,
+        escalation_level=0,
     )
     db.add(alert)
     db.flush()  # assign alert.id
-
-    client = db.get(m.Client, printer.client_id)
-    site = db.get(m.Site, printer.site_id)
-    note = Notification(
-        title=title,
-        body=detail,
-        severity=m.EventSeverity.warning.value,
-        client_name=client.name if client else None,
-        site_name=site.name if site else None,
-        printer_label=_printer_label(printer),
-        alert_id=alert.id,
+    _notify_alert(
+        db, alert, rule=None, printer=printer,
+        candidates=candidates or [], now=now, runtime=runtime,
     )
-    # Durable per-channel delivery (mirrors _open_alert) so a failed forecast
-    # send is retried by retry_deliveries instead of being dropped.
-    results = record_dispatch(
-        db, alert.id, note, channels or [], runtime=runtime or load_settings(db)
-    )
-    alert.notified_channels = [
-        {"channel": name, "ok": res.ok, "detail": res.detail} for name, res in results
-    ]
-    # Capture the FreeScout ticket id so the resolver can auto-close it.
-    alert.external_ref = _external_ref_from(results, channels or [])
     return alert
 
 
