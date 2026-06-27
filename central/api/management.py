@@ -12,10 +12,13 @@ from sqlalchemy.orm import Session
 from central import models as m
 from central import schemas as s
 from central.db import get_db
-from central.deps import require_user
+from central.deps import require_staff
 from central.security import generate_api_key, hash_api_key
 
-router = APIRouter(prefix="/api/v1", tags=["management"], dependencies=[Depends(require_user)])
+# Management CRUD is operator-only. Before this gate the router merely required a
+# logged-in user, so a client_readonly session could both read every tenant's
+# clients/printers AND create/approve printers and enqueue agent commands.
+router = APIRouter(prefix="/api/v1", tags=["management"], dependencies=[Depends(require_staff)])
 
 
 def _get_or_404(db: Session, model, obj_id: int):
