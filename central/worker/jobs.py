@@ -16,6 +16,7 @@ from central import queries
 from central.channels import Notification, active_channels
 from central.channels.delivery import record_dispatch
 from central.channels.delivery import retry_due as _retry_due
+from central.channels.freescout import FreeScoutChannel
 from central.runtime import load_settings
 
 _SEVERITY_RANK = {
@@ -80,6 +81,21 @@ def _printers_in_scope(db: Session, rule: m.AlertRule):
     return db.scalars(stmt)
 
 
+def _external_ref_from(results, channels) -> Optional[str]:
+    """Pull the FreeScout ticket id out of a dispatch result set.
+
+    ``dispatch`` returns ``(channel_name, ChannelResult)`` tuples; the FreeScout
+    channel sets ``ChannelResult.external_ref`` to the new conversation id. Match
+    the result back to its channel by name so only a real FreeScout ticket id is
+    persisted (a dry-run create returns no external_ref, so nothing is stored).
+    """
+    fs_names = {c.name for c in channels if isinstance(c, FreeScoutChannel)}
+    for name, res in results:
+        if name in fs_names and res.ok and res.external_ref:
+            return res.external_ref
+    return None
+
+
 def _find_open_alert(db: Session, dedupe_key: str) -> Optional[m.Alert]:
     return db.scalar(
         select(m.Alert).where(
@@ -141,10 +157,40 @@ def _open_alert(
     alert.notified_channels = [
         {"channel": name, "ok": res.ok, "detail": res.detail} for name, res in results
     ]
+    alert.external_ref = _external_ref_from(results, channels or [])
     return alert
 
 
-def _resolve_stale(db: Session, active_keys: set[str]) -> int:
+def _freescout_channel(channels) -> Optional[FreeScoutChannel]:
+    for c in channels or []:
+        if isinstance(c, FreeScoutChannel):
+            return c
+    return None
+
+
+def _close_ticket_for(alert: m.Alert, channels) -> Optional[dict]:
+    """Close the FreeScout ticket tied to ``alert`` when it auto-resolves.
+
+    No-op (returns None) when the alert never opened a ticket. Returns a small
+    record describing the close call so callers can stash it and tests can
+    assert exactly-once. Errors are swallowed into the record -- a flaky
+    FreeScout must never block the worker from marking the alert resolved.
+    """
+    ref = alert.external_ref
+    if not ref:
+        return None
+    ch = _freescout_channel(channels)
+    if ch is None:
+        return None
+    note = f"Auto-resolved by Printer Nanny: {alert.title}"
+    try:
+        res = ch.close_ticket(ref, note)
+        return {"external_ref": ref, "ok": res.ok, "detail": res.detail}
+    except Exception as exc:  # noqa: BLE001 - closing a ticket must never break resolve
+        return {"external_ref": ref, "ok": False, "detail": f"unhandled: {exc}"}
+
+
+def _resolve_stale(db: Session, active_keys: set[str], channels=None) -> int:
     """Resolve open rule-driven alerts whose condition no longer holds this run.
 
     Covers both cleared conditions (key not re-added) and alerts orphaned by a
@@ -165,6 +211,7 @@ def _resolve_stale(db: Session, active_keys: set[str]) -> int:
         if alert.dedupe_key not in active_keys:
             alert.state = m.AlertState.resolved
             alert.resolved_at = _now()
+            _close_ticket_for(alert, channels)
             resolved += 1
     return resolved
 
@@ -226,7 +273,7 @@ def evaluate_alerts(db: Session, now: Optional[datetime] = None) -> dict:
                                    channels=channels, runtime=runtime):
                         opened += 1
 
-    resolved = _resolve_stale(db, active_keys)
+    resolved = _resolve_stale(db, active_keys, channels)
     db.commit()
     return {"alerts_opened": opened, "alerts_resolved": resolved}
 
@@ -298,6 +345,8 @@ def check_maintenance_due(db: Session, now: Optional[datetime] = None) -> dict:
         alert.notified_channels = [
             {"channel": n, "ok": r.ok, "detail": r.detail} for n, r in results
         ]
+        # Capture the FreeScout ticket id so the resolver can auto-close it.
+        alert.external_ref = _external_ref_from(results, channels)
         return True
 
     for sched in queries.maintenance_due(db, now):
@@ -362,6 +411,7 @@ def check_maintenance_due(db: Session, now: Optional[datetime] = None) -> dict:
         if alert.dedupe_key not in active_keys:
             alert.state = m.AlertState.resolved
             alert.resolved_at = now
+            _close_ticket_for(alert, channels)
             resolved += 1
 
     db.commit()
@@ -519,7 +569,7 @@ def forecast_supplies(db: Session, now: Optional[datetime] = None) -> dict:
             ):
                 opened += 1
 
-    resolved = _resolve_stale_forecasts(db, active_keys, now)
+    resolved = _resolve_stale_forecasts(db, active_keys, now, channels)
     db.commit()
     # ``supplies_forecast_low`` keeps its historical meaning (count at/under the
     # lead-time threshold) so existing callers/tests reading that key still work.
@@ -598,16 +648,21 @@ def _open_forecast_alert(
     alert.notified_channels = [
         {"channel": name, "ok": res.ok, "detail": res.detail} for name, res in results
     ]
+    # Capture the FreeScout ticket id so the resolver can auto-close it.
+    alert.external_ref = _external_ref_from(results, channels or [])
     return alert
 
 
-def _resolve_stale_forecasts(db: Session, active_keys: set[str], now: datetime) -> int:
+def _resolve_stale_forecasts(
+    db: Session, active_keys: set[str], now: datetime, channels=None
+) -> int:
     """Resolve open predicted-depletion alerts whose forecast no longer holds.
 
     A key drops out of ``active_keys`` when the supply recovered above the
     lead-time (or the cartridge was swapped/refilled, so the refill-aware fit no
     longer projects it empty within the window). Scoped to forecast alerts so it
     can't touch rule-driven or maintenance alerts, which own their own lifecycle.
+    A resolved alert that opened a FreeScout ticket gets it auto-closed too.
     """
     resolved = 0
     for alert in db.scalars(
@@ -617,6 +672,7 @@ def _resolve_stale_forecasts(db: Session, active_keys: set[str], now: datetime) 
         )
     ):
         if alert.dedupe_key not in active_keys:
+            _close_ticket_for(alert, channels)
             alert.state = m.AlertState.resolved
             alert.resolved_at = now
             resolved += 1

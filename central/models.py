@@ -511,6 +511,10 @@ class Alert(Base):
     # De-dupe key so the worker doesn't re-open the same condition every cycle.
     dedupe_key: Mapped[str] = mapped_column(String(200), index=True)
     notified_channels: Mapped[Optional[list]] = mapped_column(JSON, default=None)
+    # External tracker reference captured at open time (today: the FreeScout
+    # conversation/ticket id). Persisted so the closed-loop resolver can post a
+    # "resolved" note + close that exact ticket when the alert auto-resolves.
+    external_ref: Mapped[Optional[str]] = mapped_column(String(120), default=None)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
     resolved_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), default=None)
 
