@@ -178,11 +178,15 @@ def customer_portal(request: Request, db: Session = Depends(get_db)):
     from central.runtime import load_settings as _ls
     rt = _ls(db)
     freescout_on = bool(rt.get("freescout.enabled"))
+    # ESG / sustainability panel — estimated print footprint for THIS client's
+    # fleet, scoped by client_id so one tenant never sees another's totals.
+    esg = queries.sustainability_rollup(db, client_id=client.id)
     return _render(
         request, "portal.html", db=db, user=user,
         client=client, printers=printers, runway=runway,
         low_supplies=low, open_alerts=alerts,
         freescout_enabled=freescout_on,
+        esg=esg,
         printer_label=_printer_label,
         portal_flash=request.session.pop("portal_flash", None),
     )

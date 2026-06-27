@@ -118,6 +118,25 @@ SPECS: List[Spec] = [
          "Default supply level that counts as 'low' in the dashboard"),
     Spec("alerts.offline_grace_seconds", "int", "Alerts", "Agent offline grace (seconds)",
          _env.agent_offline_grace_seconds, "Mark an agent offline after this long without a heartbeat"),
+    # ESG / Sustainability — turn page-count history into estimated print
+    # footprint (paper, CO2e, energy, trees). Every factor is operator-tunable
+    # so a customer can plug in their own paper stock / grid figures. Defaults
+    # are defensible public estimates, cited in queries.sustainability_rollup;
+    # all derived numbers are ESTIMATES and labelled as such in the UI.
+    Spec("esg.sheets_per_page", "float", "ESG / Sustainability", "Sheets per printed page",
+         0.85, "Page-count deltas are impressions; a portion print duplex, so "
+         "fewer physical sheets than pages. <1.0 assumes some duplexing."),
+    Spec("esg.paper_g_per_sheet", "float", "ESG / Sustainability", "Paper mass per sheet (g)",
+         4.5, "One US-Letter sheet of 75 gsm office paper ~= 4.5 g."),
+    Spec("esg.co2_g_per_sheet", "float", "ESG / Sustainability", "CO2e per sheet (g)",
+         4.74, "Estimate ~4.7 g CO2e per A4/Letter sheet (lifecycle: pulp, "
+         "manufacture, transport) — widely cited paper-footprint figure."),
+    Spec("esg.kwh_per_page", "float", "ESG / Sustainability", "Energy per page (kWh)",
+         0.0011, "Estimated office laser print energy per page (~1.1 Wh) "
+         "including imaging/fusing — ENERGY STAR class device."),
+    Spec("esg.sheets_per_tree", "float", "ESG / Sustainability", "Sheets per tree",
+         8333.0, "~8,333 sheets of office paper per tree (one tree ~= 16.67 "
+         "reams of 500) — common pulp-yield estimate."),
     # Polling (pushed to agents)
     Spec("polling.poll_interval_seconds", "int", "Polling", "Poll interval (seconds)", 300),
     Spec("polling.discovery_interval_seconds", "int", "Polling", "Discovery interval (seconds)", 3600),
@@ -158,7 +177,7 @@ SETTINGS_GROUPS: "Dict[str, tuple]" = {
         "Notifications",
         ["Email (SMTP)", "Microsoft Teams", "Slack", "Webhook (generic)", "FreeScout"],
     ),
-    "alerts": ("Alerts & Reports", ["Alerts", "Reports"]),
+    "alerts": ("Alerts & Reports", ["Alerts", "Reports", "ESG / Sustainability"]),
     "polling": ("Polling & SNMP", ["Polling", "SNMP defaults"]),
     "auth": ("Authentication", ["Single sign-on (OIDC)"]),
     "agents": ("Agents", ["Agent install"]),

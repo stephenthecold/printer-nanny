@@ -97,6 +97,20 @@ def build_weekly_summary(db: Session) -> Tuple[str, str]:
     else:
         lines.append("  none -- all supplies healthy")
 
+    # ESG / sustainability — estimated fleet-wide print footprint, derived from
+    # the same page-count history. Cheap to compute, increasingly an RFP ask.
+    esg = queries.sustainability_rollup(db)
+    lines += [
+        "",
+        "Sustainability footprint (estimated):",
+        f"  Sheets printed   : {esg['sheets']:,.0f}",
+        f"  Paper            : {esg['paper_kg']:,.1f} kg",
+        f"  CO2e             : {esg['co2_kg']:,.1f} kg",
+        f"  Energy           : {esg['kwh']:,.1f} kWh",
+        f"  Tree-equivalents : {esg['trees']:,.2f}",
+        "  (estimates from page-count history x standard conversion factors)",
+    ]
+
     subject = (
         f"Weekly fleet summary: {summary['total_printers']} printers, "
         f"{summary['open_alerts']} open alert(s)"
