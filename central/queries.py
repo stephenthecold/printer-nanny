@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import ipaddress
 from datetime import datetime, timezone
 from typing import Optional
 
@@ -11,6 +12,11 @@ from sqlalchemy.orm import Session
 from central import models as m
 
 DEFAULT_LOW_SUPPLY_PCT = 20.0
+
+# SNMP versions that transmit the community string / data in the clear. v3 USM
+# adds authentication + (optionally) privacy, so we treat it as the only
+# "secure" transport for the device security-posture report.
+INSECURE_SNMP_VERSIONS = {"1", "v1", "2c", "v2c", "2", "v2"}
 
 
 def fleet_summary(db: Session, client_id: Optional[int] = None) -> dict:
@@ -217,6 +223,130 @@ def per_client_rollup(db: Session) -> list[dict]:
             "sites_count": len(client.sites),
         })
     return out
+
+
+def _normalize_snmp_version(version: Optional[str]) -> str:
+    """Canonicalize a stored SNMP version string to '1' / '2c' / '3'."""
+    if not version:
+        return "2c"  # central/agent default when nothing is configured
+    v = version.strip().lower().lstrip("v")
+    if v in ("1",):
+        return "1"
+    if v in ("2", "2c"):
+        return "2c"
+    if v in ("3",):
+        return "3"
+    return v or "2c"
+
+
+def _subnet_snmp_version_for(printer: m.Printer, subnets: list[m.Subnet]) -> tuple[str, Optional[str]]:
+    """Effective SNMP version for a printer, derived from its SUBNET config.
+
+    The anchor signal for the posture report is "what SNMP version does this
+    device actually talk over", which is owned by the subnet the printer sits
+    in (each subnet row carries its own creds). We match the printer's IP
+    against the CIDRs of the subnets in its own site; the matching subnet's
+    ``snmp_version`` wins. Falls back to the printer's own ``snmp_version``
+    column when no subnet contains the IP (e.g. a manually-added device, or an
+    IP outside any enrolled CIDR).
+
+    Returns (version, source) where source is the subnet label/cidr or
+    "printer" so the UI can show where the determination came from.
+    """
+    try:
+        ip = ipaddress.ip_address(printer.ip)
+    except ValueError:
+        ip = None
+    if ip is not None:
+        for sub in subnets:
+            if sub.site_id != printer.site_id:
+                continue
+            try:
+                net = ipaddress.ip_network(sub.cidr, strict=False)
+            except ValueError:
+                continue
+            if ip in net:
+                return _normalize_snmp_version(sub.snmp_version), (sub.label or sub.cidr)
+    return _normalize_snmp_version(printer.snmp_version), "printer"
+
+
+def security_posture_rollup(db: Session, client_id: Optional[int] = None) -> dict:
+    """Per-device security posture + a fleet summary -- "treat printers like
+    endpoints".
+
+    Grounded entirely in data we already hold:
+
+      * insecure_snmp -- derived from the SNMP version the device talks over
+        (subnet config; v1/v2c are cleartext, v3 USM is authenticated). This is
+        the anchor signal and is fully available today.
+      * firmware -- best-effort version string captured during polling
+        (sysDescr / vendor field); honestly "unknown" when the device exposes
+        nothing, never fabricated.
+
+    Posture is COMPUTED on read (not denormalized): the SNMP version follows
+    the live subnet config, so a row would otherwise go stale the moment an
+    operator flips a subnet to v3. Firmware is the only stored input and it's a
+    fact the agent collected, not a derived verdict.
+
+    Returns ``{"rows": [...], "summary": {...}}`` scoped to ``client_id`` when
+    given. Each row: printer, client, site, snmp_version, snmp_secure (bool),
+    snmp_source, firmware (str|None), firmware_known (bool), flags (list[str]).
+    """
+    stmt = (
+        select(m.Printer)
+        .where(m.Printer.discovery_state == m.DiscoveryState.approved)
+    )
+    if client_id is not None:
+        stmt = stmt.where(m.Printer.client_id == client_id)
+    stmt = stmt.order_by(m.Printer.client_id, m.Printer.site_id, m.Printer.ip)
+    printers = list(db.scalars(stmt))
+
+    subnets = list(db.scalars(select(m.Subnet)))
+    clients = {c.id: c for c in db.scalars(select(m.Client))}
+    sites = {s.id: s for s in db.scalars(select(m.Site))}
+
+    rows: list[dict] = []
+    insecure_count = 0
+    secure_count = 0
+    unknown_fw_count = 0
+    for printer in printers:
+        version, source = _subnet_snmp_version_for(printer, subnets)
+        secure = version not in INSECURE_SNMP_VERSIONS
+        firmware = (printer.firmware or "").strip() or None
+        firmware_known = firmware is not None
+
+        flags: list[str] = []
+        if not secure:
+            flags.append("insecure-snmp")
+            insecure_count += 1
+        else:
+            secure_count += 1
+        if not firmware_known:
+            flags.append("firmware-unknown")
+            unknown_fw_count += 1
+
+        rows.append({
+            "printer": printer,
+            "client": clients.get(printer.client_id),
+            "site": sites.get(printer.site_id),
+            "snmp_version": version,
+            "snmp_secure": secure,
+            "snmp_source": source,
+            "firmware": firmware,
+            "firmware_known": firmware_known,
+            "flags": flags,
+        })
+
+    summary = {
+        "total": len(rows),
+        "insecure_snmp": insecure_count,
+        "secure_snmp": secure_count,
+        "firmware_unknown": unknown_fw_count,
+        "firmware_known": len(rows) - unknown_fw_count,
+        # Devices with at least one posture flag raised.
+        "flagged": sum(1 for r in rows if r["flags"]),
+    }
+    return {"rows": rows, "summary": summary}
 
 
 def recent_activity(db: Session, limit: int = 8) -> list[dict]:

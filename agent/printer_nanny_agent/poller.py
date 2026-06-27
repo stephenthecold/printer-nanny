@@ -5,6 +5,7 @@ without any SNMP I/O.
 
 from __future__ import annotations
 
+import re
 from typing import Dict, List, Optional
 
 from printer_nanny_agent import oids
@@ -38,6 +39,37 @@ def _oid_suffix(full_oid: str, base: str) -> str:
     full = full_oid.lstrip(".")
     base = base.lstrip(".")
     return full[len(base):] if full.startswith(base) else full
+
+
+# Common firmware/version markers embedded in sysDescr by many vendors, e.g.
+#   "HP ETHERNET MULTI-ENVIRONMENT,SN:..., FW:20230815"
+#   "Brother NC-... ,Firmware Ver.1.34 ,..."
+#   "KYOCERA ... Version 2S5_2000.002.052 ..."
+# We extract the token following the marker; honest None when nothing matches so
+# the posture view reports "unknown" rather than a misleading guess.
+_FIRMWARE_PATTERNS = [
+    re.compile(r"firmware\s*ver(?:sion)?\.?\s*[:=]?\s*([A-Za-z0-9][\w.\-/]*)", re.I),
+    re.compile(r"\bfw\s*[:=]\s*([A-Za-z0-9][\w.\-/]*)", re.I),
+    re.compile(r"\bversion\s*[:=]?\s*([0-9][\w.\-/]*)", re.I),
+]
+
+
+def parse_firmware(*texts: Optional[str]) -> Optional[str]:
+    """Best-effort firmware/version string from sysDescr-style text.
+
+    Pure + dependency-free so it unit-tests without SNMP. Returns the matched
+    version token (trimmed) or None when no recognizable marker is present.
+    """
+    for text in texts:
+        if not text:
+            continue
+        for pattern in _FIRMWARE_PATTERNS:
+            match = pattern.search(text)
+            if match:
+                token = match.group(1).strip(" ,;")
+                if token:
+                    return token[:200]
+    return None
 
 
 def _vendor_from(*texts: Optional[str]) -> Optional[str]:
@@ -130,6 +162,10 @@ def build_reading(
     device_descr = scalars.get(oids.HR_DEVICE_DESCR)
     model = printer_name or device_descr
     brand = _vendor_from(printer_name, device_descr, sys_descr)
+    # Firmware is best-effort from sysDescr (where most vendors embed it). Left
+    # None when nothing parseable -- the central posture report surfaces that
+    # honestly as "unknown".
+    firmware = parse_firmware(sys_descr, device_descr, printer_name)
 
     supplies = build_supplies(supply_walks)
 
@@ -207,6 +243,7 @@ def build_reading(
         "brand": brand,
         "model": model,
         "serial": scalars.get(oids.PRT_GENERAL_SERIAL_NUMBER),
+        "firmware": firmware,
         "supplies": supplies,
         "events": events,
     }

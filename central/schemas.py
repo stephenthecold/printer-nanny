@@ -57,6 +57,9 @@ class ReadingIn(BaseModel):
     brand: Optional[str] = None
     model: Optional[str] = None
     serial: Optional[str] = None
+    # Best-effort firmware/version parsed from sysDescr by the agent. Feeds the
+    # device security-posture report; None when the device exposes nothing.
+    firmware: Optional[str] = None
     supplies: list[SupplyIn] = Field(default_factory=list)
     events: list[EventIn] = Field(default_factory=list)
     # Per-poll vendor-provider diagnostics. Free-shape dicts (one per provider
@@ -76,6 +79,7 @@ class DiscoveredIn(BaseModel):
     brand: Optional[str] = None
     model: Optional[str] = None
     serial: Optional[str] = None
+    firmware: Optional[str] = None
     subnet_cidr: Optional[str] = None
 
 
@@ -212,6 +216,7 @@ class PrinterOut(ORMModel):
     brand: Optional[str] = None
     model: Optional[str] = None
     serial: Optional[str] = None
+    firmware: Optional[str] = None
     location: Optional[str] = None
     status: m.PrinterStatus
     discovery_state: m.DiscoveryState

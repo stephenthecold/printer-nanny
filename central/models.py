@@ -299,6 +299,12 @@ class Printer(Base):
     model: Mapped[Optional[str]] = mapped_column(String(200), default=None)
     serial: Mapped[Optional[str]] = mapped_column(String(120), default=None)
     location: Mapped[Optional[str]] = mapped_column(String(200), default=None)
+    # Firmware / version string, best-effort from sysDescr (or a vendor field)
+    # during polling. Used by the device security-posture report so a regulated
+    # buyer can answer "what firmware is this endpoint running?". Honestly None
+    # when the device exposes nothing parseable -- the posture view shows
+    # "unknown" rather than inventing a value.
+    firmware: Mapped[Optional[str]] = mapped_column(String(200), default=None)
 
     # SNMP connection details (community for v1/v2c; v3 creds stored in snmp_v3 jsonb).
     snmp_version: Mapped[str] = mapped_column(String(8), default="2c")
