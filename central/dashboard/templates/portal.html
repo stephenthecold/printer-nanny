@@ -11,6 +11,41 @@
   <span class="text-sm text-slate-500">your printer fleet</span>
 </div>
 
+{% if esg and esg.sheets > 0 %}
+<section class="bg-white rounded-lg shadow p-4 mb-6" id="esg-panel">
+  <div class="flex items-baseline justify-between mb-3 flex-wrap gap-2">
+    <h2 class="font-semibold">Sustainability footprint</h2>
+    <span class="text-xs text-slate-400">estimated from your print volume</span>
+  </div>
+  <div class="grid grid-cols-2 md:grid-cols-5 gap-4 text-center">
+    <div>
+      <div class="text-2xl font-semibold text-slate-800">{{ '{:,.0f}'.format(esg.sheets) }}</div>
+      <div class="text-xs text-slate-500">sheets printed</div>
+    </div>
+    <div>
+      <div class="text-2xl font-semibold text-slate-800">{{ '{:,.1f}'.format(esg.paper_kg) }}</div>
+      <div class="text-xs text-slate-500">kg paper</div>
+    </div>
+    <div>
+      <div class="text-2xl font-semibold text-emerald-700">{{ '{:,.1f}'.format(esg.co2_kg) }}</div>
+      <div class="text-xs text-slate-500">kg CO₂e</div>
+    </div>
+    <div>
+      <div class="text-2xl font-semibold text-slate-800">{{ '{:,.1f}'.format(esg.kwh) }}</div>
+      <div class="text-xs text-slate-500">kWh energy</div>
+    </div>
+    <div>
+      <div class="text-2xl font-semibold text-emerald-700">{{ '{:,.2f}'.format(esg.trees) }}</div>
+      <div class="text-xs text-slate-500">tree-equivalents</div>
+    </div>
+  </div>
+  <p class="text-xs text-slate-400 mt-3">
+    Estimates based on {{ '{:,.0f}'.format(esg.pages) }} pages across {{ esg.printers }} printer(s),
+    using standard paper/energy conversion factors. Figures are indicative, not audited.
+  </p>
+</section>
+{% endif %}
+
 <div class="grid md:grid-cols-3 gap-6 mb-6">
   <section class="bg-white rounded-lg shadow p-4 md:col-span-2">
     <h2 class="font-semibold mb-3">Your printers</h2>

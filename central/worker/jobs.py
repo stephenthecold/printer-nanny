@@ -13,7 +13,9 @@ from sqlalchemy.orm import Session
 
 from central import models as m
 from central import queries
-from central.channels import Notification, active_channels, dispatch
+from central.channels import Notification, active_channels
+from central.channels.delivery import record_dispatch
+from central.channels.delivery import retry_due as _retry_due
 from central.runtime import load_settings
 
 _SEVERITY_RANK = {
@@ -96,6 +98,7 @@ def _open_alert(
     printer: Optional[m.Printer] = None,
     agent: Optional[m.Agent] = None,
     channels: Optional[list] = None,
+    runtime: Optional[dict] = None,
 ) -> Optional[m.Alert]:
     """Open an alert if one isn't already open for this dedupe_key. Returns it (or None)."""
     if _find_open_alert(db, dedupe_key) is not None:
@@ -130,7 +133,11 @@ def _open_alert(
         printer_label=_printer_label(printer) if printer else None,
         alert_id=alert.id,
     )
-    results = dispatch(note, channels or [])
+    # Persist a retryable delivery per channel so a transient channel outage is
+    # re-tried by retry_deliveries instead of being silently dropped.
+    results = record_dispatch(
+        db, alert.id, note, channels or [], runtime=runtime or load_settings(db)
+    )
     alert.notified_channels = [
         {"channel": name, "ok": res.ok, "detail": res.detail} for name, res in results
     ]
@@ -141,13 +148,19 @@ def _resolve_stale(db: Session, active_keys: set[str]) -> int:
     """Resolve open rule-driven alerts whose condition no longer holds this run.
 
     Covers both cleared conditions (key not re-added) and alerts orphaned by a
-    rule that was disabled/deleted (its key is never re-added). Maintenance alerts
-    have their own lifecycle in check_maintenance_due and are left untouched here.
+    rule that was disabled/deleted (its key is never re-added). Maintenance and
+    predicted-depletion alerts have their own lifecycles (check_maintenance_due /
+    forecast_supplies) and are left untouched here -- evaluate_alerts never
+    re-adds their keys, so reconciling them from this pass would wrongly resolve
+    every open one each cycle.
     """
     resolved = 0
     stmt = select(m.Alert).where(m.Alert.state == m.AlertState.open)
     for alert in db.scalars(stmt):
-        if alert.type == m.AlertConditionType.maintenance_due:
+        if alert.type in (
+            m.AlertConditionType.maintenance_due,
+            m.AlertConditionType.predicted_depletion,
+        ):
             continue
         if alert.dedupe_key not in active_keys:
             alert.state = m.AlertState.resolved
@@ -177,7 +190,8 @@ def evaluate_alerts(db: Session, now: Optional[datetime] = None) -> dict:
                         f"No heartbeat for over {rule.threshold} min "
                         f"(last: {last.isoformat() if last else 'never'})."
                     )
-                    if _open_alert(db, rule, key, title, detail, agent=agent, channels=channels):
+                    if _open_alert(db, rule, key, title, detail, agent=agent,
+                                   channels=channels, runtime=runtime):
                         opened += 1
             continue
 
@@ -191,7 +205,8 @@ def evaluate_alerts(db: Session, now: Optional[datetime] = None) -> dict:
                         label = supply.color or supply.type.value
                         title = f"Low {label} on {_printer_label(printer)}"
                         detail = f"{label} at {supply.level_pct:.0f}% (threshold {threshold:.0f}%)."
-                        if _open_alert(db, rule, key, title, detail, printer=printer, channels=channels):
+                        if _open_alert(db, rule, key, title, detail, printer=printer,
+                                       channels=channels, runtime=runtime):
                             opened += 1
 
             elif rule.condition_type == m.AlertConditionType.error_severity:
@@ -207,7 +222,8 @@ def evaluate_alerts(db: Session, now: Optional[datetime] = None) -> dict:
                     active_keys.add(key)
                     title = f"Error on {_printer_label(printer)}"
                     detail = f"{latest.severity.value}: {latest.message}"
-                    if _open_alert(db, rule, key, title, detail, printer=printer, channels=channels):
+                    if _open_alert(db, rule, key, title, detail, printer=printer,
+                                   channels=channels, runtime=runtime):
                         opened += 1
 
     resolved = _resolve_stale(db, active_keys)
@@ -255,7 +271,7 @@ def check_maintenance_due(db: Session, now: Optional[datetime] = None) -> dict:
             title=alert.title, body=alert.detail, severity="warning",
             printer_label=_printer_label(printer) if printer else None, alert_id=alert.id,
         )
-        results = dispatch(note, channels)
+        results = record_dispatch(db, alert.id, note, channels, runtime=runtime)
         alert.notified_channels = [
             {"channel": n, "ok": r.ok, "detail": r.detail} for n, r in results
         ]
@@ -279,43 +295,114 @@ def check_maintenance_due(db: Session, now: Optional[datetime] = None) -> dict:
 
 
 # --------------------------------------------------------------------------- #
-# Supply-depletion forecast (days-to-empty from the recent slope)
+# Supply-depletion forecast (days-to-empty from a regression over recent levels)
 # --------------------------------------------------------------------------- #
+# Confidence gate: below these the consumption slope is too noisy to trust, so
+# forecast_days_to_empty returns None rather than a number nobody should reorder
+# against. Two points over a few days is the floor the older two-point estimate
+# implicitly assumed; the regression keeps that floor while smoothing the rest.
+FORECAST_MIN_POINTS = 2          # need at least a baseline + a follow-up reading
+FORECAST_MIN_HISTORY_DAYS = 3.0  # ...spanning at least this long (matches RUNWAY_MIN_HISTORY_DAYS)
+
+
 def forecast_days_to_empty(
     readings: list[tuple[datetime, float]], refill_tolerance: float = 5.0
 ) -> Optional[float]:
-    """Linear extrapolation of level→0 from (ts, level_pct) points. None if rising/flat.
+    """Days until level→0, from a least-squares fit over the recent depleting segment.
 
-    Fits only the most-recent depleting segment: a jump up of more than
-    ``refill_tolerance`` points is treated as a cartridge refill and resets the
-    baseline, so a fresh cartridge isn't averaged against the spent one.
+    Replaces the old first-point/last-point slope (which was maximally
+    noise-sensitive) with an ordinary least-squares regression of level_pct on
+    time across every point in the segment, so a single jittery reading no
+    longer swings the estimate. The refill/cartridge-swap handling is preserved:
+    a jump up of more than ``refill_tolerance`` points is treated as a fresh
+    cartridge and resets the baseline, so a spent cartridge's slope isn't
+    averaged against the new one.
+
+    Returns ``None`` (the existing "no estimate" contract shared with
+    ``central.queries.supply_runway``) when the series is rising/flat, or when
+    the surviving segment doesn't clear the confidence gate
+    (``FORECAST_MIN_POINTS`` points spanning ``FORECAST_MIN_HISTORY_DAYS`` days).
+    The number returned is days-to-empty measured from the most recent reading,
+    using the regression-predicted level there (== the observed level for a
+    clean linear series, so legacy expectations are unchanged).
     """
     points = sorted([(t, lvl) for t, lvl in readings if lvl is not None], key=lambda p: p[0])
-    if len(points) < 2:
+    if len(points) < FORECAST_MIN_POINTS:
         return None
     start = 0
     for i in range(1, len(points)):
         if points[i][1] > points[i - 1][1] + refill_tolerance:
             start = i  # refill detected — baseline resets here
     seg = points[start:]
-    if len(seg) < 2:
+    if len(seg) < FORECAST_MIN_POINTS:
         return None
-    (t0, l0), (t1, l1) = seg[0], seg[-1]
-    days = (t1 - t0).total_seconds() / 86400.0
-    if days <= 0:
-        return None
-    rate = (l0 - l1) / days  # percent consumed per day
+
+    t0 = seg[0][0]
+    # x in days since the segment's first reading; y in percent remaining.
+    xs = [(t - t0).total_seconds() / 86400.0 for t, _ in seg]
+    ys = [lvl for _, lvl in seg]
+    span = xs[-1] - xs[0]
+    if span < FORECAST_MIN_HISTORY_DAYS:
+        return None  # not enough elapsed history to trust the slope yet
+
+    n = len(seg)
+    mean_x = sum(xs) / n
+    mean_y = sum(ys) / n
+    var_x = sum((x - mean_x) ** 2 for x in xs)
+    if var_x <= 0:
+        return None  # all readings at the same instant — no slope
+    cov_xy = sum((x - mean_x) * (y - mean_y) for x, y in zip(xs, ys))
+    slope = cov_xy / var_x  # percent change per day (negative when depleting)
+    rate = -slope  # percent consumed per day
     if rate <= 0:
-        return None  # not depleting
-    return round(l1 / rate, 1)
+        return None  # not depleting (rising or flat fit)
+
+    intercept = mean_y - slope * mean_x
+    level_now = intercept + slope * xs[-1]  # fitted level at the latest reading
+    if level_now <= 0:
+        return 0.0  # already projected empty
+    return round(level_now / rate, 1)
 
 
-def forecast_supplies(db: Session) -> dict:
-    """Annotate supplies with a days-to-empty estimate from their reading history."""
+def forecast_supplies(db: Session, now: Optional[datetime] = None) -> dict:
+    """Forecast each supply's days-to-empty, persist it, and raise reorder alerts.
+
+    Three things happen per approved printer, per ``(type, color)`` supply:
+
+      1. Fit ``forecast_days_to_empty`` over the supply's reading history.
+      2. Persist the result onto the matching ``Supply`` row
+         (``days_to_empty`` + ``forecast_at``) so dashboards/portal/reports read
+         it instead of re-fitting on every render. A supply with no trustworthy
+         estimate is cleared back to ``None``.
+      3. If the estimate is at/under the operator's reorder lead-time
+         (``alerts.reorder_lead_days``), open a ``predicted_depletion`` alert
+         deduped PER (printer, supply) — not per printer, so a color device
+         with three depleting toners raises three actionable alerts instead of
+         one storm-prone aggregate. The dedupe / auto-resolve machinery is the
+         same scaffolding the rule engine uses: keys re-added this pass stay
+         open, keys that drop out (estimate recovered, or the cartridge was
+         swapped/refilled so the recent segment no longer projects empty) are
+         resolved.
+    """
+    now = now or _now()
+    runtime = load_settings(db)
+    channels = active_channels(runtime)
+    lead_days = runtime.get("alerts.reorder_lead_days", 14)
+
     flagged = 0
+    forecasted = 0
+    opened = 0
+    active_keys: set[str] = set()
+
     for printer in db.scalars(
         select(m.Printer).where(m.Printer.discovery_state == m.DiscoveryState.approved)
     ):
+        # Index this printer's Supply rows by (type, color) so a forecast keyed
+        # off the snapshot history lands on the right cartridge.
+        supplies_by_key: dict[str, m.Supply] = {}
+        for supply in printer.supplies:
+            supplies_by_key[f"{supply.type.value}:{supply.color}"] = supply
+
         # Build per-(type,color) level series from supply_snapshot history.
         series: dict[str, list[tuple[datetime, float]]] = {}
         for r in db.scalars(
@@ -329,8 +416,134 @@ def forecast_supplies(db: Session) -> dict:
                     continue
                 key = f"{snap.get('type')}:{snap.get('color')}"
                 series.setdefault(key, []).append((_aware(r.ts), float(lvl)))
+
         for key, pts in series.items():
+            supply = supplies_by_key.get(key)
             dte = forecast_days_to_empty(pts)
-            if dte is not None and dte <= 14:
-                flagged += 1
-    return {"supplies_forecast_low": flagged}
+            # Persist onto the supply row (None clears a stale estimate).
+            if supply is not None:
+                supply.days_to_empty = dte
+                supply.forecast_at = now if dte is not None else None
+                if dte is not None:
+                    forecasted += 1
+            if dte is None or dte > lead_days:
+                continue
+            flagged += 1
+            if supply is None:
+                continue  # snapshot for a cartridge we no longer track — nothing to alert on
+            dedupe_key = f"forecast:printer:{printer.id}:supply:{supply.id}"
+            active_keys.add(dedupe_key)
+            label = supply.color or supply.type.value
+            title = f"Reorder {label} for {_printer_label(printer)}"
+            detail = (
+                f"{label} is forecast to run out in ~{dte:.0f} day(s) "
+                f"(reorder lead time {lead_days} day(s))."
+            )
+            if _open_forecast_alert(
+                db, dedupe_key, title, detail, printer=printer,
+                channels=channels, runtime=runtime,
+            ):
+                opened += 1
+
+    resolved = _resolve_stale_forecasts(db, active_keys, now)
+    db.commit()
+    # ``supplies_forecast_low`` keeps its historical meaning (count at/under the
+    # lead-time threshold) so existing callers/tests reading that key still work.
+    return {
+        "supplies_forecast_low": flagged,
+        "supplies_forecasted": forecasted,
+        "forecast_alerts_opened": opened,
+        "forecast_alerts_resolved": resolved,
+    }
+
+
+# --------------------------------------------------------------------------- #
+# Notification delivery retry / dead-letter
+# --------------------------------------------------------------------------- #
+def retry_deliveries(db: Session, now: Optional[datetime] = None) -> dict:
+    """Re-send due failed/pending notification deliveries with exponential backoff.
+
+    A channel send that failed when its alert opened was persisted as a
+    NotificationDelivery row; this job re-sends it once its backoff window has
+    elapsed, marks it delivered on success, and dead-letters it after the
+    configured max-attempts cap. Idempotent and safe to run every cycle --
+    delivered/dead rows are terminal and never re-sent (see channels.delivery).
+    """
+    return _retry_due(db, load_settings(db), now or _now())
+
+
+def _open_forecast_alert(
+    db: Session,
+    dedupe_key: str,
+    title: str,
+    detail: str,
+    *,
+    printer: m.Printer,
+    channels: Optional[list] = None,
+    runtime: Optional[dict] = None,
+) -> Optional[m.Alert]:
+    """Open a predicted-depletion alert if one isn't already open for the key.
+
+    Rule-less (forecast alerts aren't driven by an AlertRule), so it mirrors the
+    open/dispatch bookkeeping of ``_open_alert`` directly instead of going
+    through it. Sends go through ``record_dispatch`` so a transient channel
+    outage is retried by ``retry_deliveries`` rather than silently dropped.
+    Returns the new alert, or ``None`` if one was already open.
+    """
+    if _find_open_alert(db, dedupe_key) is not None:
+        return None
+    alert = m.Alert(
+        rule_id=None,
+        printer_id=printer.id,
+        type=m.AlertConditionType.predicted_depletion,
+        severity=m.EventSeverity.warning,
+        state=m.AlertState.open,
+        title=title,
+        detail=detail,
+        dedupe_key=dedupe_key,
+    )
+    db.add(alert)
+    db.flush()  # assign alert.id
+
+    client = db.get(m.Client, printer.client_id)
+    site = db.get(m.Site, printer.site_id)
+    note = Notification(
+        title=title,
+        body=detail,
+        severity=m.EventSeverity.warning.value,
+        client_name=client.name if client else None,
+        site_name=site.name if site else None,
+        printer_label=_printer_label(printer),
+        alert_id=alert.id,
+    )
+    # Durable per-channel delivery (mirrors _open_alert) so a failed forecast
+    # send is retried by retry_deliveries instead of being dropped.
+    results = record_dispatch(
+        db, alert.id, note, channels or [], runtime=runtime or load_settings(db)
+    )
+    alert.notified_channels = [
+        {"channel": name, "ok": res.ok, "detail": res.detail} for name, res in results
+    ]
+    return alert
+
+
+def _resolve_stale_forecasts(db: Session, active_keys: set[str], now: datetime) -> int:
+    """Resolve open predicted-depletion alerts whose forecast no longer holds.
+
+    A key drops out of ``active_keys`` when the supply recovered above the
+    lead-time (or the cartridge was swapped/refilled, so the refill-aware fit no
+    longer projects it empty within the window). Scoped to forecast alerts so it
+    can't touch rule-driven or maintenance alerts, which own their own lifecycle.
+    """
+    resolved = 0
+    for alert in db.scalars(
+        select(m.Alert).where(
+            m.Alert.state == m.AlertState.open,
+            m.Alert.type == m.AlertConditionType.predicted_depletion,
+        )
+    ):
+        if alert.dedupe_key not in active_keys:
+            alert.state = m.AlertState.resolved
+            alert.resolved_at = now
+            resolved += 1
+    return resolved

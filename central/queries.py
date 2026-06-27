@@ -307,3 +307,114 @@ def page_count_history(db: Session, printer_id: int, limit: int = 90) -> list[m.
         )
     )
     return list(reversed(rows))
+
+
+def _printed_pages_for_printer(rows: "list[tuple[int]]") -> int:
+    """Sum positive page-count deltas across one printer's reading series.
+
+    ``rows`` is oldest→newest ``(page_count,)`` tuples. We only add a delta
+    when it's positive, so a counter reset (firmware reflash) or a printer
+    swap onto the same DB row (page_count drops to a smaller absolute number)
+    contributes 0 for that step instead of a large NEGATIVE number that would
+    cancel out real prints. The trade-off — pages printed between the last
+    reading before a reset and the reset itself are lost — is the safe
+    direction for a billing-adjacent estimate: never invent prints, never go
+    negative.
+    """
+    total = 0
+    prev: Optional[int] = None
+    for (pc,) in rows:
+        if pc is None:
+            continue
+        if prev is not None and pc > prev:
+            total += pc - prev
+        prev = pc
+    return total
+
+
+def sustainability_rollup(
+    db: Session,
+    client_id: Optional[int] = None,
+    since: Optional[datetime] = None,
+) -> dict:
+    """Estimated print footprint derived from page-count history.
+
+    Sums physical pages printed (positive page_count deltas per printer, so
+    counter resets / printer swaps can't produce negative or inflated totals),
+    then converts to sheets, paper mass, CO2e, energy, and tree-equivalents
+    using the operator-tunable factors in ``runtime.SPECS`` (``esg.*``). Every
+    derived number is an ESTIMATE; the factors carry defensible public defaults
+    (see runtime.py and the figures below).
+
+    Scope: approved printers only, optionally narrowed to one ``client_id``
+    (tenant scoping for the customer portal) and/or to readings on/after
+    ``since``.
+
+    Returns a flat dict::
+
+        {
+          "pages":        int,    # raw impressions (page-count deltas)
+          "sheets":       float,  # physical sheets after the duplex nudge
+          "paper_g":      float,  # paper mass, grams
+          "paper_kg":     float,  # convenience: paper_g / 1000
+          "co2_kg":       float,  # CO2e, kilograms
+          "kwh":          float,  # print energy, kilowatt-hours
+          "trees":        float,  # tree-equivalents of paper consumed
+          "printers":     int,    # approved printers in scope
+          "duplex_nudge": float,  # the esg.sheets_per_page factor applied
+          "factors":      {...},  # the esg.* factors used, for transparency
+          "estimated":    True,   # these are estimates, label them as such
+        }
+    """
+    from central.runtime import load_settings  # lazy: avoid import cycle
+
+    rt = load_settings(db)
+    sheets_per_page = float(rt.get("esg.sheets_per_page") or 0.0)
+    paper_g_per_sheet = float(rt.get("esg.paper_g_per_sheet") or 0.0)
+    co2_g_per_sheet = float(rt.get("esg.co2_g_per_sheet") or 0.0)
+    kwh_per_page = float(rt.get("esg.kwh_per_page") or 0.0)
+    sheets_per_tree = float(rt.get("esg.sheets_per_tree") or 0.0)
+
+    printer_q = select(m.Printer.id).where(
+        m.Printer.discovery_state == m.DiscoveryState.approved
+    )
+    if client_id is not None:
+        printer_q = printer_q.where(m.Printer.client_id == client_id)
+    printer_ids = list(db.scalars(printer_q))
+
+    pages = 0
+    for pid in printer_ids:
+        stmt = (
+            select(m.Reading.page_count)
+            .where(m.Reading.printer_id == pid, m.Reading.page_count.is_not(None))
+            .order_by(m.Reading.ts.asc())
+        )
+        if since is not None:
+            stmt = stmt.where(m.Reading.ts >= since)
+        pages += _printed_pages_for_printer(list(db.execute(stmt)))
+
+    sheets = pages * sheets_per_page
+    paper_g = sheets * paper_g_per_sheet
+    co2_kg = (sheets * co2_g_per_sheet) / 1000.0
+    kwh = pages * kwh_per_page
+    trees = (sheets / sheets_per_tree) if sheets_per_tree else 0.0
+
+    return {
+        "pages": pages,
+        "sheets": sheets,
+        "paper_g": paper_g,
+        "paper_kg": paper_g / 1000.0,
+        "co2_kg": co2_kg,
+        "kwh": kwh,
+        "trees": trees,
+        "printers": len(printer_ids),
+        "duplex_nudge": sheets_per_page,
+        "factors": {
+            "sheets_per_page": sheets_per_page,
+            "paper_g_per_sheet": paper_g_per_sheet,
+            "co2_g_per_sheet": co2_g_per_sheet,
+            "kwh_per_page": kwh_per_page,
+            "sheets_per_tree": sheets_per_tree,
+        },
+        "estimated": True,
+    }

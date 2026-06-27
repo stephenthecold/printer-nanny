@@ -22,6 +22,8 @@ JOBS = (
     jobs.mark_offline_agents,
     jobs.evaluate_alerts,
     jobs.check_maintenance_due,
+    # Re-send any failed/pending channel deliveries that are due (backoff).
+    jobs.retry_deliveries,
     jobs.forecast_supplies,
     # Cheap no-op unless a weekly/monthly report is due (marker-gated).
     run_scheduled_reports,

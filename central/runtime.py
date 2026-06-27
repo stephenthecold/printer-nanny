@@ -116,8 +116,39 @@ SPECS: List[Spec] = [
     # Alerts
     Spec("alerts.low_supply_pct", "float", "Alerts", "Low-supply threshold (%)", 20.0,
          "Default supply level that counts as 'low' in the dashboard"),
+    Spec("alerts.reorder_lead_days", "int", "Alerts", "Reorder lead time (days)", 14,
+         "Open a predicted-depletion alert when a supply is forecast to run out "
+         "within this many days — set it to how long a replacement cartridge "
+         "takes to arrive so you order before the printer goes dark"),
     Spec("alerts.offline_grace_seconds", "int", "Alerts", "Agent offline grace (seconds)",
          _env.agent_offline_grace_seconds, "Mark an agent offline after this long without a heartbeat"),
+    # ESG / Sustainability — turn page-count history into estimated print
+    # footprint (paper, CO2e, energy, trees). Every factor is operator-tunable
+    # so a customer can plug in their own paper stock / grid figures. Defaults
+    # are defensible public estimates, cited in queries.sustainability_rollup;
+    # all derived numbers are ESTIMATES and labelled as such in the UI.
+    Spec("esg.sheets_per_page", "float", "ESG / Sustainability", "Sheets per printed page",
+         0.85, "Page-count deltas are impressions; a portion print duplex, so "
+         "fewer physical sheets than pages. <1.0 assumes some duplexing."),
+    Spec("esg.paper_g_per_sheet", "float", "ESG / Sustainability", "Paper mass per sheet (g)",
+         4.5, "One US-Letter sheet of 75 gsm office paper ~= 4.5 g."),
+    Spec("esg.co2_g_per_sheet", "float", "ESG / Sustainability", "CO2e per sheet (g)",
+         4.74, "Estimate ~4.7 g CO2e per A4/Letter sheet (lifecycle: pulp, "
+         "manufacture, transport) — widely cited paper-footprint figure."),
+    Spec("esg.kwh_per_page", "float", "ESG / Sustainability", "Energy per page (kWh)",
+         0.0011, "Estimated office laser print energy per page (~1.1 Wh) "
+         "including imaging/fusing — ENERGY STAR class device."),
+    Spec("esg.sheets_per_tree", "float", "ESG / Sustainability", "Sheets per tree",
+         8333.0, "~8,333 sheets of office paper per tree (one tree ~= 16.67 "
+         "reams of 500) — common pulp-yield estimate."),
+    # Notification delivery retry / dead-letter (see central.worker.jobs.retry_deliveries).
+    # A failed channel send is persisted as a NotificationDelivery and retried by
+    # the worker with exponential backoff; after this many attempts it is
+    # dead-lettered instead of retried forever.
+    Spec("notifications.max_attempts", "int", "Alerts", "Notification max delivery attempts", 5,
+         "How many times to (re)try a failed alert send before dead-lettering it"),
+    Spec("notifications.retry_base_seconds", "int", "Alerts", "Notification retry base backoff (seconds)",
+         60, "First retry waits this long; each further attempt doubles it (capped at 1h)"),
     # Polling (pushed to agents)
     Spec("polling.poll_interval_seconds", "int", "Polling", "Poll interval (seconds)", 300),
     Spec("polling.discovery_interval_seconds", "int", "Polling", "Discovery interval (seconds)", 3600),
@@ -158,7 +189,7 @@ SETTINGS_GROUPS: "Dict[str, tuple]" = {
         "Notifications",
         ["Email (SMTP)", "Microsoft Teams", "Slack", "Webhook (generic)", "FreeScout"],
     ),
-    "alerts": ("Alerts & Reports", ["Alerts", "Reports"]),
+    "alerts": ("Alerts & Reports", ["Alerts", "Reports", "ESG / Sustainability"]),
     "polling": ("Polling & SNMP", ["Polling", "SNMP defaults"]),
     "auth": ("Authentication", ["Single sign-on (OIDC)"]),
     "agents": ("Agents", ["Agent install"]),
