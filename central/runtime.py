@@ -116,6 +116,10 @@ SPECS: List[Spec] = [
     # Alerts
     Spec("alerts.low_supply_pct", "float", "Alerts", "Low-supply threshold (%)", 20.0,
          "Default supply level that counts as 'low' in the dashboard"),
+    Spec("alerts.reorder_lead_days", "int", "Alerts", "Reorder lead time (days)", 14,
+         "Open a predicted-depletion alert when a supply is forecast to run out "
+         "within this many days — set it to how long a replacement cartridge "
+         "takes to arrive so you order before the printer goes dark"),
     Spec("alerts.offline_grace_seconds", "int", "Alerts", "Agent offline grace (seconds)",
          _env.agent_offline_grace_seconds, "Mark an agent offline after this long without a heartbeat"),
     # ESG / Sustainability — turn page-count history into estimated print

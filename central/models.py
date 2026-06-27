@@ -109,6 +109,11 @@ class AlertConditionType(str, enum.Enum):
     error_severity = "error_severity"      # threshold mapped to EventSeverity rank
     offline_minutes = "offline_minutes"    # threshold = minutes offline
     maintenance_due = "maintenance_due"    # no threshold
+    # Forecast-driven: a supply is projected to hit empty within the configured
+    # reorder lead-time (alerts.reorder_lead_days). Raised by the worker's
+    # forecast pass, not by an AlertRule, so it has its own open/resolve
+    # lifecycle (auto-resolves when the cartridge is swapped/refilled).
+    predicted_depletion = "predicted_depletion"
 
 
 class AlertState(str, enum.Enum):
@@ -356,6 +361,14 @@ class Supply(Base):
     current: Mapped[Optional[int]] = mapped_column(Integer, default=None)
     max_capacity: Mapped[Optional[int]] = mapped_column(Integer, default=None)
     unit: Mapped[Optional[str]] = mapped_column(String(40), default=None)
+    # Persisted supply-depletion forecast, written by the worker's forecast pass
+    # (regression fit over the recent depleting segment) so dashboards, the
+    # customer portal, and reports can read a days-to-empty estimate without
+    # re-fitting the reading history on every render. ``None`` means "not yet
+    # trustworthy / nothing depleting"; ``forecast_at`` stamps when it was last
+    # computed so a stale estimate can be aged out or shown with a timestamp.
+    days_to_empty: Mapped[Optional[float]] = mapped_column(Float, default=None)
+    forecast_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), default=None)
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
 
     printer: Mapped[Printer] = relationship(back_populates="supplies")
