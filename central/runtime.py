@@ -137,6 +137,14 @@ SPECS: List[Spec] = [
     Spec("esg.sheets_per_tree", "float", "ESG / Sustainability", "Sheets per tree",
          8333.0, "~8,333 sheets of office paper per tree (one tree ~= 16.67 "
          "reams of 500) — common pulp-yield estimate."),
+    # Notification delivery retry / dead-letter (see central.worker.jobs.retry_deliveries).
+    # A failed channel send is persisted as a NotificationDelivery and retried by
+    # the worker with exponential backoff; after this many attempts it is
+    # dead-lettered instead of retried forever.
+    Spec("notifications.max_attempts", "int", "Alerts", "Notification max delivery attempts", 5,
+         "How many times to (re)try a failed alert send before dead-lettering it"),
+    Spec("notifications.retry_base_seconds", "int", "Alerts", "Notification retry base backoff (seconds)",
+         60, "First retry waits this long; each further attempt doubles it (capped at 1h)"),
     # Polling (pushed to agents)
     Spec("polling.poll_interval_seconds", "int", "Polling", "Poll interval (seconds)", 300),
     Spec("polling.discovery_interval_seconds", "int", "Polling", "Discovery interval (seconds)", 3600),

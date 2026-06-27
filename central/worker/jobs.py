@@ -13,7 +13,9 @@ from sqlalchemy.orm import Session
 
 from central import models as m
 from central import queries
-from central.channels import Notification, active_channels, dispatch
+from central.channels import Notification, active_channels
+from central.channels.delivery import record_dispatch
+from central.channels.delivery import retry_due as _retry_due
 from central.runtime import load_settings
 
 _SEVERITY_RANK = {
@@ -96,6 +98,7 @@ def _open_alert(
     printer: Optional[m.Printer] = None,
     agent: Optional[m.Agent] = None,
     channels: Optional[list] = None,
+    runtime: Optional[dict] = None,
 ) -> Optional[m.Alert]:
     """Open an alert if one isn't already open for this dedupe_key. Returns it (or None)."""
     if _find_open_alert(db, dedupe_key) is not None:
@@ -130,7 +133,11 @@ def _open_alert(
         printer_label=_printer_label(printer) if printer else None,
         alert_id=alert.id,
     )
-    results = dispatch(note, channels or [])
+    # Persist a retryable delivery per channel so a transient channel outage is
+    # re-tried by retry_deliveries instead of being silently dropped.
+    results = record_dispatch(
+        db, alert.id, note, channels or [], runtime=runtime or load_settings(db)
+    )
     alert.notified_channels = [
         {"channel": name, "ok": res.ok, "detail": res.detail} for name, res in results
     ]
@@ -177,7 +184,8 @@ def evaluate_alerts(db: Session, now: Optional[datetime] = None) -> dict:
                         f"No heartbeat for over {rule.threshold} min "
                         f"(last: {last.isoformat() if last else 'never'})."
                     )
-                    if _open_alert(db, rule, key, title, detail, agent=agent, channels=channels):
+                    if _open_alert(db, rule, key, title, detail, agent=agent,
+                                   channels=channels, runtime=runtime):
                         opened += 1
             continue
 
@@ -191,7 +199,8 @@ def evaluate_alerts(db: Session, now: Optional[datetime] = None) -> dict:
                         label = supply.color or supply.type.value
                         title = f"Low {label} on {_printer_label(printer)}"
                         detail = f"{label} at {supply.level_pct:.0f}% (threshold {threshold:.0f}%)."
-                        if _open_alert(db, rule, key, title, detail, printer=printer, channels=channels):
+                        if _open_alert(db, rule, key, title, detail, printer=printer,
+                                       channels=channels, runtime=runtime):
                             opened += 1
 
             elif rule.condition_type == m.AlertConditionType.error_severity:
@@ -207,7 +216,8 @@ def evaluate_alerts(db: Session, now: Optional[datetime] = None) -> dict:
                     active_keys.add(key)
                     title = f"Error on {_printer_label(printer)}"
                     detail = f"{latest.severity.value}: {latest.message}"
-                    if _open_alert(db, rule, key, title, detail, printer=printer, channels=channels):
+                    if _open_alert(db, rule, key, title, detail, printer=printer,
+                                   channels=channels, runtime=runtime):
                         opened += 1
 
     resolved = _resolve_stale(db, active_keys)
@@ -255,7 +265,7 @@ def check_maintenance_due(db: Session, now: Optional[datetime] = None) -> dict:
             title=alert.title, body=alert.detail, severity="warning",
             printer_label=_printer_label(printer) if printer else None, alert_id=alert.id,
         )
-        results = dispatch(note, channels)
+        results = record_dispatch(db, alert.id, note, channels, runtime=runtime)
         alert.notified_channels = [
             {"channel": n, "ok": r.ok, "detail": r.detail} for n, r in results
         ]
@@ -334,3 +344,18 @@ def forecast_supplies(db: Session) -> dict:
             if dte is not None and dte <= 14:
                 flagged += 1
     return {"supplies_forecast_low": flagged}
+
+
+# --------------------------------------------------------------------------- #
+# Notification delivery retry / dead-letter
+# --------------------------------------------------------------------------- #
+def retry_deliveries(db: Session, now: Optional[datetime] = None) -> dict:
+    """Re-send due failed/pending notification deliveries with exponential backoff.
+
+    A channel send that failed when its alert opened was persisted as a
+    NotificationDelivery row; this job re-sends it once its backoff window has
+    elapsed, marks it delivered on success, and dead-letters it after the
+    configured max-attempts cap. Idempotent and safe to run every cycle --
+    delivered/dead rows are terminal and never re-sent (see channels.delivery).
+    """
+    return _retry_due(db, load_settings(db), now or _now())

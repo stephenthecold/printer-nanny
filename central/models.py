@@ -125,6 +125,22 @@ class ChannelType(str, enum.Enum):
     slack = "slack"
 
 
+class DeliveryStatus(str, enum.Enum):
+    """Lifecycle of a single per-channel notification send attempt.
+
+    ``pending``  -- queued / awaiting (re)try at ``next_attempt_at``.
+    ``delivered`` -- the channel reported success; terminal.
+    ``failed``   -- last attempt failed but more retries remain (still due at
+                    ``next_attempt_at``); functionally a retryable ``pending``.
+    ``dead``     -- exhausted the max-attempts cap; terminal, dead-lettered.
+    """
+
+    pending = "pending"
+    delivered = "delivered"
+    failed = "failed"
+    dead = "dead"
+
+
 class CommandType(str, enum.Enum):
     rescan = "rescan"
     poll_now = "poll_now"
@@ -474,6 +490,51 @@ class NotificationChannel(Base):
     scope_id: Mapped[Optional[int]] = mapped_column(Integer, default=None)
     enabled: Mapped[bool] = mapped_column(Boolean, default=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+
+
+class NotificationDelivery(Base):
+    """Durable per-channel send attempt for an alert -- the retry/dead-letter log.
+
+    Alert dedupe suppresses re-notification while an alert stays open, so a
+    failed channel send used to be recorded on ``Alert.notified_channels`` and
+    then dropped forever -- a transient SMTP/Slack/webhook outage silently lost
+    the alert. Each (alert, channel) send now gets a row here: on failure it
+    stays ``pending``/``failed`` with an exponential-backoff ``next_attempt_at``,
+    the ``retry_deliveries`` worker job re-sends it when due, marks it
+    ``delivered`` on success, and dead-letters it (``dead``) once it has used up
+    the configured max-attempts cap.
+
+    ``channel_key`` is the active-channel name (e.g. "Email", "Slack") so the
+    retry job can rebuild the live channel from ``active_channels`` without
+    pinning to a row that may have been reconfigured. ``payload`` carries the
+    rendered Notification fields so a re-send is exactly what the first send
+    would have been even if the printer/client was since renamed or removed.
+    """
+
+    __tablename__ = "notification_deliveries"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    alert_id: Mapped[Optional[int]] = mapped_column(
+        ForeignKey("alerts.id", ondelete="CASCADE"), default=None, index=True
+    )
+    # Active-channel name as returned by active_channels() (the dispatch key).
+    channel_key: Mapped[str] = mapped_column(String(120), index=True)
+    status: Mapped[DeliveryStatus] = mapped_column(
+        _enum(DeliveryStatus), default=DeliveryStatus.pending, index=True
+    )
+    attempts: Mapped[int] = mapped_column(Integer, default=0)
+    last_error: Mapped[Optional[str]] = mapped_column(Text, default=None)
+    # When this delivery is next eligible for a (re)send. NULL == due now.
+    next_attempt_at: Mapped[Optional[datetime]] = mapped_column(
+        DateTime(timezone=True), default=None, index=True
+    )
+    # Frozen Notification fields (title/body/severity + context labels) so a
+    # retry reproduces the original message regardless of later DB changes.
+    payload: Mapped[Optional[dict]] = mapped_column(JSON, default=None)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=utcnow, onupdate=utcnow
+    )
 
 
 class Command(Base):
