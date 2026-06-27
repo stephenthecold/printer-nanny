@@ -433,8 +433,25 @@ class MaintenanceSchedule(Base):
     name: Mapped[str] = mapped_column(String(200))
     interval_days: Mapped[Optional[int]] = mapped_column(Integer, default=None)
     page_threshold: Mapped[Optional[int]] = mapped_column(Integer, default=None)
+    # Component-life trigger: when set, the worker opens a maintenance-due alert
+    # once the matching component-life Supply row (belt / fuser / laser / drum /
+    # PF kit — populated by the Brother provider's maintenance blob) drops to
+    # ``life_threshold`` percent or below. Independent of interval_days /
+    # page_threshold; a schedule may use any combination. ``component_type`` is
+    # one of the slugs in MaintenanceSchedule.COMPONENT_TYPES.
+    component_type: Mapped[Optional[str]] = mapped_column(String(32), default=None)
+    life_threshold: Mapped[Optional[float]] = mapped_column(Float, default=None)
     next_due: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), default=None)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+
+    # Operator-selectable component types -> how they map onto the Supply rows
+    # the Brother provider writes (see agent brother_maintenance._EXTRA_PART_ROWS):
+    #   fuser  -> Supply(type=fuser)
+    #   drum   -> Supply(type=drum)               (any color)
+    #   belt   -> Supply(type=other, color=belt)
+    #   laser  -> Supply(type=other, color=laser)
+    #   pf_kit -> Supply(type=other, color in {pf-kit-mp, pf-kit-1})
+    COMPONENT_TYPES = ("fuser", "drum", "belt", "laser", "pf_kit")
 
 
 class MaintenanceRecord(Base):

@@ -20,6 +20,7 @@
           <th class="py-2">Scope</th>
           <th class="py-2">Every</th>
           <th class="py-2">At page</th>
+          <th class="py-2">Component</th>
           <th class="py-2">Next due</th>
           <th class="py-2 w-44 text-right pr-4"></th>
         </tr>
@@ -43,11 +44,18 @@
           </td>
           <td class="py-2 text-xs tabular-nums">{{ (s.interval_days|string ~ ' day(s)') if s.interval_days else '—' }}</td>
           <td class="py-2 text-xs tabular-nums">{{ '{:,}'.format(s.page_threshold) if s.page_threshold else '—' }}</td>
+          <td class="py-2 text-xs">
+            {% if s.component_type %}
+            <span class="px-1.5 py-0.5 rounded bg-amber-100 text-amber-700">{{ s.component_type }} ≤ {{ '%g'|format(s.life_threshold) }}%</span>
+            {% else %}<span class="text-slate-300">—</span>{% endif %}
+          </td>
           <td class="py-2 text-xs tabular-nums">
             <form method="post" action="/manage/maintenance/schedules/{{ s.id }}" class="flex items-center gap-1">
               <input type="date" name="next_due" value="{{ s.next_due.strftime('%Y-%m-%d') if s.next_due else '' }}" class="border rounded px-1 py-0.5 text-xs" />
               <input type="hidden" name="interval_days" value="{{ s.interval_days or '' }}" />
               <input type="hidden" name="page_threshold" value="{{ s.page_threshold or '' }}" />
+              <input type="hidden" name="component_type" value="{{ s.component_type or '' }}" />
+              <input type="hidden" name="life_threshold" value="{{ s.life_threshold if s.life_threshold is not none else '' }}" />
               <button class="text-xs bg-slate-700 text-white rounded px-2 py-0.5">Save</button>
             </form>
           </td>
@@ -101,6 +109,22 @@
           <input name="page_threshold" type="number" min="1" placeholder="50000" class="w-full border rounded px-3 py-2 text-sm" />
         </label>
       </div>
+      <div class="grid grid-cols-2 gap-2">
+        <label class="block">
+          <span class="text-xs text-slate-500">Component life</span>
+          <select name="component_type" class="w-full border rounded px-3 py-2 text-sm">
+            <option value="">— none —</option>
+            {% for c in component_types %}
+            <option value="{{ c }}">{{ c }}</option>
+            {% endfor %}
+          </select>
+        </label>
+        <label class="block">
+          <span class="text-xs text-slate-500">at % or below</span>
+          <input name="life_threshold" type="number" min="0" max="100" step="1" placeholder="10" class="w-full border rounded px-3 py-2 text-sm" />
+        </label>
+      </div>
+      <span class="block text-xs text-slate-400 -mt-1">Triggers when the matching fuser/drum/belt/laser/PF-kit life drops to this percent.</span>
       <label class="block">
         <span class="text-xs text-slate-500">Next due</span>
         <input name="next_due" type="date" class="w-full border rounded px-3 py-2 text-sm" />

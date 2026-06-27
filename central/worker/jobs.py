@@ -232,6 +232,37 @@ def evaluate_alerts(db: Session, now: Optional[datetime] = None) -> dict:
 
 
 # --------------------------------------------------------------------------- #
+# Component-life maintenance — match a schedule's component_type onto the
+# component-life Supply rows the Brother provider writes (belt/fuser/laser/
+# drum/PF-kit). See central.models.MaintenanceSchedule.COMPONENT_TYPES and the
+# agent's brother_maintenance._EXTRA_PART_ROWS for the type/color labelling.
+# --------------------------------------------------------------------------- #
+def _component_supply_matches(supply: m.Supply, component_type: str) -> bool:
+    """True when ``supply`` is the component-life row for ``component_type``."""
+    if component_type == "fuser":
+        return supply.type == m.SupplyType.fuser
+    if component_type == "drum":
+        return supply.type == m.SupplyType.drum
+    if component_type == "belt":
+        return supply.type == m.SupplyType.other and supply.color == "belt"
+    if component_type == "laser":
+        return supply.type == m.SupplyType.other and supply.color == "laser"
+    if component_type == "pf_kit":
+        return supply.type == m.SupplyType.other and supply.color in ("pf-kit-mp", "pf-kit-1")
+    return False
+
+
+def _component_schedule_printers(db: Session, sched: m.MaintenanceSchedule):
+    """Approved printers a component schedule applies to (specific / model / fleet)."""
+    stmt = select(m.Printer).where(m.Printer.discovery_state == m.DiscoveryState.approved)
+    if sched.printer_id:
+        stmt = stmt.where(m.Printer.id == sched.printer_id)
+    elif sched.model:
+        stmt = stmt.where(m.Printer.model.ilike(f"%{sched.model}%"))
+    return db.scalars(stmt)
+
+
+# --------------------------------------------------------------------------- #
 # Maintenance due — schedule-driven (no alert_rule needed), with its own
 # open/dispatch/resolve lifecycle so a due schedule actually notifies, and the
 # alert clears once the schedule's next_due is rolled forward (e.g. service logged).
@@ -243,26 +274,18 @@ def check_maintenance_due(db: Session, now: Optional[datetime] = None) -> dict:
     opened = 0
     active_keys: set[str] = set()
 
-    for sched in queries.maintenance_due(db, now):
-        printer = db.get(m.Printer, sched.printer_id) if sched.printer_id else None
-        # Page-threshold schedules also require the page count to be reached.
-        if sched.page_threshold and printer and printer.page_count is not None:
-            if printer.page_count < sched.page_threshold:
-                continue
-        due_str = sched.next_due.date().isoformat() if sched.next_due else "due"
-        key = f"maintenance:{sched.id}:{due_str}"
-        active_keys.add(key)
+    def _open_maintenance_alert(key, title, detail, printer):
+        """Open + dispatch a maintenance-due alert for ``key`` unless one's already open."""
         if _find_open_alert(db, key) is not None:
-            continue
-        label = _printer_label(printer) if printer else (sched.model or "fleet")
+            return False
         alert = m.Alert(
             rule_id=None,
             printer_id=printer.id if printer else None,
             type=m.AlertConditionType.maintenance_due,
             severity=m.EventSeverity.warning,
             state=m.AlertState.open,
-            title=f"Maintenance due: {sched.name} ({label})",
-            detail=f"'{sched.name}' is due as of {due_str}.",
+            title=title,
+            detail=detail,
             dedupe_key=key,
         )
         db.add(alert)
@@ -275,9 +298,60 @@ def check_maintenance_due(db: Session, now: Optional[datetime] = None) -> dict:
         alert.notified_channels = [
             {"channel": n, "ok": r.ok, "detail": r.detail} for n, r in results
         ]
-        opened += 1
+        return True
 
-    # Resolve maintenance alerts whose schedule is no longer due (next_due rolled forward).
+    for sched in queries.maintenance_due(db, now):
+        printer = db.get(m.Printer, sched.printer_id) if sched.printer_id else None
+        # Page-threshold schedules also require the page count to be reached.
+        if sched.page_threshold and printer and printer.page_count is not None:
+            if printer.page_count < sched.page_threshold:
+                continue
+        due_str = sched.next_due.date().isoformat() if sched.next_due else "due"
+        key = f"maintenance:{sched.id}:{due_str}"
+        active_keys.add(key)
+        label = _printer_label(printer) if printer else (sched.model or "fleet")
+        if _open_maintenance_alert(
+            key,
+            f"Maintenance due: {sched.name} ({label})",
+            f"'{sched.name}' is due as of {due_str}.",
+            printer,
+        ):
+            opened += 1
+
+    # Component-life schedules: open when a matching component-life Supply row
+    # has dropped to (or below) the schedule's life_threshold percent. Dedupe
+    # per (schedule, printer); the key drops out — and the alert auto-resolves
+    # below — once the part is serviced and its % climbs back above threshold.
+    for sched in queries.component_maintenance_schedules(db):
+        ctype = sched.component_type
+        threshold = sched.life_threshold
+        if ctype is None or threshold is None:
+            continue
+        for printer in _component_schedule_printers(db, sched):
+            low = [
+                s
+                for s in printer.supplies
+                if _component_supply_matches(s, ctype)
+                and s.level_pct is not None
+                and s.level_pct <= threshold
+            ]
+            if not low:
+                continue
+            worst = min(low, key=lambda s: s.level_pct)
+            key = f"maintenance:component:{sched.id}:printer:{printer.id}:{ctype}"
+            active_keys.add(key)
+            part = (worst.description or ctype).strip()
+            if _open_maintenance_alert(
+                key,
+                f"Maintenance due: {sched.name} ({_printer_label(printer)})",
+                f"{part} life at {worst.level_pct:.0f}% "
+                f"(threshold {threshold:.0f}%) for '{sched.name}'.",
+                printer,
+            ):
+                opened += 1
+
+    # Resolve maintenance alerts whose schedule is no longer due (next_due rolled
+    # forward, or a component's life climbed back above threshold / was serviced).
     resolved = 0
     for alert in db.scalars(
         select(m.Alert).where(

@@ -165,6 +165,24 @@ def maintenance_due(db: Session, now: Optional[datetime] = None) -> list[m.Maint
     )
 
 
+def component_maintenance_schedules(db: Session) -> list[m.MaintenanceSchedule]:
+    """Schedules that trigger on component-life percentage (not a date/page).
+
+    These are evaluated against the matching component-life Supply rows on the
+    target printer(s) rather than ``next_due``, so they don't require a date.
+    """
+    return list(
+        db.scalars(
+            select(m.MaintenanceSchedule)
+            .where(
+                m.MaintenanceSchedule.component_type.is_not(None),
+                m.MaintenanceSchedule.life_threshold.is_not(None),
+            )
+            .order_by(m.MaintenanceSchedule.id.asc())
+        )
+    )
+
+
 def per_client_rollup(db: Session) -> list[dict]:
     """One row per client: counts of approved printers, open alerts, low supplies.
 
