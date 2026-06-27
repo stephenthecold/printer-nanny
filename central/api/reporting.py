@@ -9,10 +9,14 @@ from sqlalchemy.orm import Session
 
 from central import queries
 from central.db import get_db
-from central.deps import require_user
+from central.deps import require_staff
 
+# These endpoints return cross-tenant operator aggregates (fleet rollups, all
+# recent errors, pending-discovery and agent counts) and ``?client_id=`` is an
+# operator filter, not a tenant boundary -- so they are staff-only. The
+# customer-facing, tenant-scoped read surface is the CSV exports and /portal.
 router = APIRouter(
-    prefix="/api/v1/reports", tags=["reporting"], dependencies=[Depends(require_user)]
+    prefix="/api/v1/reports", tags=["reporting"], dependencies=[Depends(require_staff)]
 )
 
 

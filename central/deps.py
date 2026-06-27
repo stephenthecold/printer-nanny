@@ -49,6 +49,20 @@ def require_admin(user: m.User = Depends(require_user)) -> m.User:
     return user
 
 
+def require_staff(user: m.User = Depends(require_user)) -> m.User:
+    """Operator-only API surface (management CRUD + fleet reporting).
+
+    admin/tech are the operator roles; client_readonly users are pinned to the
+    customer ``/portal`` and their own tenant-scoped CSV exports, and must never
+    reach the cross-tenant management/reporting JSON. Mirrors the dashboard's
+    ``_MANAGER_ROLES`` gate so the JSON API enforces the same boundary the HTML
+    management routes already do.
+    """
+    if user.role not in (m.UserRole.admin, m.UserRole.tech):
+        raise HTTPException(status.HTTP_403_FORBIDDEN, "Staff (admin or tech) only")
+    return user
+
+
 def touch_heartbeat(
     agent: m.Agent,
     version: Optional[str] = None,
