@@ -7,7 +7,7 @@ to translate raw SNMP gets into the normalized values the central API stores.
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Optional
+from typing import Optional, Tuple
 
 # prtMarkerSuppliesLevel / prtMarkerSuppliesMaxCapacity sentinel values (RFC 3805).
 LEVEL_OTHER = -1          # an unknown/other status, level not reported numerically
@@ -36,6 +36,95 @@ _SUPPLY_TYPE_BY_CODE = {
     15: "fuser",
     19: "staples",
 }
+
+# Type codes the standard MIB treats as non-specific. When the code is one of
+# these (or absent) we lean on the description text to classify the supply,
+# because plenty of devices report everything as other(1)/unknown(2).
+_GENERIC_TYPE_CODES = {None, 1, 2}
+
+# Description keyword → SupplyType string. Order matters: the first phrase that
+# appears in the (lowercased) description wins, so put the more specific
+# multi-word phrases before the bare words they contain. Only emits SupplyType
+# values that exist in central.models.SupplyType.
+_DESC_TYPE_KEYWORDS = (
+    ("toner collection", "waste"),   # "Toner Collection Unit/Box" == waste toner
+    ("waste toner", "waste"),
+    ("waste", "waste"),
+    ("imaging unit", "drum"),        # Xerox/OKI name for the OPC drum
+    ("photoconductor", "drum"),
+    ("photo conductor", "drum"),
+    ("imaging drum", "drum"),
+    ("drum", "drum"),
+    ("opc", "drum"),
+    ("fusing", "fuser"),
+    ("fuser", "fuser"),
+    ("developer", "developer"),
+    ("staple", "staples"),
+    ("ink", "ink"),
+    ("toner", "toner"),
+    ("cartridge", "toner"),          # bare "Black Cartridge" == toner cartridge
+)
+
+
+def decode_supply_text(value: Optional[str], fallback: Optional[str] = None) -> Optional[str]:
+    """Turn a possibly hex-encoded SNMP OCTET STRING into readable text.
+
+    pysnmp renders an OCTET STRING that isn't clean ASCII as a ``0x...`` hex
+    string (e.g. ``0x426c61636b`` for ``Black``). Some printers stuff
+    prtMarkerSuppliesDescription with bytes that trip that path even though the
+    payload is perfectly good UTF-8/Latin-1 text. Decode those back to text:
+
+    - A value already in readable text passes through unchanged.
+    - A ``0x...`` hex string is decoded hex→bytes→text (UTF-8, then Latin-1),
+      with NULs and other control characters stripped.
+    - If the decoded bytes still aren't printable text (genuine binary), return
+      ``fallback`` rather than leaking the ``0x...`` blob to the UI.
+    """
+    if value is None:
+        return None
+    text = value.strip()
+    if not text:
+        return fallback
+
+    lowered = text.lower()
+    if lowered.startswith("0x"):
+        hexpart = text[2:].replace(" ", "")
+        if len(hexpart) % 2:
+            hexpart = "0" + hexpart
+        try:
+            raw = bytes.fromhex(hexpart)
+        except ValueError:
+            # Not actually hex (e.g. a model literally named "0xABC something")
+            # -- treat as plain text.
+            return " ".join(text.split())
+        decoded = _bytes_to_text(raw)
+        if decoded is None:
+            return fallback
+        return " ".join(decoded.split()) or fallback
+
+    # Already-readable text: collapse internal whitespace runs to a single space.
+    return " ".join(text.split())
+
+
+def _bytes_to_text(raw: bytes) -> Optional[str]:
+    """Decode bytes to a clean printable string, or None if it isn't text."""
+    for encoding in ("utf-8", "latin-1"):
+        try:
+            decoded = raw.decode(encoding)
+        except (UnicodeDecodeError, ValueError):
+            continue
+        # Strip NULs and other C0/C1 control chars (keep normal whitespace).
+        cleaned = "".join(
+            ch for ch in decoded if ch in ("\t", " ") or (ch.isprintable() and ch != "\x7f")
+        ).strip()
+        if not cleaned:
+            return None
+        # Require the result to be mostly printable -- guards against latin-1
+        # happily decoding random binary into mojibake.
+        printable = sum(1 for ch in cleaned if ch.isprintable())
+        if printable / len(cleaned) >= 0.8:
+            return cleaned
+    return None
 
 
 @dataclass
@@ -94,3 +183,53 @@ def supply_type_from_code(code: Optional[int]) -> str:
     if code is None:
         return "other"
     return _SUPPLY_TYPE_BY_CODE.get(code, "other")
+
+
+def supply_type_from_description(description: Optional[str]) -> Optional[str]:
+    """Best-effort SupplyType from the description text, or None if no keyword hits.
+
+    Used to rescue supplies whose prtMarkerSuppliesType is generic/other but
+    whose name ("Black Drum", "Fuser Unit", "Toner Collection Box") tells us
+    exactly what they are.
+    """
+    if not description:
+        return None
+    text = description.lower()
+    for keyword, supply_type in _DESC_TYPE_KEYWORDS:
+        if keyword in text:
+            return supply_type
+    return None
+
+
+def classify_supply(
+    description: Optional[str],
+    type_code: Optional[int] = None,
+    colorant: Optional[str] = None,
+) -> Tuple[str, Optional[str]]:
+    """Resolve a supply's (SupplyType, color) from its code, name and colorant.
+
+    The MIB type code wins when it's specific; when it's generic/other/unknown
+    (or absent) we classify from the description keywords. Color is always
+    extracted from colorant/description so "Black Drum" -> (drum, black) and
+    "Cyan Toner Cartridge" -> (toner, cyan). Returns a SupplyType string that is
+    always valid for central.models.SupplyType (falls back to "other").
+    """
+    color = normalize_color(description, colorant)
+
+    if type_code is not None and type_code not in _GENERIC_TYPE_CODES:
+        coded = _SUPPLY_TYPE_BY_CODE.get(type_code)
+        if coded is not None:
+            return coded, color
+
+    from_desc = supply_type_from_description(description)
+    if from_desc is not None:
+        return from_desc, color
+
+    # No component keyword, but a bare color name ("Black", "Cyan") on a laser
+    # device means a toner cartridge -- that's how vendors label the slots.
+    if color is not None:
+        return "toner", color
+
+    # Description gave us no signal at all. Fall back to whatever the code
+    # mapped to (which is "other" for generic codes); keep the readable name.
+    return supply_type_from_code(type_code), color

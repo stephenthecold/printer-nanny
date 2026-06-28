@@ -38,6 +38,7 @@ from printer_nanny_agent.providers.brother_ews import BrotherEwsProvider
 from printer_nanny_agent.providers.brother_maintenance import BrotherMaintenanceProvider
 from printer_nanny_agent.providers.brother_pjl import BrotherPjlProvider
 from printer_nanny_agent.snmp import SnmpBackend, SnmpError, SnmpParams
+from printer_nanny_agent.snmp_parse import normalize_color
 
 # Active alert: human-readable text scalar (we read .0 as an instance).
 OID_ACTIVE_ALERT_TEXT = "1.3.6.1.4.1.2435.2.3.9.4.2.1.5.4.5.2"
@@ -110,6 +111,77 @@ def _parse_alert(text: Optional[str]) -> tuple[Optional[str], Optional[str]]:
     return severity, color
 
 
+def _decode_hex_description(desc: Optional[str]) -> Optional[str]:
+    """Turn a pysnmp-rendered ``0x...`` OCTET STRING into readable text.
+
+    Some Brother (and other-vendor) firmwares return the standard-MIB
+    ``prtMarkerSuppliesDescription`` as a non-ASCII / binary octet string, which
+    pysnmp's prettyPrint renders as a bare hex blob like
+    ``0x426c61636b`` ("Black"). Stored verbatim that leaks onto the dashboard as
+    a raw hex string AND defeats the name->color mapping (so every cartridge
+    falls through to type "other" / no color). Decode it here, defensively:
+
+    * Strip the ``0x`` prefix and any whitespace/colon separators.
+    * Require an even-length pure-hex body; anything else is left untouched
+      (it's almost certainly already plain text).
+    * Decode UTF-8 first (Brother uses it for accented model names), falling
+      back to latin-1 so no byte sequence can raise.
+    * Trim trailing NULs/control chars some firmwares pad the field with.
+
+    Returns the readable string, or the original value when it isn't decodable
+    hex (so a normal "Black Toner Cartridge" passes straight through). Never
+    returns a ``0x...`` string.
+    """
+    if not desc:
+        return desc
+    text = desc.strip()
+    if not text.lower().startswith("0x"):
+        return desc
+    body = text[2:].replace(" ", "").replace(":", "").replace("\n", "")
+    if not body or len(body) % 2 or any(c not in "0123456789abcdefABCDEF" for c in body):
+        # Not a clean hex payload -- leave it alone rather than mangle it.
+        return desc
+    try:
+        raw = bytes.fromhex(body)
+    except ValueError:
+        return desc
+    decoded = raw.decode("utf-8", errors="replace")
+    if "�" in decoded:
+        # Replacement chars mean it wasn't UTF-8; latin-1 round-trips any byte.
+        decoded = raw.decode("latin-1", errors="replace")
+    # Drop replacement chars, NULs, and other control padding some firmwares
+    # append, then keep only printable text.
+    decoded = "".join(c for c in decoded if c == " " or (c.isprintable() and c != "�")).strip()
+    # If the payload decoded to nothing printable (e.g. "0x00"), return None --
+    # an empty/unknown name is honest; we must NEVER hand back a 0x... string.
+    return decoded or None
+
+
+def _harden_descriptions(reading: dict) -> None:
+    """Make every standard-MIB Brother supply description human-readable.
+
+    Runs BEFORE the maintenance/PJL/EWS passes so:
+    * no supply ever ships a raw ``0x...`` hex description, and
+    * a now-readable description ("Black") can re-derive the missing color,
+      which is what the maintenance blob keys (``toner:black``) match on.
+
+    Only touches the standard-MIB rows already present in the reading; the
+    Brother passes add their own rows with readable names and aren't seen here.
+    """
+    for supply in reading.get("supplies", []):
+        desc = supply.get("description")
+        readable = _decode_hex_description(desc)
+        if readable != desc:
+            supply["description"] = readable
+        # Backfill color from the (now readable) description when absent -- a
+        # hex-named "Black" toner arrived colorless, which would otherwise
+        # never match the maintenance blob's toner:black record.
+        if supply.get("color") is None:
+            color = normalize_color(supply.get("description"))
+            if color:
+                supply["color"] = color
+
+
 def _toner_gaps(reading: dict) -> bool:
     """True when any toner still lacks a REAL percentage (none, or only a
     bucket estimate). Drives whether the PJL / EWS fallbacks are worth the
@@ -150,6 +222,12 @@ class BrotherProvider(PrinterProvider):
         reading: dict,
         sys_object_id: Optional[str],
     ) -> dict:
+        # --- Pass 0: harden standard-MIB descriptions (decode 0x... octet
+        # strings to readable text + backfill color) BEFORE anything keys on
+        # (type, color). Keeps hex names off the dashboard and lets the
+        # maintenance blob's color-keyed records find their toner rows. ---
+        _harden_descriptions(reading)
+
         # --- Pass 1: maintenance blob (exact percentages, read-only SNMP) ---
         reading = await _MAINTENANCE.augment(backend, ip, params, reading, sys_object_id)
 
