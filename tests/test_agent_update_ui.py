@@ -28,7 +28,9 @@ from central.agent_release import (
 from central.main import app
 from central.security import generate_api_key, hash_api_key, hash_password
 
-TARGET = "0.3.0"  # what bundled_agent_version() resolves to in this checkout
+# Derive the target from the live bundled version so these tests survive an
+# agent-base version bump (the served target is whatever this checkout ships).
+TARGET = bundled_agent_version()
 
 
 # --------------------------------------------------------------------------- #
@@ -60,14 +62,14 @@ def test_needs_update_older_is_true():
 
 
 def test_needs_update_equal_is_false():
-    assert needs_update("0.3.0+20260601-000000", TARGET) is False
-    assert needs_update("0.3.0", TARGET) is False
+    assert needs_update(f"{TARGET}+20260601-000000", TARGET) is False
+    assert needs_update(TARGET, TARGET) is False
 
 
 def test_needs_update_newer_is_false():
     # Ahead/canary agent -- not "needs update".
-    assert needs_update("0.4.0", TARGET) is False
-    assert needs_update("1.0.0+20260601-000000", TARGET) is False
+    assert needs_update("99.0.0", TARGET) is False
+    assert needs_update("99.9.0+20260601-000000", TARGET) is False
 
 
 def test_needs_update_none_is_false_but_unknown_state():
@@ -103,8 +105,8 @@ def test_compare_tolerates_leading_v_and_prerelease_suffix():
 
 def test_update_state_buckets():
     assert update_state("0.1.0+x", TARGET) == "outdated"
-    assert update_state("0.3.0", TARGET) == "current"
-    assert update_state("0.9.0", TARGET) == "ahead"
+    assert update_state(TARGET, TARGET) == "current"
+    assert update_state("99.0.0", TARGET) == "ahead"
     assert update_state(None, TARGET) == "unknown"
 
 
