@@ -58,6 +58,26 @@
     <p class="text-xs text-amber-800 mt-1">Requires Python 3.10+ -- install once with <code class="select-all">winget install Python.Python.3.12 -e --silent</code>.</p>
   </div>
 
+  <div class="mt-3 border-t border-amber-200 pt-3">
+    <div class="text-xs font-medium text-amber-900 mb-1">Windows Server -- prebuilt MSI (no Python, no internet on the target)</div>
+    {% if msi_available %}
+    <form method="post" action="/manage/agents/msi">
+      <input type="hidden" name="agent_id" value="{{ new_key.id }}">
+      <input type="hidden" name="api_key" value="{{ new_key.key }}">
+      <button class="rounded bg-sky-700 hover:bg-sky-800 text-white text-sm px-3 py-1.5">Download Windows MSI</button>
+    </form>
+    <p class="text-xs text-amber-800 mt-1">
+      Bundles the Python runtime, the agent, and the service wrapper with
+      <strong>this agent's enrollment baked in</strong>, and registers the
+      <code>PrinterNannyAgent</code> service. Targets Windows Server 2016-2025.
+      The first build downloads the runtime (~30s); later builds are near-instant.
+      Double-click the MSI on the server (or deploy via GPO).
+    </p>
+    {% else %}
+    <p class="text-xs text-amber-800">MSI builder unavailable in this central image: {{ msi_reason }}</p>
+    {% endif %}
+  </div>
+
   <details class="mt-3">
     <summary class="text-xs text-amber-900 cursor-pointer">Docker alternative</summary>
     <div class="relative mt-1">

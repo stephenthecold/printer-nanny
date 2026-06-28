@@ -73,6 +73,11 @@ These are standing instructions for anyone (human or agent) doing work in this r
   - `audit.py` — `record(db, request, user, action, target, detail)` writer used
     at every security-relevant boundary; never raises.
   - `reports.py` — scheduled weekly fleet email + monthly billing CSV.
+  - `msi_builder.py` — builds a self-contained Windows `.msi` for an enrolled
+    agent in-container (msitools/`wixl`): bundles the Python embeddable runtime
+    + agent wheel + NSSM with enrollment baked into `config.toml`; declarative
+    `ServiceInstall` (no custom action), Server 2016→2025. Surfaced as a
+    "Download Windows MSI" button on the Agents page.
   - `auth_oidc.py`, `auth_oauth_smtp.py` — pluggable SSO + OAuth SMTP.
   - `snmp_parse.py` — brand-agnostic SNMP supply/level parsing (shared w/ agent).
   - `snmp.md` — Printer-MIB OID reference.
@@ -86,7 +91,8 @@ These are standing instructions for anyone (human or agent) doing work in this r
   - `updater.py` — self-update via `update_agent` command; writes
     `.pn-update-result.json` so the dashboard can show success/failure.
 - `migrations/` — Alembic environment + versions (0001 → 0013).
-- `deploy/` — Caddyfile, installer scripts, sample systemd unit.
+- `deploy/` — Caddyfile, installer scripts (`install-agent.sh`/`.ps1`), sample
+  systemd unit, and `WINDOWS-MSI-TESTING.md` (build + Server 2016→2025 smoke).
 - `tests/` — pytest suite (~413 tests; ~25s end-to-end on Postgres-less SQLite).
 
 ## Conventions
@@ -195,4 +201,6 @@ generic webhook. Attachments supported on email for reports.
 
 **Operator surface**: grouped settings (six tabs), agents page with collapsed
 discovery + diagnostics, conditional Approvals nav, contextual nav badges,
-customer portal for `client_readonly` users.
+customer portal for `client_readonly` users. Per-agent **needs-update** badges +
+scoped "update outdated" bulk action, and one-click **Windows MSI** builder
+(self-contained installer with enrollment baked in, Server 2016→2025).
