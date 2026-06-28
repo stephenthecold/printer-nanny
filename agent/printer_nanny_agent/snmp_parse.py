@@ -85,7 +85,7 @@ def decode_supply_text(value: Optional[str], fallback: Optional[str] = None) -> 
         return None
     text = value.strip()
     if not text:
-        return fallback if fallback is not None else value
+        return fallback
 
     lowered = text.lower()
     if lowered.startswith("0x"):
@@ -97,14 +97,14 @@ def decode_supply_text(value: Optional[str], fallback: Optional[str] = None) -> 
         except ValueError:
             # Not actually hex (e.g. a model literally named "0xABC something")
             # -- treat as plain text.
-            return text
+            return " ".join(text.split())
         decoded = _bytes_to_text(raw)
         if decoded is None:
             return fallback
-        return decoded
+        return " ".join(decoded.split()) or fallback
 
-    # Already-readable text: hand it back unchanged.
-    return text
+    # Already-readable text: collapse internal whitespace runs to a single space.
+    return " ".join(text.split())
 
 
 def _bytes_to_text(raw: bytes) -> Optional[str]:
