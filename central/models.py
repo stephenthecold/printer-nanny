@@ -612,13 +612,26 @@ class User(Base):
     # Null for SSO-only users (no local password). Local users have a hash.
     password_hash: Mapped[Optional[str]] = mapped_column(String(256), default=None)
     email: Mapped[Optional[str]] = mapped_column(String(200), unique=True, default=None)
-    auth_provider: Mapped[str] = mapped_column(String(40), default="local")  # local | oidc
+    auth_provider: Mapped[str] = mapped_column(String(40), default="local")  # local | oidc | scim
     role: Mapped[UserRole] = mapped_column(_enum(UserRole), default=UserRole.tech)
+    # Account-active flag (SCIM lifecycle / manual deactivation). A deactivated
+    # user is treated as deprovisioned: login is rejected (see the login route
+    # and central.deps.current_user) but the row is kept so the audit trail and
+    # any historical references survive. This is the enterprise off-boarding
+    # gate -- an IdP flips ``active`` to false via SCIM PATCH on termination.
+    active: Mapped[bool] = mapped_column(Boolean, default=True, server_default="1")
+    # SCIM external id: the IdP's stable identifier for this user, echoed back
+    # in the SCIM ``externalId`` field so the provisioning system can correlate
+    # its record with ours across renames. None for locally-created users.
+    scim_external_id: Mapped[Optional[str]] = mapped_column(String(200), default=None)
     # For client_readonly users: restrict visibility to this client.
     client_id: Mapped[Optional[int]] = mapped_column(
         ForeignKey("clients.id", ondelete="SET NULL"), default=None
     )
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=utcnow, onupdate=utcnow
+    )
 
 
 class AppAsset(Base):

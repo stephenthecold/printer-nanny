@@ -171,6 +171,11 @@ def _match_or_provision(db: Session, email: str, claims: dict, cfg: dict) -> Opt
         select(m.User).where((m.User.email == email) | (m.User.username == email))
     )
     if user is not None:
+        # A deactivated (SCIM-deprovisioned / manually disabled) account must not
+        # be able to log back in via SSO -- treat it as "not provisioned" so the
+        # off-boarding gate holds across both auth paths.
+        if not user.active:
+            return None
         if user.email is None:
             user.email = email
         db.commit()

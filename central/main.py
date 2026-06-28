@@ -7,7 +7,7 @@ from starlette.middleware.sessions import SessionMiddleware
 from uvicorn.middleware.proxy_headers import ProxyHeadersMiddleware
 
 from central import auth_oauth_smtp, auth_oidc
-from central.api import exports, ingest, management, reporting
+from central.api import exports, ingest, management, reporting, scim
 from central.config import settings
 from central.dashboard import backup_routes, installer, manage, routes as dashboard, settings_routes
 from central.db import create_all
@@ -32,6 +32,8 @@ app.include_router(ingest.router)
 app.include_router(management.router)
 app.include_router(reporting.router)
 app.include_router(exports.router)
+# SCIM 2.0 user provisioning / deprovisioning (gated behind scim.enabled).
+app.include_router(scim.router)
 # Dashboard (HTML) + management + settings + SSO
 app.include_router(dashboard.router)
 app.include_router(manage.router)

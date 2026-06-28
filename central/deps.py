@@ -30,11 +30,20 @@ def authenticated_agent(
 
 
 def current_user(request: Request, db: Session = Depends(get_db)) -> Optional[m.User]:
-    """Return the logged-in dashboard user from the signed session, or None."""
+    """Return the logged-in dashboard user from the signed session, or None.
+
+    A deactivated account (``User.active is False``) is treated as logged out:
+    it resolves to ``None`` so a session that was live when the user was
+    deprovisioned (e.g. via SCIM PATCH ``active=false``) stops working on its
+    very next request, not just at the next login attempt.
+    """
     uid = request.session.get("user_id")
     if not uid:
         return None
-    return db.get(m.User, uid)
+    user = db.get(m.User, uid)
+    if user is None or not user.active:
+        return None
+    return user
 
 
 def require_user(user: Optional[m.User] = Depends(current_user)) -> m.User:

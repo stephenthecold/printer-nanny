@@ -24,7 +24,10 @@ _templates = Jinja2Templates(directory=str(Path(__file__).parent / "templates"))
 
 def _user(request: Request, db: Session):
     uid = request.session.get("user_id")
-    return db.get(m.User, uid) if uid else None
+    user = db.get(m.User, uid) if uid else None
+    # A deactivated (SCIM-deprovisioned) account is treated as logged out so a
+    # live cookie stops working on its next request, not just at next login.
+    return user if (user is not None and user.active) else None
 
 
 def _login_redirect() -> RedirectResponse:
@@ -85,6 +88,14 @@ def login(
     user = db.scalar(select(m.User).where(m.User.username == username))
     if user is None or not verify_password(password, user.password_hash):
         record_anonymous(db, request, username, "login.failed")
+        db.commit()
+        return _render(request, "login.html", db=db, error="Invalid credentials")
+    # Deactivated (deprovisioned) accounts cannot log in even with a valid
+    # password -- the same generic message so we don't leak that the account
+    # exists-but-is-disabled. This is the SCIM off-boarding gate at the login
+    # boundary (current_user enforces it for already-live sessions).
+    if not user.active:
+        record_anonymous(db, request, username, "login.deactivated")
         db.commit()
         return _render(request, "login.html", db=db, error="Invalid credentials")
     request.session["user_id"] = user.id
