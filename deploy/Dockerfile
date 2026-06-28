@@ -3,6 +3,13 @@ FROM python:3.12-slim
 ENV PYTHONUNBUFFERED=1 PYTHONDONTWRITEBYTECODE=1
 WORKDIR /app
 
+# msitools (msiinfo/msiextract) + wixl let central build a real Windows .msi for
+# the agent on demand (central/msi_builder.py). Installed in its own early layer
+# so it's cached across app-code changes.
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends wixl msitools \
+    && rm -rf /var/lib/apt/lists/*
+
 # Install deps first for layer caching.
 COPY pyproject.toml ./
 RUN pip install --no-cache-dir ".[postgres]" || pip install --no-cache-dir \

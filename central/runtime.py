@@ -203,6 +203,13 @@ SPECS: List[Spec] = [
     Spec("agent.docker_image", "str", "Agent install", "Docker image",
          "ghcr.io/stephenthecold/printer-nanny-agent:latest",
          "Image used by the Docker install option"),
+    # Source for the Python embeddable runtime bundled into the Windows MSI.
+    # Leave blank to use the pinned python.org default; point at an internal
+    # mirror, a file:// path, or a pre-staged zip in PN_CACHE_DIR for air-gapped
+    # sites that can't reach python.org.
+    Spec("agent.python_embed_url", "str", "Agent install", "Windows MSI: Python embeddable URL", "",
+         "Where the MSI builder fetches the Python embeddable runtime. Blank = "
+         "pinned python.org default. Use an internal mirror or file:// path for air-gapped sites."),
 ]
 
 SPEC_BY_KEY: Dict[str, Spec] = {s.key: s for s in SPECS}

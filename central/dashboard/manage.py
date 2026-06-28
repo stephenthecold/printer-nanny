@@ -6,14 +6,17 @@ creating require any logged-in user; deletes require admin.
 
 from __future__ import annotations
 
+import shutil
+import tempfile
 from pathlib import Path
 from typing import Optional
 
 from fastapi import APIRouter, Depends, Form, Request
-from fastapi.responses import HTMLResponse, RedirectResponse
+from fastapi.responses import FileResponse, HTMLResponse, RedirectResponse
 from fastapi.templating import Jinja2Templates
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
+from starlette.background import BackgroundTask
 
 from central import models as m
 from central.audit import record
@@ -417,11 +420,13 @@ def printer_poll_now(printer_id: int, request: Request, db: Session = Depends(ge
 def agents_home(request: Request, db: Session = Depends(get_db)):
     from central import __version__ as central_version
     from central.agent_release import bundled_agent_version, update_state
+    from central.msi_builder import msi_build_available
     from central.runtime import load_settings
 
     user = _manager(request, db)
     if user is None:
         return _redirect("/login")
+    msi_cap = msi_build_available()
     agents = list(db.scalars(select(m.Agent).order_by(m.Agent.id)))
     # Version the central server serves -> what each agent should be at. Compare
     # by SemVer base (ignoring the install-time marker suffix) so we flag agents
@@ -468,6 +473,8 @@ def agents_home(request: Request, db: Session = Depends(get_db)):
         target_agent_version=target_agent_version,
         agent_update_state=agent_update_state,
         outdated_count=outdated_count,
+        msi_available=msi_cap.available,
+        msi_reason=msi_cap.reason,
         flash=_pop_flash(request),
     )
 
@@ -509,6 +516,74 @@ def agent_rotate_key(agent_id: int, request: Request, db: Session = Depends(get_
             {"id": agent.id, "name": agent.name, "key": api_key}
         )
     return _redirect("/manage/agents")
+
+
+@router.post("/agents/msi")
+def agent_build_msi(
+    request: Request,
+    agent_id: int = Form(...),
+    api_key: str = Form(...),
+    db: Session = Depends(get_db),
+):
+    """Build and stream a self-contained Windows ``.msi`` for one enrolled agent.
+
+    Driven from the post-enrollment "install command" block, where the plaintext
+    API key is on screen exactly once -- the same key is carried here in a hidden
+    field and baked into the MSI's config.toml. The build bundles the Python
+    embeddable runtime + the agent + NSSM, so the target Windows Server needs no
+    Python, no winget, and only outbound HTTPS to central. Manager-gated and
+    audited; the key never appears in the audit detail or logs.
+    """
+    user = _manager(request, db)
+    if user is None:
+        return _redirect("/login")
+    agent = db.get(m.Agent, agent_id)
+    if agent is None:
+        _flash(request, "Agent not found.")
+        return _redirect("/manage/agents")
+
+    from central.msi_builder import build_msi, msi_build_available
+
+    cap = msi_build_available()
+    if not cap.available:
+        record(db, request, user, "agent.msi_build",
+               target=f"agent:{agent.id} {agent.name}", detail=f"unavailable: {cap.reason}")
+        db.commit()
+        _flash(request, cap.reason)
+        return _redirect("/manage/agents")
+
+    from central.runtime import load_settings
+    rt = load_settings(db)
+    central_url = (rt.get("app.public_url") or str(request.base_url)).rstrip("/")
+    embed_url = str(rt.get("agent.python_embed_url") or "").strip() or None
+
+    out_dir = Path(tempfile.mkdtemp(prefix="pn-msi-"))
+    try:
+        result = build_msi(
+            agent_id=agent.id, agent_name=agent.name,
+            central_url=central_url, api_key=api_key, verify_tls=True,
+            out_dir=out_dir, embed_url=embed_url,
+        )
+    except Exception as exc:  # noqa: BLE001 - any build failure -> flash, not a 500
+        shutil.rmtree(out_dir, ignore_errors=True)
+        record(db, request, user, "agent.msi_build",
+               target=f"agent:{agent.id} {agent.name}", detail=f"failed: {exc}")
+        db.commit()
+        _flash(request, f"MSI build failed: {exc}")
+        return _redirect("/manage/agents")
+
+    record(db, request, user, "agent.msi_build", target=f"agent:{agent.id} {agent.name}",
+           detail=f"ok size={result.size} agent_version={result.agent_version} "
+                  f"product={result.product_version}")
+    db.commit()
+    # Stream the artifact, then clean the temp dir (which holds the only on-disk
+    # copy of the key, inside the MSI) once the response is fully sent.
+    return FileResponse(
+        path=str(result.path),
+        media_type="application/x-msi",
+        filename=f"printer-nanny-agent-{agent.id}.msi",
+        background=BackgroundTask(shutil.rmtree, out_dir, ignore_errors=True),
+    )
 
 
 @router.post("/agents/{agent_id}/update")
