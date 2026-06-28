@@ -383,6 +383,30 @@ def printer_detail(printer_id: int, request: Request, db: Session = Depends(get_
     )
 
 
+# --- Device security posture ------------------------------------------------ #
+@router.get("/security/posture", response_class=HTMLResponse)
+def security_posture(request: Request, db: Session = Depends(get_db)):
+    """Operator-facing "treat printers like endpoints" report: per-device
+    security posture flags (insecure SNMP, firmware visibility) plus a fleet
+    summary. Admin/tech only; client_readonly users are bounced to their
+    portal."""
+    user = _user(request, db)
+    if user is None:
+        return _login_redirect()
+    if user.role == m.UserRole.client_readonly:
+        return RedirectResponse("/portal", status_code=303)
+    posture = queries.security_posture_rollup(db)
+    return _render(
+        request,
+        "security_posture.html",
+        db=db,
+        user=user,
+        rows=posture["rows"],
+        summary=posture["summary"],
+        printer_label=_printer_label,
+    )
+
+
 # --- Pending discovery approvals -------------------------------------------- #
 @router.get("/approvals", response_class=HTMLResponse)
 def approvals(request: Request, db: Session = Depends(get_db)):

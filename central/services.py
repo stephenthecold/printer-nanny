@@ -151,7 +151,7 @@ def apply_reading(db: Session, site_id, reading: s.ReadingIn) -> Optional[m.Prin
 
     ts = reading.ts or _now()
     # Refresh identity fields the agent learned over SNMP.
-    for attr in ("hostname", "brand", "model", "serial"):
+    for attr in ("hostname", "brand", "model", "serial", "firmware"):
         val = getattr(reading, attr)
         if val:
             setattr(printer, attr, val)
@@ -251,7 +251,7 @@ def record_discovered(
     )
     if existing is not None:
         # Refresh identity but never downgrade an approved/ignored device to pending.
-        for attr in ("mac", "hostname", "brand", "model", "serial"):
+        for attr in ("mac", "hostname", "brand", "model", "serial", "firmware"):
             val = getattr(device, attr)
             if val and not getattr(existing, attr):
                 setattr(existing, attr, val)
@@ -268,6 +268,7 @@ def record_discovered(
         brand=device.brand,
         model=device.model,
         serial=device.serial,
+        firmware=device.firmware,
         discovery_state=m.DiscoveryState.pending,
         status=m.PrinterStatus.unknown,
     )

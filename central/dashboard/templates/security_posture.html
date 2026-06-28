@@ -1,0 +1,82 @@
+{% extends "base.html" %}
+{% from "base.html" import status_badge %}
+{% block title %}Security posture · {{ app.name or 'Printer Nanny' }}{% endblock %}
+{% block body %}
+<div class="flex items-center justify-between mb-4">
+  <h1 class="text-2xl font-semibold">Device security posture</h1>
+  <span class="text-xs text-slate-500">Treat printers like endpoints — grounded in collected SNMP signals.</span>
+</div>
+
+<div class="grid grid-cols-2 md:grid-cols-4 gap-3 mb-6">
+  <div class="bg-white rounded-lg shadow p-4">
+    <div class="text-3xl font-semibold">{{ summary.total }}</div>
+    <div class="text-xs text-slate-500 mt-1">Approved devices</div>
+  </div>
+  <div class="bg-white rounded-lg shadow p-4">
+    <div class="text-3xl font-semibold {{ 'text-red-600' if summary.insecure_snmp else 'text-slate-300' }}">{{ summary.insecure_snmp }}</div>
+    <div class="text-xs text-slate-500 mt-1">Insecure SNMP (v1/v2c)</div>
+  </div>
+  <div class="bg-white rounded-lg shadow p-4">
+    <div class="text-3xl font-semibold {{ 'text-green-600' if summary.secure_snmp else 'text-slate-300' }}">{{ summary.secure_snmp }}</div>
+    <div class="text-xs text-slate-500 mt-1">SNMPv3 (authenticated)</div>
+  </div>
+  <div class="bg-white rounded-lg shadow p-4">
+    <div class="text-3xl font-semibold {{ 'text-amber-600' if summary.firmware_unknown else 'text-slate-300' }}">{{ summary.firmware_unknown }}</div>
+    <div class="text-xs text-slate-500 mt-1">Firmware unknown</div>
+  </div>
+</div>
+
+<section class="bg-white rounded-lg shadow p-4">
+  <h2 class="font-semibold mb-3">Devices</h2>
+  <table class="w-full text-sm">
+    <thead class="text-left text-xs text-slate-500">
+      <tr>
+        <th class="py-1">Device</th>
+        <th class="py-1">Client / Site</th>
+        <th class="py-1">SNMP</th>
+        <th class="py-1">Firmware</th>
+        <th class="py-1">Posture</th>
+      </tr>
+    </thead>
+    <tbody>
+      {% for row in rows %}
+      <tr class="border-t hover:bg-slate-50">
+        <td class="py-1.5">
+          <a href="/printers/{{ row.printer.id }}" class="text-sky-700 hover:underline font-medium">{{ printer_label(row.printer) }}</a>
+          {% if row.printer.model %}<div class="text-xs text-slate-400">{{ row.printer.model }}</div>{% endif %}
+        </td>
+        <td class="py-1.5 text-slate-500">
+          {{ row.client.name if row.client else '—' }}
+          {% if row.site %}<span class="text-slate-400"> · {{ row.site.name }}</span>{% endif %}
+        </td>
+        <td class="py-1.5">
+          {% if row.snmp_secure %}
+          <span class="px-2 py-0.5 rounded text-xs font-medium bg-green-100 text-green-800" title="Authenticated USM ({{ row.snmp_source }})">v{{ row.snmp_version }}</span>
+          {% else %}
+          <span class="px-2 py-0.5 rounded text-xs font-medium bg-red-100 text-red-800" title="Cleartext community ({{ row.snmp_source }})">insecure-snmp v{{ row.snmp_version }}</span>
+          {% endif %}
+        </td>
+        <td class="py-1.5">
+          {% if row.firmware_known %}
+          <span class="tabular-nums text-slate-700">{{ row.firmware }}</span>
+          {% else %}
+          <span class="text-xs text-slate-400">unknown</span>
+          {% endif %}
+        </td>
+        <td class="py-1.5">
+          {% if row.flags %}
+            {% for flag in row.flags %}
+            <span class="px-1.5 py-0.5 rounded text-xs mr-1 {{ 'bg-red-100 text-red-700' if flag == 'insecure-snmp' else 'bg-amber-100 text-amber-700' }}">{{ flag }}</span>
+            {% endfor %}
+          {% else %}
+          <span class="px-1.5 py-0.5 rounded text-xs bg-green-100 text-green-700">ok</span>
+          {% endif %}
+        </td>
+      </tr>
+      {% else %}
+      <tr><td class="py-2 text-slate-400" colspan="5">No approved devices.</td></tr>
+      {% endfor %}
+    </tbody>
+  </table>
+</section>
+{% endblock %}

@@ -42,8 +42,6 @@ import httpx
 
 from central.channels.base import ChannelResult, Notification, NotificationChannel
 
-_SEVERITY_RANK = {"info": 0, "warning": 1, "critical": 2}
-
 
 class WebhookChannel(NotificationChannel):
     type = "webhook"
@@ -51,8 +49,11 @@ class WebhookChannel(NotificationChannel):
     def _url(self) -> str:
         return str(self.config.get("url") or self.setting("webhook.url") or "")
 
-    def _min_severity(self) -> str:
+    def min_severity(self) -> str:
         return str(self.setting("webhook.min_severity", "info") or "info").lower()
+
+    def _min_severity(self) -> str:  # backward-compatible alias
+        return self.min_severity()
 
     def _auth_pair(self) -> tuple[str, str]:
         header = str(self.setting("webhook.auth_header", "Authorization") or "Authorization")
@@ -60,7 +61,7 @@ class WebhookChannel(NotificationChannel):
         return header, token
 
     def _meets_threshold(self, severity: str) -> bool:
-        return _SEVERITY_RANK.get(severity, 0) >= _SEVERITY_RANK.get(self._min_severity(), 0)
+        return self.meets_severity(severity)
 
     def build_payload(self, note: Notification) -> dict:
         return {

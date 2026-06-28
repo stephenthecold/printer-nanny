@@ -299,6 +299,12 @@ class Printer(Base):
     model: Mapped[Optional[str]] = mapped_column(String(200), default=None)
     serial: Mapped[Optional[str]] = mapped_column(String(120), default=None)
     location: Mapped[Optional[str]] = mapped_column(String(200), default=None)
+    # Firmware / version string, best-effort from sysDescr (or a vendor field)
+    # during polling. Used by the device security-posture report so a regulated
+    # buyer can answer "what firmware is this endpoint running?". Honestly None
+    # when the device exposes nothing parseable -- the posture view shows
+    # "unknown" rather than inventing a value.
+    firmware: Mapped[Optional[str]] = mapped_column(String(200), default=None)
 
     # SNMP connection details (community for v1/v2c; v3 creds stored in snmp_v3 jsonb).
     snmp_version: Mapped[str] = mapped_column(String(8), default="2c")
@@ -427,8 +433,25 @@ class MaintenanceSchedule(Base):
     name: Mapped[str] = mapped_column(String(200))
     interval_days: Mapped[Optional[int]] = mapped_column(Integer, default=None)
     page_threshold: Mapped[Optional[int]] = mapped_column(Integer, default=None)
+    # Component-life trigger: when set, the worker opens a maintenance-due alert
+    # once the matching component-life Supply row (belt / fuser / laser / drum /
+    # PF kit — populated by the Brother provider's maintenance blob) drops to
+    # ``life_threshold`` percent or below. Independent of interval_days /
+    # page_threshold; a schedule may use any combination. ``component_type`` is
+    # one of the slugs in MaintenanceSchedule.COMPONENT_TYPES.
+    component_type: Mapped[Optional[str]] = mapped_column(String(32), default=None)
+    life_threshold: Mapped[Optional[float]] = mapped_column(Float, default=None)
     next_due: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), default=None)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+
+    # Operator-selectable component types -> how they map onto the Supply rows
+    # the Brother provider writes (see agent brother_maintenance._EXTRA_PART_ROWS):
+    #   fuser  -> Supply(type=fuser)
+    #   drum   -> Supply(type=drum)               (any color)
+    #   belt   -> Supply(type=other, color=belt)
+    #   laser  -> Supply(type=other, color=laser)
+    #   pf_kit -> Supply(type=other, color in {pf-kit-mp, pf-kit-1})
+    COMPONENT_TYPES = ("fuser", "drum", "belt", "laser", "pf_kit")
 
 
 class MaintenanceRecord(Base):
@@ -488,6 +511,18 @@ class Alert(Base):
     # De-dupe key so the worker doesn't re-open the same condition every cycle.
     dedupe_key: Mapped[str] = mapped_column(String(200), index=True)
     notified_channels: Mapped[Optional[list]] = mapped_column(JSON, default=None)
+    # External tracker reference captured at open time (today: the FreeScout
+    # conversation/ticket id). Persisted so the closed-loop resolver can post a
+    # "resolved" note + close that exact ticket when the alert auto-resolves.
+    external_ref: Mapped[Optional[str]] = mapped_column(String(120), default=None)
+    # Escalation / re-notify bookkeeping. ``last_notified_at`` is stamped on
+    # every dispatch (initial open + each escalation re-send); ``escalation_level``
+    # starts at 0 on open and increments each time the worker re-notifies an
+    # alert that has stayed unresolved past ``alerts.escalate_after_minutes``.
+    last_notified_at: Mapped[Optional[datetime]] = mapped_column(
+        DateTime(timezone=True), default=None
+    )
+    escalation_level: Mapped[int] = mapped_column(Integer, default=0)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
     resolved_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), default=None)
 

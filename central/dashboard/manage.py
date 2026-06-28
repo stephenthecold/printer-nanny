@@ -867,6 +867,7 @@ def maintenance_home(request: Request, db: Session = Depends(get_db)):
         user=user, schedules=schedules, printers=printers,
         records=records, printers_by_id=printers_by_id,
         types=[t.value for t in m.MaintenanceType],
+        component_types=list(m.MaintenanceSchedule.COMPONENT_TYPES),
         flash=_pop_flash(request),
     )
 
@@ -879,13 +880,17 @@ def schedule_create(
     model: str = Form(""),
     interval_days: str = Form(""),
     page_threshold: str = Form(""),
+    component_type: str = Form(""),
+    life_threshold: str = Form(""),
     next_due: str = Form(""),
     db: Session = Depends(get_db),
 ):
     """Either printer_id or model identifies the scope; both empty -> a
     model-wide schedule that matches every printer with that model. interval
     OR page threshold drives the worker's due-check (the worker considers
-    a schedule due when next_due <= now AND page_count >= threshold)."""
+    a schedule due when next_due <= now AND page_count >= threshold). A
+    component_type + life_threshold triggers when the matching component-life
+    Supply row (fuser / drum / belt / laser / PF kit) drops to/below that %."""
     actor = _manager(request, db)
     if actor is None:
         return _redirect("/login")
@@ -907,17 +912,29 @@ def schedule_create(
         threshold = int(page_threshold) if page_threshold.strip() else None
     except ValueError:
         threshold = None
+    ctype = component_type.strip() or None
+    if ctype is not None and ctype not in m.MaintenanceSchedule.COMPONENT_TYPES:
+        ctype = None
+    try:
+        life = float(life_threshold) if life_threshold.strip() else None
+    except ValueError:
+        life = None
+    # Component trigger only fires when both halves are present.
+    if ctype is None or life is None:
+        ctype = life = None
     sched = m.MaintenanceSchedule(
         name=name, printer_id=pid,
         model=model.strip() or None,
         interval_days=interval, page_threshold=threshold,
+        component_type=ctype, life_threshold=life,
         next_due=_parse_date(next_due),
     )
     db.add(sched)
     record(db, request, actor, "maintenance_schedule.create",
            target=f"sched:{name}",
            detail=f"printer:{pid or '-'} model:{model.strip() or '-'} "
-                  f"every:{interval or '-'}d threshold:{threshold or '-'}")
+                  f"every:{interval or '-'}d threshold:{threshold or '-'} "
+                  f"component:{ctype or '-'}@{life if life is not None else '-'}%")
     db.commit()
     _flash(request, f"Schedule '{name}' added.")
     return _redirect("/manage/maintenance")
@@ -929,6 +946,8 @@ def schedule_update(
     name: str = Form(""),
     interval_days: str = Form(""),
     page_threshold: str = Form(""),
+    component_type: str = Form(""),
+    life_threshold: str = Form(""),
     next_due: str = Form(""),
     db: Session = Depends(get_db),
 ):
@@ -948,6 +967,17 @@ def schedule_update(
         sched.page_threshold = int(page_threshold) if page_threshold.strip() else None
     except ValueError:
         pass
+    ctype = component_type.strip() or None
+    if ctype is not None and ctype not in m.MaintenanceSchedule.COMPONENT_TYPES:
+        ctype = None
+    try:
+        life = float(life_threshold) if life_threshold.strip() else None
+    except ValueError:
+        life = None
+    if ctype is None or life is None:
+        ctype = life = None
+    sched.component_type = ctype
+    sched.life_threshold = life
     parsed = _parse_date(next_due)
     if parsed is not None or next_due == "":
         sched.next_due = parsed

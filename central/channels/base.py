@@ -6,6 +6,9 @@ import abc
 from dataclasses import dataclass
 from typing import Optional
 
+# Shared severity ordering so a per-channel minimum can gate any notification.
+SEVERITY_RANK = {"info": 0, "warning": 1, "critical": 2}
+
 
 @dataclass
 class Notification:
@@ -56,6 +59,20 @@ class NotificationChannel(abc.ABC):
     def setting(self, key: str, default=None):
         """Channel-row config overrides the global runtime setting."""
         return self.config.get(key.split(".")[-1], self.runtime.get(key, default))
+
+    def min_severity(self) -> str:
+        """Lowest severity this channel will deliver.
+
+        Defaults to ``info`` (deliver everything). Channels with their own
+        ``<type>.min_severity`` knob (Slack, webhook) override this; a per-row
+        ``min_severity`` in ``config`` takes precedence for any channel. The
+        dispatcher consults this so the severity gate applies uniformly to
+        every channel, not just the two that historically implemented it.
+        """
+        return str(self.config.get("min_severity", "info") or "info").lower()
+
+    def meets_severity(self, severity: str) -> bool:
+        return SEVERITY_RANK.get(severity, 0) >= SEVERITY_RANK.get(self.min_severity(), 0)
 
     @abc.abstractmethod
     def send(self, note: Notification) -> ChannelResult:  # pragma: no cover - interface

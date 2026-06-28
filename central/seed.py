@@ -166,6 +166,11 @@ def seed() -> None:
             db.add(agent)
             db.flush()
             n_subnets = RNG.choice([1, 1, 2])
+            # Cascade Legal runs SNMPv3 USM everywhere (a regulated tenant);
+            # the other clients are still on cleartext v2c. This gives the
+            # device security-posture report a realistic mix of secure and
+            # insecure devices to surface.
+            uses_v3 = cname == "Cascade Legal"
             for sub in range(n_subnets):
                 db.add(
                     m.Subnet(
@@ -173,6 +178,12 @@ def seed() -> None:
                         agent_id=agent.id,
                         cidr=f"10.{octet}.{sub}.0/24",
                         label=f"VLAN {10 + sub}",
+                        snmp_version="3" if uses_v3 else "2c",
+                        snmp_v3=(
+                            {"user": "fleetmon", "security_level": "authPriv",
+                             "auth_protocol": "SHA", "priv_protocol": "AES128"}
+                            if uses_v3 else None
+                        ),
                     )
                 )
 
@@ -181,6 +192,10 @@ def seed() -> None:
             for i in range(n_printers):
                 brand, model = RNG.choice(BRAND_MODELS)
                 low = printer_id_low is None and cname == "Northwind Health" and i == 0
+                # Most demo printers expose a parseable firmware string; leave
+                # one per site as None so the posture report shows a realistic
+                # "unknown" row too.
+                firmware = None if i == 1 else f"FW{RNG.randint(1, 9)}.{RNG.randint(0, 99):02d}"
                 printer = m.Printer(
                     client_id=client.id,
                     site_id=site.id,
@@ -190,7 +205,9 @@ def seed() -> None:
                     brand=brand,
                     model=model,
                     serial=f"SN{RNG.randint(100000, 999999)}",
+                    firmware=firmware,
                     location=RNG.choice(LOCATIONS),
+                    snmp_version="3" if uses_v3 else "2c",
                     status=m.PrinterStatus.error if low else m.PrinterStatus.ok,
                     discovery_state=m.DiscoveryState.approved,
                     page_count=RNG.randint(40000, 250000),

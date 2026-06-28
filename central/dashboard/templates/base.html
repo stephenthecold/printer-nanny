@@ -28,6 +28,9 @@
     {% endif %}
     <a href="/alerts" class="hover:text-white/80 text-sm">Alerts</a>
     <a href="/manage/maintenance" class="hover:text-white/80 text-sm">Maintenance</a>
+    {% if user.role.value != 'client_readonly' %}
+    <a href="/security/posture" class="hover:text-white/80 text-sm">Security</a>
+    {% endif %}
     {% if user.role.value == 'admin' %}
     <a href="/manage/users" class="hover:text-white/80 text-sm">Users</a>
     <a href="/manage/audit" class="hover:text-white/80 text-sm">Audit</a>

@@ -53,6 +53,7 @@
     <div class="mt-1">{{ printer.brand or '--' }} {{ printer.model or '' }}</div>
     <div class="text-slate-500">IP {{ printer.ip }} · {{ printer.location or 'no location' }}</div>
     <div class="text-slate-500">S/N {{ printer.serial or '--' }}</div>
+    <div class="text-slate-500">Firmware {{ printer.firmware or 'unknown' }}</div>
     {% if printer.asset_tag %}<div class="text-slate-500">Asset {{ printer.asset_tag }}</div>{% endif %}
     {% if printer.tags %}
     <div class="mt-1 flex flex-wrap gap-1">
