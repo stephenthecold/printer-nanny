@@ -11,7 +11,8 @@ from typing import Dict, List, Optional
 
 from printer_nanny_agent import oids
 from printer_nanny_agent.snmp_parse import (
-    normalize_color,
+    classify_supply,
+    decode_supply_text,
     parse_supply_level,
     supply_type_from_code,
 )
@@ -129,18 +130,26 @@ def build_supplies(walks: Dict[str, Dict[str, str]]) -> List[dict]:
 
     supplies: List[dict] = []
     for suffix in sorted(suffixes):
-        desc = desc_by_suffix.get(suffix)
+        raw_desc = desc_by_suffix.get(suffix)
         raw_level = _to_int(level_by_suffix.get(suffix))
         max_cap = _to_int(max_by_suffix.get(suffix))
         type_code = _to_int(type_by_suffix.get(suffix))
+        # Decode hex OCTET-STRING descriptions (pysnmp renders binary/non-ASCII
+        # names as "0x..."). If the bytes aren't real text, fall back to the
+        # name implied by the type code rather than leaking a raw "0x..." blob.
+        type_name = supply_type_from_code(type_code)
+        desc = decode_supply_text(raw_desc, fallback=type_name)
+        # Classify on the *decoded* text: hex never matches a keyword, so this
+        # is what rescues "Black Drum"/"Fuser" out of a generic 'other' code.
+        supply_type, color = classify_supply(desc, type_code)
         parsed = parse_supply_level(raw_level, max_cap)
         # When the device reports a sentinel instead of a number (e.g. Brother
         # toner = "some remaining"), surface that coarse state as a note.
         note = parsed.note if parsed.level_pct is None else None
         supplies.append(
             {
-                "type": supply_type_from_code(type_code),
-                "color": normalize_color(desc),
+                "type": supply_type,
+                "color": color,
                 "description": desc,
                 "level_pct": parsed.level_pct,
                 "status_note": note,
