@@ -72,12 +72,18 @@ def test_update_endpoint_enqueues_command(db):
     assert cmds[0].payload == {"pip_source": pip_src}
 
 
-def test_update_all_enqueues_per_agent(db):
+def test_update_all_enqueues_per_outdated_agent(db):
+    """The bulk action queues one update_agent per OUTDATED agent. Agents that
+    are already current (or never reported a version) are skipped -- see
+    test_agent_update_ui for the full scoping matrix. Both agents here report
+    an old base, so both get queued (one command each)."""
     a1 = _seed_agent(db)
-    # second agent under same site
+    a1.version = "0.1.0+20250101-000000"  # outdated
+    # second agent under same site, also outdated
     a2 = m.Agent(
         site_id=a1.site_id, name="branch-agent",
         api_key_hash=hash_api_key("pn_key2"),
+        version="0.2.0+20250101-000000",
     )
     db.add(a2)
     db.commit()
