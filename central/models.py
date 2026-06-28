@@ -677,3 +677,29 @@ class AppSetting(Base):
     key: Mapped[str] = mapped_column(String(120), primary_key=True)
     value: Mapped[Optional[dict]] = mapped_column(JSON, default=None)
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+
+
+class ReportRun(Base):
+    """Idempotency marker for a scheduled report already sent for a period.
+
+    One row claims "(report_type, period_key) was sent" -- the UNIQUE constraint
+    on that pair is what makes the send race-safe: the report path INSERTs this
+    marker inside the same transaction as the send decision, so two worker cycles
+    racing the same period both try to insert, and exactly one wins. The loser
+    catches the IntegrityError and skips the send. This is independent of (and
+    redundant with) the worker leader lock -- either alone prevents a double-send.
+    """
+
+    __tablename__ = "report_runs"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    # "weekly" or "monthly".
+    report_type: Mapped[str] = mapped_column(String(32))
+    # The period this send covers, e.g. an ISO date "2026-06-08" (weekly) or
+    # "2026-06" (monthly). One send per (report_type, period_key).
+    period_key: Mapped[str] = mapped_column(String(40))
+    sent_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+
+    __table_args__ = (
+        UniqueConstraint("report_type", "period_key", name="uq_report_run_type_period"),
+    )

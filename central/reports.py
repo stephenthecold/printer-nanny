@@ -21,6 +21,7 @@ from datetime import datetime, timezone
 from typing import Optional, Tuple
 
 from sqlalchemy import select
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from central import models as m
@@ -33,8 +34,15 @@ log = logging.getLogger("central.reports")
 
 _WEEKDAYS = ("mon", "tue", "wed", "thu", "fri", "sat", "sun")
 
-# Last-sent markers live in app_settings as plain rows. load_settings ignores
-# non-Spec keys, so these never leak into the Settings UI.
+# Report types recorded in ReportRun (and the legacy app_settings markers below).
+REPORT_WEEKLY = "weekly"
+REPORT_MONTHLY = "monthly"
+
+# Legacy last-sent markers in app_settings. Superseded by the transactional
+# ReportRun table (the UNIQUE (report_type, period_key) is what makes the send
+# race-safe). Kept only so _has_run can read a pre-upgrade marker once, after
+# which every claim writes a ReportRun row. load_settings ignores non-Spec keys,
+# so these never leak into the Settings UI.
 MARKER_WEEKLY = "reports.weekly_last_sent"
 MARKER_MONTHLY = "reports.monthly_last_sent"
 
@@ -50,6 +58,67 @@ def _set_marker(db: Session, key: str, value: str) -> None:
         db.add(m.AppSetting(key=key, value=value))
     else:
         row.value = value
+
+
+def _has_run(db: Session, report_type: str, period_key: str) -> bool:
+    """True if this (report_type, period) was already sent.
+
+    Reads the transactional ReportRun marker. Also honors the legacy
+    app_settings marker for the SAME period so an in-flight upgrade (a marker
+    written by the pre-ReportRun code, before this period rolls over) still
+    suppresses a duplicate send on the very first post-upgrade cycle.
+    """
+    exists = db.scalar(
+        select(m.ReportRun.id).where(
+            m.ReportRun.report_type == report_type,
+            m.ReportRun.period_key == period_key,
+        )
+    )
+    if exists is not None:
+        return True
+    legacy_key = MARKER_WEEKLY if report_type == REPORT_WEEKLY else MARKER_MONTHLY
+    return _get_marker(db, legacy_key) == period_key
+
+
+def _claim_report_run(db: Session, report_type: str, period_key: str) -> bool:
+    """Atomically claim "(report_type, period_key) is being sent".
+
+    INSERTs the ReportRun marker and commits inside a single transaction. Returns
+    True if THIS process won the claim (it should now send), or False if another
+    cycle already inserted the same (report_type, period_key) -- the UNIQUE
+    constraint raises IntegrityError, which we swallow into "already claimed, skip
+    the send". This makes once-per-period race-safe even without the leader lock.
+
+    On a lost race the session is rolled back; the caller must not send.
+    """
+    db.add(m.ReportRun(report_type=report_type, period_key=period_key))
+    try:
+        db.commit()
+        return True
+    except IntegrityError:
+        db.rollback()
+        log.info(
+            "report %s/%s already claimed by another cycle; skipping send",
+            report_type, period_key,
+        )
+        return False
+
+
+def _release_report_run(db: Session, report_type: str, period_key: str) -> None:
+    """Undo a claim whose delivery failed, so the next cycle retries the send.
+
+    Preserves the existing contract that a failed delivery leaves nothing
+    recorded -- a downed channel must not silently drop a period's report.
+    """
+    row = db.scalar(
+        select(m.ReportRun).where(
+            m.ReportRun.report_type == report_type,
+            m.ReportRun.period_key == period_key,
+        )
+    )
+    if row is not None:
+        db.delete(row)
+        db.commit()
 
 
 # --------------------------------------------------------------------------- #
@@ -171,51 +240,64 @@ def _deliver(db: Session, rt: dict, subject: str, body: str,
 
 
 def run_scheduled_reports(db: Session, now: Optional[datetime] = None) -> dict:
-    """Worker job: send the weekly / monthly reports when due. Idempotent per
-    day via last-sent markers; cheap no-op otherwise."""
+    """Worker job: send the weekly / monthly reports when due. Cheap no-op when
+    nothing is due.
+
+    Once-per-period is race-safe via the ReportRun table: each due report
+    transactionally CLAIMs its period (an INSERT guarded by the UNIQUE
+    (report_type, period_key)) *before* sending. Two cycles racing the same
+    period -> exactly one wins the insert and sends; the loser's IntegrityError
+    is swallowed and it skips. A claim whose delivery then fails is released so
+    the next cycle retries (no period silently dropped). The period key is the
+    UTC date for weekly and the YYYY-MM month for monthly.
+    """
     now = now or datetime.now(timezone.utc)
     rt = load_settings(db)
     today = now.date().isoformat()
     send_hour = int(rt.get("reports.send_hour") or 7)
     out = {"weekly_report": "skipped", "monthly_report": "skipped"}
 
-    # --- Weekly ---
+    # --- Weekly --- (one send per UTC date it fires on)
     if rt.get("reports.weekly_enabled") and now.hour >= send_hour:
         want_day = str(rt.get("reports.weekly_day") or "mon").lower()[:3]
         if want_day in _WEEKDAYS and _WEEKDAYS[now.weekday()] == want_day \
-                and _get_marker(db, MARKER_WEEKLY) != today:
-            subject, body = build_weekly_summary(db)
-            ok, detail = _deliver(db, rt, subject, body)
-            if ok:
-                _set_marker(db, MARKER_WEEKLY, today)
-                db.commit()
-                out["weekly_report"] = "sent"
+                and not _has_run(db, REPORT_WEEKLY, today):
+            if not _claim_report_run(db, REPORT_WEEKLY, today):
+                out["weekly_report"] = "skipped"  # another cycle claimed it
             else:
-                # No marker on failure -- retried next cycle.
-                log.warning("weekly report delivery failed: %s", detail)
-                out["weekly_report"] = f"failed: {detail}"
+                subject, body = build_weekly_summary(db)
+                ok, detail = _deliver(db, rt, subject, body)
+                if ok:
+                    out["weekly_report"] = "sent"
+                else:
+                    # Release the claim so the next cycle retries (no silent drop).
+                    _release_report_run(db, REPORT_WEEKLY, today)
+                    log.warning("weekly report delivery failed: %s", detail)
+                    out["weekly_report"] = f"failed: {detail}"
 
-    # --- Monthly ---
+    # --- Monthly --- (one send per YYYY-MM)
     if rt.get("reports.monthly_enabled") and now.hour >= send_hour:
         want_dom = int(rt.get("reports.monthly_day") or 1)
-        if now.day == want_dom and _get_marker(db, MARKER_MONTHLY) != today:
-            csv_bytes = build_monthly_billing_csv(db)
-            stamp = now.strftime("%Y-%m")
-            subject = f"Monthly billing report ({stamp})"
-            body = (
-                f"Attached: inventory and page counts for {stamp}, one row per "
-                "monitored printer. Import into your billing system or open in Excel."
-            )
-            ok, detail = _deliver(
-                db, rt, subject, body,
-                attachments=[(f"printer-nanny-billing-{stamp}.csv", "text/csv", csv_bytes)],
-            )
-            if ok:
-                _set_marker(db, MARKER_MONTHLY, today)
-                db.commit()
-                out["monthly_report"] = "sent"
+        stamp = now.strftime("%Y-%m")
+        if now.day == want_dom and not _has_run(db, REPORT_MONTHLY, stamp):
+            if not _claim_report_run(db, REPORT_MONTHLY, stamp):
+                out["monthly_report"] = "skipped"  # another cycle claimed it
             else:
-                log.warning("monthly report delivery failed: %s", detail)
-                out["monthly_report"] = f"failed: {detail}"
+                csv_bytes = build_monthly_billing_csv(db)
+                subject = f"Monthly billing report ({stamp})"
+                body = (
+                    f"Attached: inventory and page counts for {stamp}, one row per "
+                    "monitored printer. Import into your billing system or open in Excel."
+                )
+                ok, detail = _deliver(
+                    db, rt, subject, body,
+                    attachments=[(f"printer-nanny-billing-{stamp}.csv", "text/csv", csv_bytes)],
+                )
+                if ok:
+                    out["monthly_report"] = "sent"
+                else:
+                    _release_report_run(db, REPORT_MONTHLY, stamp)
+                    log.warning("monthly report delivery failed: %s", detail)
+                    out["monthly_report"] = f"failed: {detail}"
 
     return out
