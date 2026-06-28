@@ -12,7 +12,7 @@ import sys
 from typing import Optional
 
 from central.config import settings
-from central.db import SessionLocal, create_all
+from central.db import SessionLocal, create_all, try_leader_lock
 from central.reports import run_scheduled_reports
 from central.worker import jobs
 
@@ -30,18 +30,36 @@ JOBS = (
 )
 
 
-def run_cycle() -> dict:
+def _run_jobs(db) -> dict:
     summary: dict = {}
-    db = SessionLocal()
-    try:
-        for job in JOBS:
-            try:
-                summary.update(job(db))
-            except Exception:  # noqa: BLE001 - keep the cycle alive on a single job failure
-                log.exception("job %s failed", job.__name__)
-                db.rollback()
-    finally:
-        db.close()
+    for job in JOBS:
+        try:
+            summary.update(job(db))
+        except Exception:  # noqa: BLE001 - keep the cycle alive on a single job failure
+            log.exception("job %s failed", job.__name__)
+            db.rollback()
+    return summary
+
+
+def run_cycle() -> dict:
+    """Run one worker cycle under the single-leader advisory lock.
+
+    Only the worker that holds the lock runs the jobs; a second worker container
+    that loses the race SKIPs the cycle entirely (no double-processing of alerts /
+    maintenance / forecasts / reports). On SQLite/dev the lock is a no-op that
+    always acquires (single-process by construction). The lock is held for the
+    whole cycle and released at the end -- jobs commit their own work as they go,
+    so a crash mid-cycle just releases the lock and the next tick re-runs.
+    """
+    with try_leader_lock() as acquired:
+        if not acquired:
+            log.info("worker cycle skipped: another worker holds the leader lock")
+            return {"skipped": "not_leader"}
+        db = SessionLocal()
+        try:
+            summary = _run_jobs(db)
+        finally:
+            db.close()
     log.info("worker cycle: %s", summary)
     return summary
 

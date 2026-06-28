@@ -36,7 +36,10 @@ _MANAGER_ROLES = {m.UserRole.admin, m.UserRole.tech}
 
 def _user(request: Request, db: Session) -> Optional[m.User]:
     uid = request.session.get("user_id")
-    return db.get(m.User, uid) if uid else None
+    user = db.get(m.User, uid) if uid else None
+    # A deactivated (SCIM-deprovisioned) account is treated as logged out so a
+    # live cookie stops working on its next request, not just at next login.
+    return user if (user is not None and user.active) else None
 
 
 def _manager(request: Request, db: Session) -> Optional[m.User]:

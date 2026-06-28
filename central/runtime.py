@@ -20,6 +20,12 @@ from central.config import settings as _env
 
 SECRET_PLACEHOLDER = "__keep__"  # form sends this when a secret is left unchanged
 
+# The SCIM bearer token is persisted as a SHA-256 hash, not as an encrypted
+# secret -- so it can't be decrypted back into a usable credential. The settings
+# form hashes whatever the operator types (see save_settings) and masks the
+# stored hash so it's never echoed back to the page (see masked_for_form).
+SCIM_TOKEN_HASH_KEY = "scim.bearer_token_hash"
+
 
 @dataclass
 class Spec:
@@ -171,6 +177,25 @@ SPECS: List[Spec] = [
     Spec("oidc.button_label", "str", "Single sign-on (OIDC)", "Login button label", "Sign in with SSO"),
     Spec("oidc.auto_provision", "bool", "Single sign-on (OIDC)", "Auto-create users on first login", True),
     Spec("oidc.default_role", "str", "Single sign-on (OIDC)", "Role for new SSO users", "tech"),
+    # SCIM 2.0 provisioning (RFC 7644). Lets an IdP (Entra ID / Okta / etc.)
+    # create, update and -- critically -- DEPROVISION (deactivate) users
+    # automatically. The bearer token is what the IdP sends on every SCIM call;
+    # it's stored hashed (like an agent API key) and only ever shown once when
+    # generated, so paste it into the IdP immediately. Disabled by default.
+    Spec("scim.enabled", "bool", "SCIM provisioning", "Enable SCIM 2.0 user provisioning", False,
+         "Exposes /scim/v2/Users for an IdP to provision & deprovision users"),
+    # The IdP's bearer token is stored as a SHA-256 HASH (not the token, not a
+    # reversible cipher) -- same treatment as agent API keys (central.security).
+    # The settings form HASHES whatever the operator pastes before persisting,
+    # so this row never holds a usable credential. Hence a plain ``str`` spec
+    # (a digest is not itself a secret); ``scim.set_bearer_token`` does the
+    # hashing and ``scim.token_matches`` the constant-time compare.
+    Spec("scim.bearer_token_hash", "str", "SCIM provisioning", "SCIM bearer token", "",
+         "The token your IdP sends as 'Authorization: Bearer <token>'. Stored "
+         "hashed -- paste a long random string here, then configure the same "
+         "value in your IdP's SCIM connector. Leave blank to keep the current one."),
+    Spec("scim.default_role", "str", "SCIM provisioning", "Role for new SCIM users", "tech",
+         "admin | tech | client_readonly -- role assigned to users the IdP creates"),
     # Agent install (used to build the one-line install command shown on the Agents page)
     Spec("agent.pip_source", "str", "Agent install", "pip install source",
          "git+https://github.com/stephenthecold/printer-nanny.git#subdirectory=agent",
@@ -194,7 +219,7 @@ SETTINGS_GROUPS: "Dict[str, tuple]" = {
     ),
     "alerts": ("Alerts & Reports", ["Alerts", "Reports", "ESG / Sustainability"]),
     "polling": ("Polling & SNMP", ["Polling", "SNMP defaults"]),
-    "auth": ("Authentication", ["Single sign-on (OIDC)"]),
+    "auth": ("Authentication", ["Single sign-on (OIDC)", "SCIM provisioning"]),
     "agents": ("Agents", ["Agent install"]),
 }
 DEFAULT_SETTINGS_GROUP = "branding"
@@ -258,6 +283,8 @@ def save_settings(
     """
     from central.secrets import encrypt_value, is_encrypted
 
+    from central.security import hash_api_key
+
     existing = {row.key: row for row in db.scalars(select(m.AppSetting))}
     for spec in SPECS:
         if sections is not None and spec.section not in sections:
@@ -266,6 +293,13 @@ def save_settings(
             value: Any = spec.key in form  # checkbox present → checked
         elif spec.key not in form:
             continue
+        elif spec.key == SCIM_TOKEN_HASH_KEY:
+            # The form posts the *plaintext* SCIM token. Hash it before storing;
+            # the placeholder / empty string means "keep the current hash".
+            raw = str(form[spec.key])
+            if raw in (SECRET_PLACEHOLDER, ""):
+                continue
+            value = hash_api_key(raw)
         else:
             raw = form[spec.key]
             if spec.type == "secret" and raw in (SECRET_PLACEHOLDER, ""):
@@ -332,4 +366,29 @@ def masked_for_form(values: Dict[str, Any]) -> Dict[str, Any]:
     for spec in SPECS:
         if spec.type == "secret" and out.get(spec.key):
             out[spec.key] = SECRET_PLACEHOLDER
+    # The SCIM token is a non-secret-typed str (it holds a hash) but must never
+    # be echoed back to the form either -- mask it the same way.
+    if out.get(SCIM_TOKEN_HASH_KEY):
+        out[SCIM_TOKEN_HASH_KEY] = SECRET_PLACEHOLDER
     return out
+
+
+def set_scim_token(db: Session, token: str) -> None:
+    """Persist the SHA-256 hash of a SCIM bearer token (helper for tooling/tests).
+
+    Delegates to save_settings, which hashes the plaintext via the same
+    ``hash_api_key`` path the IdP-facing auth check uses.
+    """
+    save_settings(db, {SCIM_TOKEN_HASH_KEY: token}, sections={"SCIM provisioning"})
+
+
+def scim_token_matches(db: Session, presented: str) -> bool:
+    """Constant-time check of a presented bearer token against the stored hash."""
+    import hmac
+
+    from central.security import hash_api_key
+
+    stored = str(load_settings(db).get(SCIM_TOKEN_HASH_KEY) or "")
+    if not stored or not presented:
+        return False
+    return hmac.compare_digest(stored, hash_api_key(presented))

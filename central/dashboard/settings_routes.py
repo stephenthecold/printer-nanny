@@ -31,7 +31,7 @@ LOGO_ALLOWED_TYPES = {
 def _admin(request: Request, db: Session) -> Optional[m.User]:
     uid = request.session.get("user_id")
     user = db.get(m.User, uid) if uid else None
-    if user is None or user.role != m.UserRole.admin:
+    if user is None or not user.active or user.role != m.UserRole.admin:
         return None
     return user
 

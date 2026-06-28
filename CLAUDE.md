@@ -5,6 +5,40 @@ supply levels, errors, status, and page counts over SNMP; tracks maintenance;
 alerts to email / Slack / Teams / FreeScout / generic webhook. Multi-tenant
 (client → site → subnet → printer), multi-subnet, agent-collected.
 
+## Working agreements (how to build here)
+These are standing instructions for anyone (human or agent) doing work in this repo:
+
+- **Parallelize with agents.** Prefer fanning work out across multiple agents /
+  a Workflow when it helps — independent implementation, testing, and research
+  run concurrently in isolated git worktrees. This lowers overall token usage
+  and wall-clock time versus doing everything in one sequential context. Default
+  to it for any multi-feature batch or broad search/review; each agent
+  self-verifies, and a separate agent adversarially re-verifies before integration.
+- **Interview, don't assume.** When a decision has real alternatives (scope,
+  architecture, scheme, ordering, product direction), ask the user before
+  committing to one — don't silently pick. Reserve this for genuine forks; keep
+  obvious-default choices moving.
+- **Always verify, never assume code is good.** Every change is proven, not
+  trusted: run `ruff`, the pytest suite, AND an end-to-end smoke against a freshly
+  seeded throwaway DB (`python -m central.seed` → exercise the feature / run the
+  worker). "Tests pass" alone is not enough — check real values/states on seeded
+  data. Adversarially re-verify non-trivial work in a fresh checkout. Report
+  failures honestly with the output.
+- **Bump version numbers between changes.** So the running **program** version is
+  distinguishable from the **agent** version, bump them on every behavior-changing
+  change (a feature batch bumps the minor; a fix bumps the patch; docs/test-only
+  changes skip). The two version lines move **independently** — bump the program
+  version only when central changes, the agent base version only when the agent
+  changes — so e.g. "central 0.4.0 / agent 0.2.0" tells you at a glance which side
+  moved.
+  - **Program version** (keep these in lockstep with each other): `pyproject.toml`
+    `version`, `central/__init__.py` `__version__`, and `central/main.py`
+    `FastAPI(version=…)`. Surface it in the dashboard footer.
+  - **Agent version**: `agent/printer_nanny_agent/__init__.py` `__base_version__`
+    (and `agent/pyproject.toml`); the install-timestamp suffix
+    (`0.x.y+YYYYMMDD-HHMMSS`) is appended automatically at install/self-update.
+  - Scheme: **SemVer**. (Confirm with the user if a different scheme is wanted.)
+
 ## Architecture
 - **Central server** (on-prem, Docker Compose): FastAPI JSON API + APScheduler
   worker + HTMX/Jinja dashboard, backed by PostgreSQL (SQLite for local dev/tests).

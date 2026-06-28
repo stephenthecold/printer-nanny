@@ -5,6 +5,7 @@ without any SNMP I/O.
 
 from __future__ import annotations
 
+import datetime as _dt
 import re
 from typing import Dict, List, Optional
 
@@ -236,6 +237,12 @@ def build_reading(
         status = "ok"
 
     return {
+        # Stamp the poll time at the source. Central honors ``reading.ts`` (it
+        # only falls back to "now" when absent), so a reading that gets spooled
+        # during a central outage and replayed minutes/hours later still lands
+        # in the time-series at the moment it was actually taken -- which is
+        # what any billing / meter / forecast pipeline depends on.
+        "ts": _dt.datetime.now(_dt.timezone.utc).isoformat(),
         "ip": ip,
         "status": status,
         "page_count": _to_int(scalars.get(oids.PRT_MARKER_LIFE_COUNT)),
