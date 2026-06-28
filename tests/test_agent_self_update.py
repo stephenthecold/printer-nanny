@@ -72,12 +72,18 @@ def test_update_endpoint_enqueues_command(db):
     assert cmds[0].payload == {"pip_source": pip_src}
 
 
-def test_update_all_enqueues_per_agent(db):
+def test_update_all_enqueues_per_outdated_agent(db):
+    """The bulk action queues one update_agent per OUTDATED agent. Agents that
+    are already current (or never reported a version) are skipped -- see
+    test_agent_update_ui for the full scoping matrix. Both agents here report
+    an old base, so both get queued (one command each)."""
     a1 = _seed_agent(db)
-    # second agent under same site
+    a1.version = "0.1.0+20250101-000000"  # outdated
+    # second agent under same site, also outdated
     a2 = m.Agent(
         site_id=a1.site_id, name="branch-agent",
         api_key_hash=hash_api_key("pn_key2"),
+        version="0.2.0+20250101-000000",
     )
     db.add(a2)
     db.commit()
@@ -139,13 +145,28 @@ async def test_agent_handle_update_agent_calls_perform_self_update(monkeypatch):
     assert captured == ["git+https://x/y"]
 
 
-async def test_perform_self_update_skips_when_no_pip_source(monkeypatch):
+async def test_perform_self_update_skips_when_no_pip_source(monkeypatch, tmp_path):
     """A malformed command (payload without pip_source) must not crash the
-    agent -- it logs and returns."""
-    from printer_nanny_agent.updater import perform_self_update
-    # Should be a no-op; no exception, no exit.
-    await perform_self_update(None)
-    await perform_self_update("")
+    agent -- it logs, records a clear failure result, and returns."""
+    from printer_nanny_agent import updater
+
+    marker = tmp_path / "m.json"
+    monkeypatch.setattr(updater, "_result_path", lambda: marker)
+    exited = []
+    monkeypatch.setattr(updater, "restart_for_service_manager", lambda code=0: exited.append(code))
+
+    # Should be a no-op; no exception, no exit -- but a recorded failure so the
+    # operator can see WHY the update did nothing.
+    await updater.perform_self_update(None)
+    assert exited == []
+    res = updater.read_last_update_result()
+    assert res["ok"] is False
+    assert res["status"] == "no_pip_source"
+
+    await updater.perform_self_update("")
+    assert exited == []
+    res = updater.read_last_update_result()
+    assert res["status"] == "no_pip_source"
 
 
 async def test_perform_self_update_does_not_exit_on_pip_failure(monkeypatch, tmp_path):
@@ -167,8 +188,14 @@ async def test_perform_self_update_does_not_exit_on_pip_failure(monkeypatch, tmp
         exited.append(code)
         raise SystemExit(code)  # would normally be os._exit
 
+    async def pass_preflight(pip_source):
+        return True, ""
+
     marker = tmp_path / "m.json"
     monkeypatch.setattr(updater, "_result_path", lambda: marker)
+    # Pre-flight is exercised separately; here we isolate the INSTALL path so a
+    # CI host without pip next to its python doesn't short-circuit before pip.
+    monkeypatch.setattr(updater, "preflight", pass_preflight)
     monkeypatch.setattr(updater, "run_self_update", fake_run)
     monkeypatch.setattr(updater, "restart_for_service_manager", fake_exit)
 
@@ -176,7 +203,9 @@ async def test_perform_self_update_does_not_exit_on_pip_failure(monkeypatch, tmp
     assert exited == []  # didn't restart
     result = updater.read_last_update_result()
     assert result["status"] == "pip_failed"
+    assert result["ok"] is False
     assert "connection refused" in result["detail"]
+    assert "connection refused" in result["error"]
 
 
 async def test_perform_self_update_exits_on_pip_success(monkeypatch, tmp_path):
@@ -192,11 +221,23 @@ async def test_perform_self_update_exits_on_pip_success(monkeypatch, tmp_path):
     def fake_exit(code=0):
         exited.append(code)
 
+    async def pass_preflight(pip_source):
+        return True, ""
+
     marker = tmp_path / "m.json"
     monkeypatch.setattr(updater, "_result_path", lambda: marker)
+    monkeypatch.setattr(updater, "preflight", pass_preflight)
     monkeypatch.setattr(updater, "run_self_update", fake_run)
+    # Simulate a version bump landing on disk so the post-install check sees a
+    # genuine update (new != old) and records 'ok' rather than 'no_op'.
+    monkeypatch.setattr(updater, "_current_base_version", lambda: "0.3.0")
+    monkeypatch.setattr(updater, "_installed_base_version", lambda: "0.4.0")
     monkeypatch.setattr(updater, "restart_for_service_manager", fake_exit)
     await updater.perform_self_update("git+https://x/y")
     assert exited == [0]
     result = updater.read_last_update_result()
     assert result["status"] == "ok"
+    assert result["ok"] is True
+    assert result["old_version"] == "0.3.0"
+    assert result["new_version"] == "0.4.0"
+    assert result["error"] is None

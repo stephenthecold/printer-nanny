@@ -416,12 +416,19 @@ def printer_poll_now(printer_id: int, request: Request, db: Session = Depends(ge
 @router.get("/agents", response_class=HTMLResponse)
 def agents_home(request: Request, db: Session = Depends(get_db)):
     from central import __version__ as central_version
+    from central.agent_release import bundled_agent_version, update_state
     from central.runtime import load_settings
 
     user = _manager(request, db)
     if user is None:
         return _redirect("/login")
     agents = list(db.scalars(select(m.Agent).order_by(m.Agent.id)))
+    # Version the central server serves -> what each agent should be at. Compare
+    # by SemVer base (ignoring the install-time marker suffix) so we flag agents
+    # whose *code* is older, not just ones that were installed at a different time.
+    target_agent_version = bundled_agent_version()
+    agent_update_state = {a.id: update_state(a.version, target_agent_version) for a in agents}
+    outdated_count = sum(1 for st in agent_update_state.values() if st == "outdated")
     sites = list(db.scalars(
         select(m.Site).join(m.Client).order_by(m.Client.name, m.Site.name)
     ))
@@ -458,6 +465,9 @@ def agents_home(request: Request, db: Session = Depends(get_db)):
         pip_source=rt["agent.pip_source"],
         docker_image=rt["agent.docker_image"],
         central_version=central_version,
+        target_agent_version=target_agent_version,
+        agent_update_state=agent_update_state,
+        outdated_count=outdated_count,
         flash=_pop_flash(request),
     )
 
@@ -539,14 +549,24 @@ def agent_update_command(agent_id: int, request: Request, db: Session = Depends(
     return _redirect("/manage/agents")
 
 
-@router.post("/agents/update-all")
-def agents_update_all(request: Request, db: Session = Depends(get_db)):
-    """Queue update_agent for every enrolled agent. Admin only -- one command
-    per agent so a single failure doesn't cascade."""
+@router.post("/agents/update-outdated")
+@router.post("/agents/update-all")  # legacy path alias -> same outdated-only action
+def agents_update_outdated(request: Request, db: Session = Depends(get_db)):
+    """Queue update_agent for every OUTDATED enrolled agent. Admin only -- one
+    command per agent so a single failure doesn't cascade.
+
+    "Outdated" = the agent's reported SemVer base is strictly older than the
+    version central serves (``bundled_agent_version()``). Agents that are
+    current, ahead, or never reported a version are skipped: we don't push a
+    blind update to an agent we can't confirm needs one. An agent that already
+    has a pending ``update_agent`` command is also skipped so a double-click /
+    repeat doesn't pile up duplicate commands before the heartbeat drains them.
+    """
     user = _manager(request, db)
     if user is None or user.role != m.UserRole.admin:
         _flash(request, "Only admins can mass-update agents.")
         return _redirect("/manage/agents")
+    from central.agent_release import bundled_agent_version, needs_update
     from central.runtime import load_settings
     rt = load_settings(db)
     pip_source = str(rt.get("agent.pip_source") or "").strip()
@@ -556,17 +576,41 @@ def agents_update_all(request: Request, db: Session = Depends(get_db)):
             "Set Settings -> Agent install -> Pip source to your real repo first.",
         )
         return _redirect("/manage/agents")
+    target = bundled_agent_version()
+    # Agents that already have an update_agent command waiting (not yet picked
+    # up) -- don't double-queue those.
+    already_pending = set(db.scalars(
+        select(m.Command.agent_id).where(
+            m.Command.type == m.CommandType.update_agent,
+            m.Command.status == m.CommandStatus.pending,
+        )
+    ))
     agents = list(db.scalars(select(m.Agent)))
+    queued = 0
+    skipped_pending = 0
     for agent in agents:
+        if not needs_update(agent.version, target):
+            continue
+        if agent.id in already_pending:
+            skipped_pending += 1
+            continue
         db.add(m.Command(
             agent_id=agent.id,
             type=m.CommandType.update_agent,
             payload={"pip_source": pip_source},
         ))
-    record(db, request, user, "agent.update_all",
-           detail=f"{len(agents)} agent(s); source={pip_source}")
+        queued += 1
+    record(db, request, user, "agent.update_outdated",
+           detail=(f"queued={queued}; skipped_pending={skipped_pending}; "
+                   f"target={target}; source={pip_source}"))
     db.commit()
-    _flash(request, f"Update queued for {len(agents)} agent(s).")
+    if queued:
+        msg = f"Update queued for {queued} outdated agent(s) (target {target})."
+    elif skipped_pending:
+        msg = f"No new updates queued -- {skipped_pending} already pending."
+    else:
+        msg = f"All agents are up to date (target {target}); nothing to update."
+    _flash(request, msg)
     return _redirect("/manage/agents")
 
 

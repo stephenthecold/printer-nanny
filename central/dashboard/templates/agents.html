@@ -83,6 +83,20 @@
             <span class="px-2 py-0.5 rounded text-xs {{ 'bg-green-100 text-green-700' if a.status.value=='online' else ('bg-red-100 text-red-700' if a.status.value=='offline' else 'bg-slate-100 text-slate-500') }}">{{ a.status.value }}</span>
             <span class="text-xs text-slate-400">{{ a.site.client.name ~ ' / ' ~ a.site.name if a.site and a.site.client else 'site?' }}</span>
             <span class="text-xs text-slate-400 tabular-nums" title="Self-reported on heartbeat. Suffix after '+' is the install timestamp -- it changes when self-update replaces the package files.">{{ 'v' ~ a.version if a.version else 'v?' }}</span>
+            {% set ustate = agent_update_state.get(a.id, 'unknown') %}
+            {% if ustate == 'outdated' %}
+            <span class="px-1.5 py-0.5 rounded text-xs bg-amber-100 text-amber-800"
+                  title="Central serves agent v{{ target_agent_version }}; this agent is older. Update to roll it forward.">Update available &rarr; v{{ target_agent_version }}</span>
+            {% elif ustate == 'current' %}
+            <span class="px-1.5 py-0.5 rounded text-xs bg-green-100 text-green-700"
+                  title="Running the agent version central serves (v{{ target_agent_version }}).">up to date</span>
+            {% elif ustate == 'ahead' %}
+            <span class="px-1.5 py-0.5 rounded text-xs bg-sky-100 text-sky-700"
+                  title="Reports a version newer than central serves (v{{ target_agent_version }}) -- a canary/ahead build.">ahead</span>
+            {% else %}
+            <span class="px-1.5 py-0.5 rounded text-xs bg-slate-100 text-slate-500"
+                  title="No version reported yet (agent has not heartbeated, or version is unrecognized).">version unknown</span>
+            {% endif %}
             {% if a.last_update_result and a.last_update_result.get('status') != 'ok' %}
             <span class="px-1.5 py-0.5 rounded text-xs bg-red-100 text-red-800"
                   title="{{ a.last_update_result.get('detail', '') }}">last update: {{ a.last_update_result.get('status') }}</span>
@@ -366,12 +380,21 @@
 
     {% if user.role.value == 'admin' and agents %}
     <section class="bg-white rounded-lg shadow p-4 h-fit">
-      <h2 class="font-semibold mb-2">Update all agents</h2>
-      <p class="text-xs text-slate-500 mb-3">Pushes the latest agent build to every enrolled agent; each pip-installs and restarts on its next heartbeat (~60s).</p>
-      <form method="post" action="/manage/agents/update-all"
-            onsubmit="return confirm('Push the latest agent build to ALL {{ agents|length }} enrolled agents? Each restarts independently within ~60s.')">
-        <button class="w-full bg-emerald-700 text-white rounded py-2 text-sm font-medium">Update all ({{ agents|length }})</button>
+      <h2 class="font-semibold mb-2">Update outdated agents</h2>
+      <p class="text-xs text-slate-500 mb-3">
+        Pushes agent v{{ target_agent_version }} to each agent reporting an older
+        version; current, ahead, or never-reported agents are skipped. Each
+        pip-installs and restarts on its next heartbeat (~60s).
+      </p>
+      {% if outdated_count %}
+      <form method="post" action="/manage/agents/update-outdated"
+            onsubmit="return confirm('Push agent v{{ target_agent_version }} to the {{ outdated_count }} OUTDATED agent(s)? Each restarts independently within ~60s.')">
+        <button class="w-full bg-emerald-700 text-white rounded py-2 text-sm font-medium">Update all outdated ({{ outdated_count }})</button>
       </form>
+      {% else %}
+      <button class="w-full bg-slate-200 text-slate-500 rounded py-2 text-sm font-medium cursor-not-allowed" disabled
+              title="Every reporting agent is already on v{{ target_agent_version }}.">All up to date</button>
+      {% endif %}
     </section>
     {% endif %}
   </div>

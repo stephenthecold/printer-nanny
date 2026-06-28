@@ -67,9 +67,10 @@ def test_update_result_marker_round_trip(tmp_path, monkeypatch):
     fake_marker = tmp_path / "marker.json"
     monkeypatch.setattr(updater, "_result_path", lambda: fake_marker)
 
-    updater._write_result("ok", "pip install succeeded")
+    updater._write_result("ok", ok=True, detail="pip install succeeded")
     result = updater.read_last_update_result()
     assert result["status"] == "ok"
+    assert result["ok"] is True
     assert result["detail"] == "pip install succeeded"
     assert result["ts"].endswith("Z")  # ISO-8601 UTC marker
 
@@ -94,7 +95,7 @@ def test_update_result_caps_detail_length(tmp_path, monkeypatch):
     """A multi-MB pip stderr must not bloat heartbeat payloads."""
     from printer_nanny_agent import updater
     monkeypatch.setattr(updater, "_result_path", lambda: tmp_path / "m.json")
-    updater._write_result("pip_failed", "x" * 5000)
+    updater._write_result("pip_failed", ok=False, detail="x" * 5000)
     result = updater.read_last_update_result()
     assert len(result["detail"]) <= 1024
 
