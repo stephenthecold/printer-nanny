@@ -167,11 +167,32 @@ def apply_reading(db: Session, site_id, reading: s.ReadingIn) -> Optional[m.Prin
         printer.last_provider_trace = reading.provider_trace
 
     snapshot = []
+    seen_keys: set = set()
+    seen_types: set = set()
     for supply in reading.supplies:
         upsert_supply(db, printer, supply)
+        seen_keys.add((supply.type, supply.color))
+        seen_types.add(supply.type)
         snapshot.append(
             {"type": supply.type.value, "color": supply.color, "level_pct": supply.level_pct}
         )
+
+    # Prune orphaned duplicate supply rows. upsert_supply keys on (type, color),
+    # so when a cartridge's key changes across agent/parser versions -- e.g. a
+    # colorless generic "toner"/"Drum Unit" that a newer agent now reports with a
+    # real color -- the old row is never updated again and lingers forever as a
+    # "not reported" line sitting next to the real one. Drop any row whose
+    # (type, color) is no longer reported but whose TYPE still is (so it's a
+    # superseded duplicate of a same-type supply we DID report this cycle), while
+    # leaving a genuinely intermittent unique supply (e.g. a fuser missing from
+    # one degraded poll, with no same-type sibling) alone so it isn't flapped
+    # away. Mirrors how _reconcile_events drops conditions absent this reading.
+    if seen_types:
+        for stale in list(
+            db.scalars(select(m.Supply).where(m.Supply.printer_id == printer.id))
+        ):
+            if (stale.type, stale.color) not in seen_keys and stale.type in seen_types:
+                db.delete(stale)
 
     db.add(
         m.Reading(
