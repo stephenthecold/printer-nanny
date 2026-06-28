@@ -17,6 +17,15 @@ api_key  = "pn_xxxxxxxxxxxxxxxxxxxxxxxxxxxx"
 # Set false only for self-signed central certs inside a trusted tunnel.
 verify_tls = true
 
+# Durable local state (the store-and-forward readings spool). Optional — defaults
+# to /var/lib/printer-nanny (or $PRINTER_NANNY_DATA_DIR). If a readings push fails
+# (central down / non-2xx), the cycle's readings are written here and replayed in
+# order on the next successful connection, so an outage never drops a meter cycle.
+# data_dir = "/var/lib/printer-nanny"
+# Cap on buffered readings during an outage; oldest are dropped past this so the
+# spool can never grow unbounded.
+# spool_max_readings = 10000
+
 # --- Optional local fallbacks (central overrides these when reachable) --------
 # [snmp]
 # version   = "2c"

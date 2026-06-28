@@ -25,6 +25,16 @@ except ModuleNotFoundError:  # 3.9/3.10
 from printer_nanny_agent.snmp import SnmpParams
 
 DEFAULT_CONFIG_PATH = "/etc/printer-nanny/agent.toml"
+# Where the agent keeps durable local state (the store-and-forward spool, and
+# any future on-disk state). Resolution mirrors the config path: an explicit
+# ``data_dir`` in the file/flags wins, then ``$PRINTER_NANNY_DATA_DIR``, then
+# this default. Created lazily on first write, never required to pre-exist.
+DEFAULT_DATA_DIR = "/var/lib/printer-nanny"
+# Hard cap on how many readings the spool may buffer across a central outage.
+# Beyond this the oldest readings are dropped (and logged) so a long outage
+# can never grow the spool file unbounded. ~10k readings is a few MB of JSON
+# and covers days of outage for a typical site fleet.
+DEFAULT_SPOOL_MAX_READINGS = 10000
 
 
 @dataclass
@@ -51,8 +61,15 @@ class AgentConfig:
     discovery_interval_seconds: int = 3600
     heartbeat_interval_seconds: int = 60
     verify_tls: bool = True
+    # Durable local-state directory + the spool cap (see DEFAULT_* above).
+    data_dir: str = DEFAULT_DATA_DIR
+    spool_max_readings: int = DEFAULT_SPOOL_MAX_READINGS
     snmp: SnmpParams = field(default_factory=SnmpParams)
     subnets: List[SubnetConfig] = field(default_factory=list)
+
+    def spool_path(self) -> str:
+        """Filesystem path of the store-and-forward readings spool."""
+        return os.path.join(self.data_dir, "readings-spool.jsonl")
 
     def snmp_for(self, subnet: SubnetConfig) -> SnmpParams:
         """SNMP params for a subnet, applying per-subnet overrides."""
@@ -125,6 +142,7 @@ _ENV_MAP = {
     "agent_id": "PN_AGENT_ID",
     "api_key": "PN_API_KEY",
     "verify_tls": "PN_VERIFY_TLS",
+    "data_dir": "PRINTER_NANNY_DATA_DIR",
 }
 
 
@@ -189,6 +207,8 @@ def parse_config(data: dict) -> AgentConfig:
         discovery_interval_seconds=int(data.get("discovery_interval_seconds", 3600)),
         heartbeat_interval_seconds=int(data.get("heartbeat_interval_seconds", 60)),
         verify_tls=bool(data.get("verify_tls", True)),
+        data_dir=str(data.get("data_dir") or DEFAULT_DATA_DIR),
+        spool_max_readings=int(data.get("spool_max_readings", DEFAULT_SPOOL_MAX_READINGS)),
         snmp=snmp,
         subnets=subnets,
     )

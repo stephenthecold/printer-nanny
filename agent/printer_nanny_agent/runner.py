@@ -10,6 +10,8 @@ import time
 from pathlib import Path
 from typing import List, Optional
 
+import httpx
+
 from printer_nanny_agent import __version__
 from printer_nanny_agent.client import CentralClient
 from printer_nanny_agent.config import AgentConfig, merge_remote
@@ -17,10 +19,62 @@ from printer_nanny_agent.discovery import discover_subnet
 from printer_nanny_agent.mdns import assign_subnet_cidr, discover_mdns, mdns_available
 from printer_nanny_agent.poller import poll_printer
 from printer_nanny_agent.snmp import PysnmpBackend, SnmpBackend, SnmpError, SnmpParams
+from printer_nanny_agent.spool import ReadingSpool
 
 log = logging.getLogger("printer_nanny_agent.runner")
 
 _POLL_CONCURRENCY = 16
+
+
+def _spool_for(config: AgentConfig) -> ReadingSpool:
+    return ReadingSpool(config.spool_path(), max_readings=config.spool_max_readings)
+
+
+async def drain_spool(client: CentralClient, spool: ReadingSpool) -> int:
+    """Replay any readings buffered during a prior central outage.
+
+    FIFO, ack-then-remove. A failure mid-drain leaves the remainder spooled
+    (drain() handles that); we just swallow the error here so a still-down
+    central doesn't abort the rest of the cycle. Returns readings replayed.
+    """
+    try:
+        return await spool.drain(client.post_readings)
+    except (httpx.HTTPError, OSError) as exc:
+        # Central still unreachable (or came back then dropped again). The
+        # un-replayed readings stay on disk; try again next connectivity.
+        log.warning("spool: replay interrupted, will retry next cycle: %s", exc)
+        return 0
+
+
+async def push_readings(
+    client: CentralClient, spool: ReadingSpool, readings: List[dict]
+) -> int:
+    """Push freshly-polled readings, spooling them durably if the push fails.
+
+    Replays any previously-spooled readings first (so order across cycles is
+    preserved), then sends this cycle's batch. On a connection error / non-2xx
+    the batch is written to the spool instead of being silently dropped, and we
+    return 0 applied -- the readings are safe on disk for the next successful
+    connection. Returns the number central reported applied.
+    """
+    if not readings:
+        # Even with nothing fresh, a reachable central is a chance to drain.
+        await drain_spool(client, spool)
+        return 0
+    # Drain the backlog first so central receives readings roughly in the order
+    # they were taken. If the drain is interrupted it spools the remainder and
+    # we still try this cycle's batch (which will also spool on failure).
+    await drain_spool(client, spool)
+    try:
+        result = await client.post_readings(readings)
+    except (httpx.HTTPError, OSError) as exc:
+        spool.append(readings)
+        log.warning(
+            "readings push failed (%s) -- %d reading(s) spooled for retry",
+            exc, len(readings),
+        )
+        return 0
+    return result.get("applied", 0)
 
 
 def _due(last: Optional[float], interval: float, now: float) -> bool:
@@ -40,10 +94,19 @@ def _params_for_target(target: dict, config: AgentConfig) -> SnmpParams:
     )
 
 
-async def poll_targets(client: CentralClient, backend: SnmpBackend, config: AgentConfig) -> dict:
+async def poll_targets(
+    client: CentralClient,
+    backend: SnmpBackend,
+    config: AgentConfig,
+    spool: Optional[ReadingSpool] = None,
+) -> dict:
+    spool = spool if spool is not None else _spool_for(config)
     targets = await client.get_targets()
     if not targets:
         log.info("no approved targets to poll")
+        # No fresh readings, but a reachable central is a chance to flush any
+        # backlog from a prior outage.
+        await drain_spool(client, spool)
         return {"polled": 0, "applied": 0, "unreachable": 0}
 
     sem = asyncio.Semaphore(_POLL_CONCURRENCY)
@@ -60,10 +123,10 @@ async def poll_targets(client: CentralClient, backend: SnmpBackend, config: Agen
                 return None
 
     readings = [r for r in await asyncio.gather(*(poll_one(t) for t in targets)) if r]
-    applied = 0
-    if readings:
-        result = await client.post_readings(readings)
-        applied = result.get("applied", 0)
+    # push_readings drains the backlog first, then either applies this cycle's
+    # batch or spools it durably on failure -- a failed push never drops the
+    # cycle.
+    applied = await push_readings(client, spool, readings)
     log.info("polled %d target(s), %d applied, %d unreachable", len(targets), applied, unreachable)
     return {"polled": len(targets), "applied": applied, "unreachable": unreachable}
 
@@ -143,7 +206,11 @@ async def _effective_config(client: CentralClient, config: AgentConfig) -> Agent
 
 
 async def poll_one_target(
-    client: CentralClient, backend: SnmpBackend, config: AgentConfig, ip: str
+    client: CentralClient,
+    backend: SnmpBackend,
+    config: AgentConfig,
+    ip: str,
+    spool: Optional[ReadingSpool] = None,
 ) -> dict:
     """Poll one printer by IP and push its reading. Used by the poll_printer command.
 
@@ -151,6 +218,7 @@ async def poll_one_target(
     falls back to the agent's defaults if the IP isn't in the approved list
     (e.g. the operator clicked Poll-now on a printer they just unignored).
     """
+    spool = spool if spool is not None else _spool_for(config)
     targets = await client.get_targets()
     target = next((t for t in targets if t.get("ip") == ip), {"ip": ip})
     try:
@@ -158,27 +226,36 @@ async def poll_one_target(
     except SnmpError as exc:
         log.warning("poll_printer failed for %s: %s", ip, exc)
         return {"polled": 1, "applied": 0, "unreachable": 1}
-    result = await client.post_readings([reading])
-    applied = result.get("applied", 0)
+    # Spool-on-failure path: a central outage during an on-demand poll buffers
+    # the reading instead of dropping it.
+    applied = await push_readings(client, spool, [reading])
     log.info("poll_printer %s -> applied=%d", ip, applied)
     return {"polled": 1, "applied": applied, "unreachable": 0}
 
 
 async def handle_commands(
-    client: CentralClient, backend: SnmpBackend, config: AgentConfig, commands: List[dict]
+    client: CentralClient,
+    backend: SnmpBackend,
+    config: AgentConfig,
+    commands: List[dict],
+    spool: Optional[ReadingSpool] = None,
 ) -> None:
+    # Don't build a spool eagerly here: only the poll branches use it, and
+    # poll_targets/poll_one_target already default-construct one from None. An
+    # update_agent / rescan / update_config command must not touch config.spool_*
+    # (the self-update path is invoked with a minimal config).
     for cmd in commands:
         ctype = cmd.get("type")
         log.info("handling command #%s: %s", cmd.get("id"), ctype)
         if ctype == "rescan":
             await discover_all(client, backend, config)
         elif ctype == "poll_now":
-            await poll_targets(client, backend, config)
+            await poll_targets(client, backend, config, spool)
         elif ctype == "poll_printer":
             payload = cmd.get("payload") or {}
             ip = payload.get("ip")
             if ip:
-                await poll_one_target(client, backend, config, ip)
+                await poll_one_target(client, backend, config, ip, spool)
             else:
                 log.warning("poll_printer command #%s missing 'ip' in payload", cmd.get("id"))
         elif ctype == "update_config":
@@ -218,18 +295,22 @@ async def run_once(config: AgentConfig, backend: Optional[SnmpBackend] = None) -
         config.central_url, config.agent_id, config.api_key, verify_tls=config.verify_tls
     )
     install_path, update_result = _startup_diagnostics()
+    spool = _spool_for(config)
     try:
         await client.heartbeat(
             __version__,
             install_path=install_path,
             last_update_result=update_result,
         )
+        # Central answered the heartbeat -> it's reachable. Flush any readings
+        # spooled during a prior outage before doing anything else this cycle.
+        await drain_spool(client, spool)
         config = await _effective_config(client, config)
         commands = await client.get_commands()
-        await handle_commands(client, backend, config, commands)
-        poll = await poll_targets(client, backend, config)
+        await handle_commands(client, backend, config, commands, spool)
+        poll = await poll_targets(client, backend, config, spool)
         disc = await discover_all(client, backend, config)
-        return {"commands": len(commands), **poll, **disc}
+        return {"commands": len(commands), "spooled": spool.count(), **poll, **disc}
     finally:
         await client.aclose()
         await backend.close()
@@ -250,6 +331,10 @@ async def run_forever(config: AgentConfig, backend: Optional[SnmpBackend] = None
     last_poll = None
     last_discovery = None
     effective = config
+    # One spool for the process lifetime. Its max comes from the local config;
+    # central's merge_remote does not (and should not) override where local
+    # state lives, so the cap is stable across config refreshes.
+    spool = _spool_for(config)
     log.info(
         "agent %d started -> %s (install: %s, version: %s)",
         config.agent_id, config.central_url, install_path, __version__,
@@ -264,11 +349,14 @@ async def run_forever(config: AgentConfig, backend: Optional[SnmpBackend] = None
                     last_update_result=pending_update_result,
                 )
                 pending_update_result = None  # only on the first heartbeat
+                # Heartbeat succeeded -> central is up. Flush the outage backlog
+                # first so spooled readings catch up before fresh ones pile on.
+                await drain_spool(client, spool)
                 effective = await _effective_config(client, config)
                 commands = await client.get_commands()
-                await handle_commands(client, backend, effective, commands)
+                await handle_commands(client, backend, effective, commands, spool)
                 if _due(last_poll, effective.poll_interval_seconds, now):
-                    await poll_targets(client, backend, effective)
+                    await poll_targets(client, backend, effective, spool)
                     last_poll = now
                 if _due(last_discovery, effective.discovery_interval_seconds, now):
                     await discover_all(client, backend, effective)
