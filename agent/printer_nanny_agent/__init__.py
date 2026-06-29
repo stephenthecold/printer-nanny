@@ -13,7 +13,7 @@ import os as _os
 # Baseline package version. Bump in pyproject.toml + here together when we
 # do a real release; the install-time suffix below is what actually changes
 # on each self-update so operators can see updates landed.
-__base_version__ = "0.4.0"
+__base_version__ = "0.5.0"
 
 
 def _install_marker() -> str:

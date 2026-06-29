@@ -49,6 +49,51 @@ class PrinterProvider:
         return reading
 
 
+def record_meters(
+    reading: dict,
+    *,
+    total: Optional[int] = None,
+    mono: Optional[int] = None,
+    color: Optional[int] = None,
+    functions: Optional[dict] = None,
+) -> Optional[dict]:
+    """Record billing meters on ``reading`` from a vendor counter decoder.
+
+    The single place a provider writes the mono/color split + per-function
+    breakdown, so every vendor decoder behaves the same. Only NON-NEGATIVE
+    INTEGERS are stored -- anything else (None, bool, negative, junk from a bad
+    decode) is dropped, so a misdecoded blob can never write a bogus meter that
+    would corrupt billing. ``functions`` is an optional per-function mapping,
+    e.g. ``{"print": N, "copy": N, "fax": N}``.
+
+    Sets ``reading["mono_count"]`` / ``reading["color_count"]`` and merges a
+    ``meter_snapshot`` dict (so a later pass can add fields). Returns the merged
+    snapshot, or None if nothing valid was supplied. Does NOT touch
+    ``page_count`` -- the standard-MIB total stays authoritative for the total.
+    """
+    def _ok(v) -> bool:
+        return isinstance(v, int) and not isinstance(v, bool) and v >= 0
+
+    snap: dict = {}
+    if _ok(total):
+        snap["total"] = total
+    if _ok(mono):
+        snap["mono"] = mono
+        reading["mono_count"] = mono
+    if _ok(color):
+        snap["color"] = color
+        reading["color_count"] = color
+    for fname, v in (functions or {}).items():
+        if _ok(v):
+            snap[str(fname)] = v
+    if not snap:
+        return None
+    merged = dict(reading.get("meter_snapshot") or {})
+    merged.update(snap)
+    reading["meter_snapshot"] = merged
+    return merged
+
+
 _REGISTRY: List[PrinterProvider] = []
 
 

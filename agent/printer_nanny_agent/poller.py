@@ -255,6 +255,15 @@ def build_reading(
         "ip": ip,
         "status": status,
         "page_count": _to_int(scalars.get(oids.PRT_MARKER_LIFE_COUNT)),
+        # Billing-grade meter split. The standard Printer-MIB only gives a TOTAL
+        # impression count (page_count above); the mono/color split lives in
+        # vendor-private OIDs, so a vendor provider fills these in `augment` when
+        # it can decode them. Left None here -- we never synthesize a split from
+        # the total. `meter_snapshot` is the richer per-function breakdown
+        # (e.g. {"total":N,"mono":N,"color":N,"print":N,"copy":N,"fax":N}).
+        "mono_count": None,
+        "color_count": None,
+        "meter_snapshot": None,
         "hostname": scalars.get(oids.SYS_NAME),
         "brand": brand,
         "model": model,

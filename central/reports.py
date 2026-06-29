@@ -193,7 +193,7 @@ def build_monthly_billing_csv(db: Session) -> bytes:
     writer = csv.writer(buf)
     writer.writerow([
         "client", "site", "ip", "hostname", "brand", "model", "serial",
-        "asset_tag", "page_count", "last_seen_utc",
+        "asset_tag", "page_count", "mono_count", "color_count", "last_seen_utc",
     ])
     stmt = (
         select(m.Printer)
@@ -211,6 +211,10 @@ def build_monthly_billing_csv(db: Session) -> bytes:
             p.serial or "",
             p.asset_tag or "",
             p.page_count if p.page_count is not None else "",
+            # Mono/color split for cost-per-page billing. Blank (not 0) when the
+            # device reports no split, so a missing meter is never billed as zero.
+            p.mono_count if p.mono_count is not None else "",
+            p.color_count if p.color_count is not None else "",
             p.last_seen.isoformat() if p.last_seen else "",
         ])
     return buf.getvalue().encode("utf-8")

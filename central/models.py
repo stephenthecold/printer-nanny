@@ -316,6 +316,12 @@ class Printer(Base):
         _enum(DiscoveryState), default=DiscoveryState.pending, index=True
     )
     page_count: Mapped[Optional[int]] = mapped_column(Integer, default=None)
+    # Latest mono/color impression meters (billing-grade). Total lives in
+    # page_count; these split it. None when the device/provider doesn't report a
+    # split (we never invent it). This is a display cache of the most recent
+    # reading; billing diffs the append-only readings series, not this value.
+    mono_count: Mapped[Optional[int]] = mapped_column(Integer, default=None)
+    color_count: Mapped[Optional[int]] = mapped_column(Integer, default=None)
     last_seen: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), default=None)
     # Operator-managed metadata: free-text notes, an asset/lease/inventory tag,
     # and a list of short labels (e.g. "lease", "vip", "color").
@@ -395,6 +401,13 @@ class Reading(Base):
     )
     ts: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, index=True)
     page_count: Mapped[Optional[int]] = mapped_column(Integer, default=None)
+    # Per-reading mono/color impression meters (billing diffs across the period
+    # read these). None when no split is reported. ``meter_snapshot`` holds the
+    # richer, vendor-shaped per-function breakdown (e.g. print/copy/fax/total)
+    # without needing a column per function -- same pattern as supply_snapshot.
+    mono_count: Mapped[Optional[int]] = mapped_column(Integer, default=None)
+    color_count: Mapped[Optional[int]] = mapped_column(Integer, default=None)
+    meter_snapshot: Mapped[Optional[dict]] = mapped_column(JSON, default=None)
     status: Mapped[PrinterStatus] = mapped_column(_enum(PrinterStatus), default=PrinterStatus.unknown)
     supply_snapshot: Mapped[Optional[dict]] = mapped_column(JSON, default=None)
 

@@ -5,7 +5,7 @@
 # The repo root pyproject also includes this package for monorepo dev/tests.
 [project]
 name = "printer-nanny-agent"
-version = "0.4.0"
+version = "0.5.0"
 description = "Printer Nanny site agent — SNMP collector that reports to the central server"
 license = "Apache-2.0"
 authors = [{ name = "Stephen Warren", email = "stephen.warren09@gmail.com" }]
