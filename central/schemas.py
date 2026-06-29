@@ -5,9 +5,16 @@ from __future__ import annotations
 from datetime import datetime
 from typing import Optional
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 from central import models as m
+
+# Upper bound for impression meters: the readings/printers meter columns are
+# 32-bit INTEGER (INT4 on Postgres). A value at/above this would overflow the
+# column (500, dropping the whole batch) -- and a negative meter is nonsense for
+# billing -- so out-of-range counts from a misbehaving agent are coerced to
+# "not reported" (None) at the trust boundary rather than poisoning billing.
+_INT4_MAX = 2_147_483_647
 
 
 class ORMModel(BaseModel):
@@ -53,6 +60,12 @@ class ReadingIn(BaseModel):
     ts: Optional[datetime] = None
     status: m.PrinterStatus = m.PrinterStatus.unknown
     page_count: Optional[int] = None
+    # Billing-grade meter split of page_count. None when the device/provider
+    # reports no split (we never synthesize it). meter_snapshot is a vendor-shaped
+    # per-function breakdown, e.g. {"total":N,"mono":N,"color":N,"print":N,...}.
+    mono_count: Optional[int] = None
+    color_count: Optional[int] = None
+    meter_snapshot: Optional[dict] = None
     hostname: Optional[str] = None
     brand: Optional[str] = None
     model: Optional[str] = None
@@ -66,6 +79,21 @@ class ReadingIn(BaseModel):
     # that ran) -- the dashboard renders them as-is so providers can evolve
     # their summary without a schema migration.
     provider_trace: Optional[list[dict]] = None
+
+    @field_validator("page_count", "mono_count", "color_count")
+    @classmethod
+    def _sane_meter(cls, v: Optional[int]) -> Optional[int]:
+        """Drop a negative or column-overflowing meter to None at ingest.
+
+        Defense at the trust boundary: even an authenticated agent shouldn't be
+        able to write a negative impression count (billing nonsense) or a value
+        that overflows the INT4 column (which would 500 and drop the batch). A
+        bad value is treated as "not reported" rather than rejecting the whole
+        reading, so one glitchy field never costs the rest of the poll.
+        """
+        if v is None:
+            return None
+        return v if 0 <= v <= _INT4_MAX else None
 
 
 class ReadingsBatchIn(BaseModel):

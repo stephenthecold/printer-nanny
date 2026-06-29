@@ -159,6 +159,13 @@ def apply_reading(db: Session, site_id, reading: s.ReadingIn) -> Optional[m.Prin
     printer.status = reading.status
     if reading.page_count is not None:
         printer.page_count = reading.page_count
+    # Cache the latest mono/color split for dashboards/reports. Billing diffs the
+    # append-only readings series (below), not this cache, so we simply mirror the
+    # latest reported value -- same treatment as page_count.
+    if reading.mono_count is not None:
+        printer.mono_count = reading.mono_count
+    if reading.color_count is not None:
+        printer.color_count = reading.color_count
     printer.last_seen = ts
     if reading.provider_trace is not None:
         # Always overwrite with the latest poll's trace. Old traces don't
@@ -199,6 +206,9 @@ def apply_reading(db: Session, site_id, reading: s.ReadingIn) -> Optional[m.Prin
             printer_id=printer.id,
             ts=ts,
             page_count=reading.page_count,
+            mono_count=reading.mono_count,
+            color_count=reading.color_count,
+            meter_snapshot=reading.meter_snapshot or None,
             status=reading.status,
             supply_snapshot=snapshot or None,
         )

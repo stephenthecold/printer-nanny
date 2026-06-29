@@ -23,7 +23,7 @@ from typing import Optional, Tuple
 # every agent-base bump. The import path below is preferred and wins whenever
 # the package is importable, so this constant only matters for a central image
 # that doesn't ship the agent code.
-_FALLBACK_BUNDLED_AGENT_VERSION = "0.4.0"
+_FALLBACK_BUNDLED_AGENT_VERSION = "0.5.0"
 
 
 def bundled_agent_version() -> str:

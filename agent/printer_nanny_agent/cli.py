@@ -96,6 +96,21 @@ async def _cmd_probe(config: AgentConfig, ip: str) -> int:
                 continue
             for oid, value in rows.items():
                 print(f"  WALK {label}  {oid}\n         = {value!r}")
+        # Standard Printer-MIB page counters (prtMarkerLifeCount table). The
+        # scalar at .1.1 is the device TOTAL; a color device often exposes extra
+        # marker rows here, which is the first place to look for a mono/color
+        # split to wire into billing meters. Paste this section if the dashboard
+        # shows total-only and you want the mono/color split for this model.
+        print("\n  -- page counters: prtMarkerLifeCount table (1.3.6.1.2.1.43.10.2.1.4) --")
+        try:
+            marker_rows = await backend.walk(ip, "1.3.6.1.2.1.43.10.2.1.4", p)
+        except SnmpError as exc:
+            print(f"  WALK prtMarkerLifeCount: error {exc}")
+        else:
+            if not marker_rows:
+                print("  (empty -- device exposes no standard marker counters)")
+            for oid, value in marker_rows.items():
+                print(f"  {oid} = {value!r}")
         # Vendor-specific private MIB dump. Standard Printer-MIB reports many
         # printers' toner level as -3 (some remaining) because the cartridge has
         # no continuous sensor; the real percentages live under the vendor's

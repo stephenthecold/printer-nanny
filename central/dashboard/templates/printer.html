@@ -63,8 +63,19 @@
     <div class="text-slate-500 mt-1">Last seen {{ printer.last_seen.strftime('%Y-%m-%d %H:%M') if printer.last_seen else 'never' }}</div>
   </div>
   <div class="bg-white rounded-lg shadow p-4">
-    <div class="text-slate-500 text-xs">Page count</div>
+    <div class="text-slate-500 text-xs">Page count <span class="text-slate-400">(total impressions)</span></div>
     <div class="text-2xl font-semibold mt-1 tabular-nums">{{ '{:,}'.format(printer.page_count) if printer.page_count else '--' }}</div>
+    {# Mono/color split for cost-per-page billing. Shown only when a vendor
+       provider actually reported it; otherwise we say so rather than implying
+       an all-mono device. #}
+    {% if printer.mono_count is not none or printer.color_count is not none %}
+    <div class="mt-1 flex flex-wrap gap-x-3 gap-y-0.5 text-xs">
+      <span class="text-slate-600"><span class="inline-block w-2 h-2 rounded-full bg-slate-700 align-middle mr-0.5"></span>Mono {{ '{:,}'.format(printer.mono_count) if printer.mono_count is not none else '--' }}</span>
+      <span class="text-slate-600"><span class="inline-block w-2 h-2 rounded-full bg-sky-500 align-middle mr-0.5"></span>Color {{ '{:,}'.format(printer.color_count) if printer.color_count is not none else '--' }}</span>
+    </div>
+    {% else %}
+    <div class="mt-1 text-xs text-slate-400" title="The standard Printer-MIB only reports a total; the mono/color split needs a vendor counter OID. Run `printer-nanny-agent probe <ip>` to capture it.">mono/color split not reported</div>
+    {% endif %}
     {% if spark %}
     <svg viewBox="0 0 280 48" class="mt-2 w-full h-12">
       <polyline points="{{ spark }}" fill="none" stroke="#0284c7" stroke-width="2" />
