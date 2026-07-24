@@ -20,6 +20,9 @@ log = logging.getLogger("printer_nanny.worker")
 
 JOBS = (
     jobs.mark_offline_agents,
+    # Must run before evaluate_alerts so a printer that just went stale is
+    # already marked offline when the rules are evaluated in this same cycle.
+    jobs.mark_offline_printers,
     jobs.evaluate_alerts,
     jobs.check_maintenance_due,
     # Re-send any failed/pending channel deliveries that are due (backoff).

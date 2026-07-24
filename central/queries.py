@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import ipaddress
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Optional
 
 from sqlalchemy import func, select
@@ -53,8 +53,31 @@ def fleet_summary(db: Session, client_id: Optional[int] = None) -> dict:
     }
 
 
-def low_supplies(db: Session, threshold: float = DEFAULT_LOW_SUPPLY_PCT) -> list[m.Supply]:
-    """Supplies at or below the threshold percentage, lowest first."""
+def low_supply_threshold(db: Session) -> float:
+    """The operator's low-supply percentage, from Settings.
+
+    ``alerts.low_supply_pct`` is editable in the Alerts settings tab but was
+    read by nothing: the dashboard counts and the weekly report used the
+    hard-coded ``DEFAULT_LOW_SUPPLY_PCT`` instead, so moving the slider changed
+    nothing an operator could see. Resolve it here so every caller picks up the
+    configured value, with the constant kept as the fallback default.
+    """
+    from central.runtime import load_settings  # lazy: avoid an import cycle
+
+    try:
+        return float(load_settings(db).get("alerts.low_supply_pct", DEFAULT_LOW_SUPPLY_PCT))
+    except (TypeError, ValueError):
+        return DEFAULT_LOW_SUPPLY_PCT
+
+
+def low_supplies(db: Session, threshold: Optional[float] = None) -> list[m.Supply]:
+    """Supplies at or below the threshold percentage, lowest first.
+
+    ``threshold=None`` means "use the operator's configured value"; callers
+    that genuinely want a specific cutoff (the reporting API) still pass one.
+    """
+    if threshold is None:
+        threshold = low_supply_threshold(db)
     return list(
         db.scalars(
             select(m.Supply)
@@ -72,6 +95,10 @@ def low_supplies(db: Session, threshold: float = DEFAULT_LOW_SUPPLY_PCT) -> list
 # Days of polling history a printer needs before the consumption slope is
 # trustworthy enough to display. Below this, the UI shows "est. in ~Nd".
 RUNWAY_MIN_HISTORY_DAYS = 3.0
+# Matches the worker's FORECAST_HISTORY_WINDOW_DAYS so the portal and the
+# alerting engine fit over the same history and can't disagree about runway.
+RUNWAY_HISTORY_WINDOW_DAYS = 30
+RUNWAY_MAX_ROWS = 2000
 
 
 def supply_runway(db: Session, printer_ids: list[int]) -> dict:
@@ -88,8 +115,13 @@ def supply_runway(db: Session, printer_ids: list[int]) -> dict:
                     instead of an unexplained dash, and "stable" when there
                     IS enough history but no measurable depletion.
 
-    Caps history at the most recent 60 snapshot readings per printer so a
-    long-lived fleet page stays cheap.
+    Reads a time window rather than a fixed row count. A 60-row cap looked
+    cheap but silently disabled the feature: at the default 300s poll interval
+    60 readings span under 5 hours, so the fit never met
+    ``RUNWAY_MIN_HISTORY_DAYS`` and every printer reported ``None`` forever.
+    Windowing by time makes the span independent of how fast the fleet polls;
+    ``RUNWAY_MAX_ROWS`` stays as a safety valve for very fast pollers so a
+    long-lived fleet page still stays cheap.
     """
     from central.worker.jobs import forecast_days_to_empty  # lazy: avoid cycle
 
@@ -99,9 +131,13 @@ def supply_runway(db: Session, printer_ids: list[int]) -> dict:
         rows = list(
             db.scalars(
                 select(m.Reading)
-                .where(m.Reading.printer_id == pid, m.Reading.supply_snapshot.is_not(None))
+                .where(
+                    m.Reading.printer_id == pid,
+                    m.Reading.supply_snapshot.is_not(None),
+                    m.Reading.ts >= now - timedelta(days=RUNWAY_HISTORY_WINDOW_DAYS),
+                )
                 .order_by(m.Reading.ts.desc())
-                .limit(60)
+                .limit(RUNWAY_MAX_ROWS)
             )
         )
         series: dict = {}
@@ -190,6 +226,7 @@ def per_client_rollup(db: Session) -> list[dict]:
     see at a glance which client has fires burning, instead of clicking
     through each client to find out.
     """
+    low_pct = low_supply_threshold(db)
     out: list[dict] = []
     clients = list(db.scalars(select(m.Client).order_by(m.Client.name)))
     for client in clients:
@@ -229,7 +266,7 @@ def per_client_rollup(db: Session) -> list[dict]:
                 m.Printer.client_id == client.id,
                 m.Printer.discovery_state == m.DiscoveryState.approved,
                 m.Supply.level_pct.is_not(None),
-                m.Supply.level_pct <= DEFAULT_LOW_SUPPLY_PCT,
+                m.Supply.level_pct <= low_pct,
             )
         ) or 0
         out.append({

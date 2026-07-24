@@ -13,15 +13,21 @@ def test_seed_init_creates_admin_when_empty(db):
     assert set(users) == {"admin", "tech"}
     assert users["admin"].role == m.UserRole.admin
     assert verify_password("admin", users["admin"].password_hash)
-    # And the global alert rules are in place (low supply / errors / agent offline).
-    assert db.query(m.AlertRule).count() == 3
+    # And the global alert rules are in place. Assert the condition types rather
+    # than a bare count, so adding a rule has to be a deliberate edit here.
+    assert {r.condition_type for r in db.query(m.AlertRule)} == {
+        m.AlertConditionType.supply_below,
+        m.AlertConditionType.error_severity,
+        m.AlertConditionType.offline_minutes,
+        m.AlertConditionType.printer_offline,
+    }
 
 
 def test_seed_init_is_idempotent(db):
     seed.seed_init()
     seed.seed_init()  # second call must not duplicate rows
     assert db.query(m.User).count() == 2
-    assert db.query(m.AlertRule).count() == 3
+    assert db.query(m.AlertRule).count() == 4
 
 
 def test_seed_init_leaves_existing_users_alone(db):

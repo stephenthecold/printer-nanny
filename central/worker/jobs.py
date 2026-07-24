@@ -71,6 +71,59 @@ def mark_offline_agents(db: Session, now: Optional[datetime] = None) -> dict:
     return {"agents_updated": changed}
 
 
+def _sites_with_a_live_agent(db: Session) -> set:
+    """Site ids currently covered by at least one non-offline agent.
+
+    Mirrors ``services.sites_served_by_agent`` (home site + every subnet
+    assigned to the agent) but aggregated across all agents, so a site served
+    by two agents stays covered while only one of them is down.
+    """
+    covered: set = set()
+    for agent in db.scalars(select(m.Agent).where(m.Agent.status == m.AgentStatus.online)):
+        covered.add(agent.site_id)
+        covered.update(
+            db.scalars(select(m.Subnet.site_id).where(m.Subnet.agent_id == agent.id).distinct())
+        )
+    return covered
+
+
+def mark_offline_printers(db: Session, now: Optional[datetime] = None) -> dict:
+    """Mark approved printers offline once their readings dry up.
+
+    An unreachable printer doesn't report anything -- ``poll_one`` raises,
+    the agent drops it from the batch, and central is never told. Since
+    ``Printer.status`` is only ever written from an arriving reading, nothing
+    moved it off its last-good value: an unplugged printer read "ok" forever
+    and raised nothing, which is the single failure an MSP most needs to catch.
+
+    Printers whose site has no live agent are skipped. That outage is already
+    covered by the agent-offline alert, and marking the agent's whole fleet
+    offline would turn one site event into one alert per printer.
+
+    Recovery needs no work here: the next reading to arrive sets the status
+    from the device itself (``services.apply_reading``).
+    """
+    now = now or _now()
+    minutes = load_settings(db).get("alerts.printer_offline_minutes", 30)
+    grace = timedelta(minutes=minutes)
+    covered = _sites_with_a_live_agent(db)
+    changed = 0
+    for printer in db.scalars(
+        select(m.Printer).where(m.Printer.discovery_state == m.DiscoveryState.approved)
+    ):
+        if printer.site_id not in covered:
+            continue
+        last = _aware(printer.last_seen)
+        # A printer approved but never yet polled has nothing to go stale.
+        if last is None or (now - last) <= grace:
+            continue
+        if printer.status != m.PrinterStatus.offline:
+            printer.status = m.PrinterStatus.offline
+            changed += 1
+    db.commit()
+    return {"printers_marked_offline": changed}
+
+
 # --------------------------------------------------------------------------- #
 # Alert evaluation
 # --------------------------------------------------------------------------- #
@@ -292,8 +345,35 @@ def evaluate_alerts(db: Session, now: Optional[datetime] = None) -> dict:
                         opened += 1
             continue
 
+        # Resolved once per rule rather than per printer: the covered-site set
+        # is the same for every printer in scope.
+        covered = (
+            _sites_with_a_live_agent(db)
+            if rule.condition_type == m.AlertConditionType.printer_offline
+            else None
+        )
+
         for printer in _printers_in_scope(db, rule):
-            if rule.condition_type == m.AlertConditionType.supply_below:
+            if rule.condition_type == m.AlertConditionType.printer_offline:
+                # Suppress while the whole site is dark -- the agent-offline
+                # alert already covers it. See mark_offline_printers.
+                if printer.site_id not in covered:
+                    continue
+                limit = timedelta(minutes=rule.threshold or 0)
+                last = _aware(printer.last_seen)
+                if last is not None and (now - last) >= limit:
+                    key = f"rule:{rule.id}:printer:{printer.id}:offline"
+                    active_keys.add(key)
+                    title = f"Printer offline: {_printer_label(printer)}"
+                    detail = (
+                        f"No reading for over {rule.threshold:.0f} min "
+                        f"(last seen: {last.isoformat()})."
+                    )
+                    if _open_alert(db, rule, key, title, detail, printer=printer,
+                                   candidates=candidates, now=now, runtime=runtime):
+                        opened += 1
+
+            elif rule.condition_type == m.AlertConditionType.supply_below:
                 threshold = rule.threshold or 0
                 for supply in printer.supplies:
                     if supply.level_pct is not None and supply.level_pct <= threshold:
@@ -526,6 +606,12 @@ def check_maintenance_due(db: Session, now: Optional[datetime] = None) -> dict:
 # implicitly assumed; the regression keeps that floor while smoothing the rest.
 FORECAST_MIN_POINTS = 2          # need at least a baseline + a follow-up reading
 FORECAST_MIN_HISTORY_DAYS = 3.0  # ...spanning at least this long (matches RUNWAY_MIN_HISTORY_DAYS)
+# How far back the forecast pass reads. `readings` is append-only and has no
+# retention, so an unwindowed scan loads every row ever recorded for every
+# printer -- on every 60s cycle, under the leader lock. That grows without
+# bound and drags alert latency down with it as a deployment ages. A month is
+# far more than the fit needs (it segments to the current cartridge anyway).
+FORECAST_HISTORY_WINDOW_DAYS = 30
 
 
 def forecast_days_to_empty(
@@ -611,6 +697,7 @@ def forecast_supplies(db: Session, now: Optional[datetime] = None) -> dict:
     runtime = load_settings(db)
     candidates = routable_channels(db, runtime)
     lead_days = runtime.get("alerts.reorder_lead_days", 14)
+    history_since = now - timedelta(days=FORECAST_HISTORY_WINDOW_DAYS)
 
     flagged = 0
     forecasted = 0
@@ -630,7 +717,11 @@ def forecast_supplies(db: Session, now: Optional[datetime] = None) -> dict:
         series: dict[str, list[tuple[datetime, float]]] = {}
         for r in db.scalars(
             select(m.Reading)
-            .where(m.Reading.printer_id == printer.id, m.Reading.supply_snapshot.is_not(None))
+            .where(
+                m.Reading.printer_id == printer.id,
+                m.Reading.supply_snapshot.is_not(None),
+                m.Reading.ts >= history_since,
+            )
             .order_by(m.Reading.ts.asc())
         ):
             for snap in r.supply_snapshot or []:

@@ -128,6 +128,11 @@ SPECS: List[Spec] = [
          "takes to arrive so you order before the printer goes dark"),
     Spec("alerts.offline_grace_seconds", "int", "Alerts", "Agent offline grace (seconds)",
          _env.agent_offline_grace_seconds, "Mark an agent offline after this long without a heartbeat"),
+    Spec("alerts.printer_offline_minutes", "int", "Alerts", "Printer offline grace (minutes)", 30,
+         "Mark a printer offline after this long with no reading. Keep it "
+         "comfortably above the poll interval so one missed sweep doesn't flag "
+         "a healthy device — printers behind an offline agent are skipped, so "
+         "a site outage stays one alert instead of one per printer"),
     Spec("alerts.escalate_after_minutes", "int", "Alerts", "Re-notify after (minutes)", 0,
          "Re-send an alert that's still unresolved after this many minutes "
          "(bumps its escalation level). 0 disables escalation re-notifies."),

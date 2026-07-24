@@ -107,8 +107,13 @@ class AlertScope(str, enum.Enum):
 class AlertConditionType(str, enum.Enum):
     supply_below = "supply_below"          # threshold = percent
     error_severity = "error_severity"      # threshold mapped to EventSeverity rank
-    offline_minutes = "offline_minutes"    # threshold = minutes offline
+    offline_minutes = "offline_minutes"    # threshold = minutes an *agent* is offline
     maintenance_due = "maintenance_due"    # no threshold
+    # A single printer has stopped answering. Distinct from offline_minutes,
+    # which watches agent heartbeats: an unreachable printer produces no reading
+    # at all (the agent drops it from the batch), so staleness of
+    # ``Printer.last_seen`` is the only signal central ever gets.
+    printer_offline = "printer_offline"    # threshold = minutes since last reading
     # Forecast-driven: a supply is projected to hit empty within the configured
     # reorder lead-time (alerts.reorder_lead_days). Raised by the worker's
     # forecast pass, not by an AlertRule, so it has its own open/resolve
