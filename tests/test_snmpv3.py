@@ -255,6 +255,78 @@ def test_agent_snmp_for_v2c_leaves_v3_fields_none():
     assert p.v3_security_level is None
 
 
+# ---------- Polling resolves the same v3 creds discovery does ----------
+
+def _v3_config() -> AgentConfig:
+    """An agent whose one subnet is SNMPv3, the way central delivers it."""
+    return AgentConfig(
+        central_url="http://x", agent_id=1, api_key="k",
+        subnets=[SubnetConfig(
+            cidr="10.0.5.0/24",
+            version="3",
+            bind_interface="10.9.9.1",
+            snmp_v3={
+                "user": "noc-rw", "security_level": "authPriv",
+                "auth_protocol": "SHA256", "auth_password": "ap",
+                "priv_protocol": "AES128", "priv_password": "pp",
+            },
+        )],
+    )
+
+
+def test_params_for_target_takes_usm_creds_from_the_printers_subnet():
+    """Discovery sweeps a v3 subnet fine; polling has to resolve identically.
+
+    /targets ships the printer row's own columns, which have nowhere to carry
+    USM credentials -- so building poll params from them alone authenticates as
+    an empty user and the device reads unreachable forever.
+    """
+    from printer_nanny_agent.runner import _params_for_target
+
+    config = _v3_config()
+    p = _params_for_target(
+        {"id": 1, "ip": "10.0.5.42", "snmp_version": "3", "snmp_community": "public"},
+        config,
+    )
+    assert p.v3_user == "noc-rw", "an empty USM user cannot authenticate"
+    assert p.v3_security_level == "authPriv"
+    assert p.v3_auth_protocol == "SHA256"
+    assert p.v3_auth_password == "ap"
+    assert p.v3_priv_protocol == "AES128"
+    assert p.v3_priv_password == "pp"
+    # The whole point: identical to what the sweep uses for that subnet.
+    assert p == config.snmp_for(config.subnets[0])
+
+
+def test_params_for_target_keeps_v3_when_the_printer_row_says_2c():
+    """A printer discovered on a v3 subnet is created with central's column
+    defaults (2c/public) -- that is not an operator downgrade, and honoring it
+    would swap the only creds that can authenticate for a refused community."""
+    from printer_nanny_agent.runner import _params_for_target
+
+    p = _params_for_target(
+        {"id": 2, "ip": "10.0.5.43", "snmp_version": "2c", "snmp_community": "public"},
+        _v3_config(),
+    )
+    assert p.version == "3"
+    assert p.v3_user == "noc-rw"
+
+
+def test_params_for_target_outside_every_subnet_uses_agent_defaults():
+    """An IP in none of the configured CIDRs still polls, on the agent-wide
+    defaults plus whatever the printer row overrides."""
+    from printer_nanny_agent.runner import _params_for_target
+
+    p = _params_for_target(
+        {"id": 3, "ip": "192.168.77.5", "snmp_version": "2c", "snmp_community": "ro-str"},
+        _v3_config(),
+    )
+    assert p.version == "2c"
+    assert p.community == "ro-str"
+    assert p.v3_user is None
+    assert p.bind_interface is None
+
+
 def test_merge_remote_picks_up_snmp_v3_from_central():
     """Central serializes snmp_v3 in /config; merge_remote must thread it through."""
     from printer_nanny_agent.config import merge_remote

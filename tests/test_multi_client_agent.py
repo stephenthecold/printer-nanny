@@ -227,6 +227,29 @@ def test_snmp_for_subnet_propagates_bind_interface():
     assert params.bind_interface == "10.0.200.1"
 
 
+def test_params_for_target_binds_polls_to_the_subnet_source_ip():
+    """Polling must use the same source bind the sweep uses.
+
+    Only the subnet carries bind_interface (a printer row has no such column),
+    so resolving poll params without it sends every poll for an overlapping
+    RFC 1918 CIDR out the default route -- the sweep finds the printer through
+    the right tunnel and then no reading ever comes back.
+    """
+    from printer_nanny_agent.runner import _params_for_target
+
+    config = AgentConfig(
+        central_url="https://central", agent_id=1, api_key="k",
+        subnets=[
+            SubnetConfig(cidr="192.168.1.0/24", bind_interface="10.0.200.1"),
+            SubnetConfig(cidr="192.168.2.0/24", bind_interface="10.0.201.1"),
+        ],
+    )
+    beta = _params_for_target({"id": 1, "ip": "192.168.1.42"}, config)
+    gamma = _params_for_target({"id": 2, "ip": "192.168.2.42"}, config)
+    assert beta.bind_interface == "10.0.200.1"
+    assert gamma.bind_interface == "10.0.201.1", "each subnet keeps its own bind"
+
+
 @pytest.mark.skipif(
     True, reason="pysnmp transport target accepts localAddress -- behavior smoke-tested manually"
 )
