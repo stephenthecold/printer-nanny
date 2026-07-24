@@ -29,3 +29,6 @@ htmlcov/
 .DS_Store
 .idea/
 .vscode/
+
+# Agent worktrees (scratch checkouts, never part of the tree)
+.claude/worktrees/
