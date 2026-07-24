@@ -5,7 +5,7 @@ from __future__ import annotations
 from datetime import datetime
 from typing import Optional
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 from central import models as m
 
@@ -273,7 +273,48 @@ class MaintenanceRecordOut(ORMModel):
     next_due: Optional[datetime] = None
 
 
+# Payload keys each command type actually consumes, per the agent's dispatcher
+# (``handle_commands`` in agent/printer_nanny_agent/runner.py). A command payload
+# is acted on unattended inside a customer LAN by the agent's service account, so
+# anything not listed here is refused rather than stored -- an unrecognised key is
+# either a caller bug or an attempt to smuggle behaviour past the API.
+#
+# Two entries are deliberately empty. ``update_agent``'s only key, pip_source, is
+# resolved server-side from the admin-only ``agent.pip_source`` setting (see
+# ``enqueue_command``) because the agent pip-installs -- i.e. executes -- whatever
+# source it is handed. ``update_config`` is logged by the agent and never applied
+# (config is file-managed), so no key of it has any legitimate effect.
+COMMAND_PAYLOAD_KEYS = {
+    m.CommandType.rescan: frozenset(),
+    m.CommandType.poll_now: frozenset(),
+    m.CommandType.poll_printer: frozenset({"ip", "printer_id"}),
+    m.CommandType.update_config: frozenset(),
+    m.CommandType.update_agent: frozenset(),
+}
+
+
 class CommandIn(BaseModel):
     agent_id: int
     type: m.CommandType
     payload: Optional[dict] = None
+
+    @model_validator(mode="after")
+    def _check_payload(self) -> CommandIn:
+        keys = set(self.payload or {})
+        if "pip_source" in keys:
+            # Rejected loudly rather than quietly stripped: a request naming its
+            # own install source is an attack in progress, and a 4xx surfaces it
+            # to the caller (and to error monitoring) instead of letting it look
+            # like a perfectly ordinary enqueue.
+            raise ValueError(
+                "payload.pip_source is not accepted: central supplies the update "
+                "source from the admin-only agent.pip_source setting"
+            )
+        # .get(): a CommandType added without an entry above rejects every key
+        # (fail closed) instead of 500ing on a KeyError.
+        unknown = sorted(keys - COMMAND_PAYLOAD_KEYS.get(self.type, frozenset()))
+        if unknown:
+            raise ValueError(
+                f"payload keys not allowed for {self.type.value}: {', '.join(unknown)}"
+            )
+        return self
