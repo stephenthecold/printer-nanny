@@ -47,7 +47,7 @@ def _supplies_for(model: str, low: bool) -> list[dict]:
 
 
 def _default_alert_rules() -> list:
-    """The three global alert rules — useful in both demo and minimal seeds."""
+    """The default global alert rules — useful in both demo and minimal seeds."""
     return [
         m.AlertRule(
             name="Low supply (<10%)", scope=m.AlertScope.global_,
@@ -63,6 +63,11 @@ def _default_alert_rules() -> list:
             name="Agent offline (>30 min)", scope=m.AlertScope.global_,
             condition_type=m.AlertConditionType.offline_minutes, threshold=30,
             severity=m.EventSeverity.warning,
+        ),
+        m.AlertRule(
+            name="Printer offline (>30 min)", scope=m.AlertScope.global_,
+            condition_type=m.AlertConditionType.printer_offline, threshold=30,
+            severity=m.EventSeverity.critical,
         ),
     ]
 

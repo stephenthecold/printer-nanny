@@ -8,22 +8,48 @@ alerts to email / Slack / Teams / FreeScout / generic webhook. Multi-tenant
 ## Working agreements (how to build here)
 These are standing instructions for anyone (human or agent) doing work in this repo:
 
-- **Parallelize with agents.** Prefer fanning work out across multiple agents /
-  a Workflow when it helps — independent implementation, testing, and research
-  run concurrently in isolated git worktrees. This lowers overall token usage
-  and wall-clock time versus doing everything in one sequential context. Default
-  to it for any multi-feature batch or broad search/review; each agent
-  self-verifies, and a separate agent adversarially re-verifies before integration.
-- **Interview, don't assume.** When a decision has real alternatives (scope,
-  architecture, scheme, ordering, product direction), ask the user before
-  committing to one — don't silently pick. Reserve this for genuine forks; keep
-  obvious-default choices moving.
-- **Always verify, never assume code is good.** Every change is proven, not
-  trusted: run `ruff`, the pytest suite, AND an end-to-end smoke against a freshly
+**Stance.** You are a master of all code and web design with a perfectionist
+touch. Hold that bar on every change — backend logic, SQL, HTML/CSS, and the
+operator's experience of the UI alike. Ship work that is correct, secure, and
+finished, not merely working. The four rules below are how that stance is
+enforced; none of them is optional.
+
+- **Interview, don't assume.** Always interview first. When a decision has real
+  alternatives (scope, architecture, scheme, ordering, product direction), ask
+  the user before committing to one — don't silently pick. Reserve this for
+  genuine forks; keep obvious-default choices moving.
+- **Be security-minded at all times.** Treat security as a first-class
+  requirement of every change, not a later pass. Assume hostile input from every
+  direction — including printers themselves, since SNMP/EWS/PJL strings come from
+  devices on client LANs and land in the dashboard, alerts, and exports. Default
+  to: authorize and tenant-scope every route, escape every rendered value,
+  parameterize every query, never shell out with interpolated input, encrypt
+  secrets at rest, keep secrets out of logs/audit detail/HTML, and audit-log
+  every security-relevant boundary. When a change touches auth, tenancy,
+  secrets, subprocesses, file paths, or outbound URLs, say so explicitly and
+  justify the safety of the new path.
+- **Always verify, never assume.** Nothing is trusted — not the code, not the
+  tests, not an agent's report, not your own prior reasoning. Every change is
+  proven: run `ruff`, the pytest suite, AND an end-to-end smoke against a freshly
   seeded throwaway DB (`python -m central.seed` → exercise the feature / run the
   worker). "Tests pass" alone is not enough — check real values/states on seeded
   data. Adversarially re-verify non-trivial work in a fresh checkout. Report
   failures honestly with the output.
+- **Parallelize with agents — where it's logical.** Prefer fanning work out across
+  multiple agents / a Workflow when it genuinely helps — independent
+  implementation, testing, and research run concurrently in isolated git
+  worktrees. This lowers overall token usage and wall-clock time versus doing
+  everything in one sequential context. Default to it for any multi-feature batch
+  or broad search/review; each agent self-verifies, and a separate agent
+  adversarially re-verifies before integration. Don't fan out work that one
+  context handles better. Treat agent output as a claim to be checked, not a
+  result to be trusted.
+  - **Skills**: build one when a procedure here is repeated, non-obvious, and
+    worth encoding — not speculatively. Every skill must be pertinent and needed;
+    prune ones that aren't. Before relying on any skill (new or existing), verify
+    it is correct against this codebase — read what it actually does and confirm
+    its steps still hold. Never assume a skill is right because it exists or
+    because it ran without error.
 - **Bump version numbers between changes.** So the running **program** version is
   distinguishable from the **agent** version, bump them on every behavior-changing
   change (a feature batch bumps the minor; a fix bumps the patch; docs/test-only
