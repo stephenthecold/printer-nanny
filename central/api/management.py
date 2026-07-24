@@ -5,14 +5,16 @@ from __future__ import annotations
 from datetime import datetime, timedelta, timezone
 from typing import Optional
 
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException, Request, status
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from central import models as m
 from central import schemas as s
+from central.audit import record
 from central.db import get_db
-from central.deps import require_staff
+from central.deps import require_admin, require_staff
+from central.runtime import load_settings
 from central.security import generate_api_key, hash_api_key
 
 # Management CRUD is operator-only. Before this gate the router merely required a
@@ -187,10 +189,47 @@ def add_maintenance(payload: s.MaintenanceRecordIn, db: Session = Depends(get_db
 
 # --- Commands (enqueue for an agent to pull) -------------------------------- #
 @router.post("/commands", response_model=s.CommandOut, status_code=201)
-def enqueue_command(payload: s.CommandIn, db: Session = Depends(get_db)):
-    _get_or_404(db, m.Agent, payload.agent_id)
-    cmd = m.Command(agent_id=payload.agent_id, type=payload.type, payload=payload.payload)
+def enqueue_command(
+    payload: s.CommandIn,
+    request: Request,
+    db: Session = Depends(get_db),
+    user: m.User = Depends(require_admin),
+):
+    """Queue a command for an agent to pull on its next heartbeat. ADMIN ONLY.
+
+    Deliberately stricter than the rest of this (staff-wide) router: a command
+    runs unattended inside a customer LAN as the agent's service account -- root
+    under systemd, LocalSystem under NSSM -- and ``update_agent`` makes the agent
+    pip-install, i.e. EXECUTE, whatever source it is handed. That is the same
+    authority the dashboard reserves for admins on /manage/agents/update-outdated,
+    so a tech-role session must not reach it through the JSON API either.
+
+    The update source is never taken from the request: it is read from the
+    admin-only ``agent.pip_source`` setting, exactly like the dashboard's
+    /manage/agents/{id}/update. ``s.CommandIn`` refuses a caller-supplied
+    pip_source (and any other unrecognised payload key) rather than stripping it.
+    """
+    agent = _get_or_404(db, m.Agent, payload.agent_id)
+    body = dict(payload.payload or {})
+    if payload.type == m.CommandType.update_agent:
+        pip_source = str(load_settings(db).get("agent.pip_source") or "").strip()
+        if not pip_source or "your-org" in pip_source:
+            # 409, not 400: the request is fine, the server isn't configured yet.
+            raise HTTPException(
+                status.HTTP_409_CONFLICT,
+                "Set Settings -> Agent install -> Pip source to your real repo "
+                "before pushing updates; the placeholder won't install.",
+            )
+        body["pip_source"] = pip_source
+    cmd = m.Command(agent_id=agent.id, type=payload.type, payload=body or None)
     db.add(cmd)
+    # Enqueue is a security boundary (remote code execution on the agent host for
+    # update_agent), so record who queued what alongside the dashboard's own
+    # agent.update_queued rows. Nothing logged here is secret: the payload is at
+    # most a printer IP/id plus the server-resolved repo URL.
+    record(db, request, user, "command.enqueue",
+           target=f"agent:{agent.id} {agent.name}",
+           detail=f"type={payload.type.value} payload={body or {}}")
     db.commit()
     db.refresh(cmd)
     return cmd

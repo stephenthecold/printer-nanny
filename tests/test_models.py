@@ -20,13 +20,39 @@ def _client_site(db):
     return client, site
 
 
-def test_unique_printer_per_site_ip(db):
+def test_unique_printer_per_site_serial(db):
+    """Identity is the serial, so that -- not the address -- is what's unique."""
     _, site = _client_site(db)
-    db.add(m.Printer(client_id=site.client_id, site_id=site.id, ip="10.0.0.5"))
+    db.add(m.Printer(client_id=site.client_id, site_id=site.id, ip="10.0.0.5", serial="SN-1"))
     db.commit()
-    db.add(m.Printer(client_id=site.client_id, site_id=site.id, ip="10.0.0.5"))
+    db.add(m.Printer(client_id=site.client_id, site_id=site.id, ip="10.0.0.6", serial="SN-1"))
     with pytest.raises(IntegrityError):
         db.commit()
+
+
+def test_two_printers_may_share_an_ip_over_time(db):
+    """A replaced device and the one it replaced both reference the address.
+
+    `(site_id, ip)` used to be UNIQUE, which made this impossible to record and
+    forced the new device to inherit the old row's id, meters and history --
+    the DHCP-churn corruption this model change exists to prevent.
+    """
+    _, site = _client_site(db)
+    db.add(m.Printer(client_id=site.client_id, site_id=site.id, ip="10.0.0.5", serial="SN-OLD"))
+    db.add(m.Printer(client_id=site.client_id, site_id=site.id, ip="10.0.0.5", serial="SN-NEW"))
+    db.commit()
+
+    assert db.query(m.Printer).filter_by(ip="10.0.0.5").count() == 2
+
+
+def test_printers_without_a_serial_do_not_collide(db):
+    """Many SNMP devices report no serial; NULLs must not be treated as equal."""
+    _, site = _client_site(db)
+    db.add(m.Printer(client_id=site.client_id, site_id=site.id, ip="10.0.0.7"))
+    db.add(m.Printer(client_id=site.client_id, site_id=site.id, ip="10.0.0.8"))
+    db.commit()
+
+    assert db.query(m.Printer).filter(m.Printer.serial.is_(None)).count() == 2
 
 
 def test_apply_reading_only_for_approved_printer(db):
