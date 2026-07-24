@@ -7,6 +7,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import time
+from dataclasses import replace
 from pathlib import Path
 from typing import List, Optional
 
@@ -14,7 +15,7 @@ import httpx
 
 from printer_nanny_agent import __version__
 from printer_nanny_agent.client import CentralClient
-from printer_nanny_agent.config import AgentConfig, merge_remote
+from printer_nanny_agent.config import AgentConfig, SubnetConfig, merge_remote
 from printer_nanny_agent.discovery import discover_subnet
 from printer_nanny_agent.mdns import assign_subnet_cidr, discover_mdns, mdns_available
 from printer_nanny_agent.poller import poll_printer
@@ -28,6 +29,40 @@ _POLL_CONCURRENCY = 16
 
 def _spool_for(config: AgentConfig) -> ReadingSpool:
     return ReadingSpool(config.spool_path(), max_readings=config.spool_max_readings)
+
+
+class TargetCache:
+    """The last poll list central served, kept so an outage can't stop polling.
+
+    ``/targets`` is only readable while central is up, but readings taken during
+    an outage are exactly the ones the spool exists to preserve -- with no target
+    list there is nothing to poll, and the outage window becomes a permanent hole
+    in the meters that nothing back-fills. One instance per process hands back the
+    last successful list for as long as central is unreachable.
+
+    Deliberately in-memory only: the list carries SNMP credentials, and an agent
+    restart mid-outage is a much smaller hole than writing community strings into
+    the data dir.
+    """
+
+    def __init__(self) -> None:
+        self._targets: Optional[List[dict]] = None
+
+    async def fetch(self, client: CentralClient) -> List[dict]:
+        """Fresh targets from central, falling back to the last successful list."""
+        try:
+            targets = await client.get_targets()
+        except (httpx.HTTPError, OSError) as exc:
+            if self._targets is None:
+                log.warning("could not fetch targets and none are cached yet: %s", exc)
+                return []
+            log.warning(
+                "could not fetch targets (%s) -- polling the %d cached target(s)",
+                exc, len(self._targets),
+            )
+            return list(self._targets)
+        self._targets = list(targets)
+        return targets
 
 
 async def drain_spool(client: CentralClient, spool: ReadingSpool) -> int:
@@ -68,10 +103,14 @@ async def push_readings(
     try:
         result = await client.post_readings(readings)
     except (httpx.HTTPError, OSError) as exc:
-        spool.append(readings)
+        # append() reports what it could not keep (cap drops, or the whole batch
+        # when the data dir is full / read-only) so this line never claims a
+        # reading is safe on disk when it isn't.
+        lost = spool.append(readings)
         log.warning(
-            "readings push failed (%s) -- %d reading(s) spooled for retry",
+            "readings push failed (%s) -- %d reading(s) spooled for retry%s",
             exc, len(readings),
+            f" ({lost} could not be retained)" if lost else "",
         )
         return 0
     return result.get("applied", 0)
@@ -83,14 +122,46 @@ def _due(last: Optional[float], interval: float, now: float) -> bool:
     return last is None or (now - last) >= interval
 
 
+def _subnet_for_ip(ip: Optional[str], config: AgentConfig) -> Optional[SubnetConfig]:
+    """The configured subnet whose CIDR contains ``ip``, or None if it's outside
+    all of them. Uses the same containment test the mDNS path uses, so a device
+    is attributed to one subnet no matter which code path asks."""
+    if not ip:
+        return None
+    cidr = assign_subnet_cidr({"ip": ip}, [s.cidr for s in config.subnets])
+    return next((s for s in config.subnets if s.cidr == cidr), None)
+
+
 def _params_for_target(target: dict, config: AgentConfig) -> SnmpParams:
-    base = config.snmp
-    return SnmpParams(
+    """SNMP params for one poll target: its subnet's credentials, with the
+    printer row's own community (and version, unless the subnet speaks v3)
+    layered on top.
+
+    Discovery resolves creds through ``config.snmp_for(subnet)``; polling has to
+    resolve them the same way or the two disagree -- a v3 subnet sweeps fine and
+    then every poll authenticates as an empty USM user, so the printer reads
+    unreachable forever. The USM credentials and the per-subnet source bind
+    (which one agent needs to serve clients with overlapping CIDRs) live only on
+    the subnet, so they always come from there.
+    """
+    subnet = _subnet_for_ip(target.get("ip"), config)
+    base = config.snmp_for(subnet) if subnet is not None else config.snmp
+    version = str(target.get("snmp_version") or base.version)
+    if base.version == "3":
+        # A printer row has no column that can carry USM credentials, so its
+        # version is central's "2c" column default for everything discovered on
+        # a v3 subnet. Honoring it would swap the only creds that can
+        # authenticate here for a community string the device will refuse.
+        version = "3"
+    if version == "3" and not base.v3_user:
+        log.warning(
+            "%s is set to SNMPv3 but no USM user is configured for it -- set the "
+            "v3 credentials on its subnet under Agents", target.get("ip"),
+        )
+    return replace(
+        base,
         community=target.get("snmp_community") or base.community,
-        version=target.get("snmp_version") or base.version,
-        port=base.port,
-        timeout=base.timeout,
-        retries=base.retries,
+        version=version,
     )
 
 
@@ -99,9 +170,13 @@ async def poll_targets(
     backend: SnmpBackend,
     config: AgentConfig,
     spool: Optional[ReadingSpool] = None,
+    target_cache: Optional[TargetCache] = None,
 ) -> dict:
     spool = spool if spool is not None else _spool_for(config)
-    targets = await client.get_targets()
+    # A default-constructed cache is empty, so it just fetches from central --
+    # only the long-running loop passes a shared one that survives an outage.
+    cache = target_cache if target_cache is not None else TargetCache()
+    targets = await cache.fetch(client)
     if not targets:
         log.info("no approved targets to poll")
         # No fresh readings, but a reachable central is a chance to flush any
@@ -195,14 +270,25 @@ async def discover_all(client: CentralClient, backend: SnmpBackend, config: Agen
     return {"new_pending": new_pending}
 
 
-async def _effective_config(client: CentralClient, config: AgentConfig) -> AgentConfig:
-    """Fetch central-managed config and overlay it; fall back to local on error."""
+async def _effective_config(
+    client: CentralClient,
+    config: AgentConfig,
+    last_good: Optional[AgentConfig] = None,
+) -> AgentConfig:
+    """Fetch central-managed config and overlay it; fall back to last-known-good.
+
+    ``last_good`` is the previously-merged config (None on the first cycle, where
+    the local file is all we have). Reverting to the bare local file whenever
+    central is unreachable would drop the central-managed subnets and intervals,
+    and with them the per-subnet SNMP creds the poll cycle needs to keep
+    collecting through the outage.
+    """
     try:
         remote = await client.get_config()
         return merge_remote(config, remote)
     except Exception as exc:  # noqa: BLE001 - never let a config fetch stop a cycle
-        log.warning("could not fetch central config, using local: %s", exc)
-        return config
+        log.warning("could not fetch central config, using last known good: %s", exc)
+        return last_good if last_good is not None else config
 
 
 async def poll_one_target(
@@ -288,28 +374,57 @@ def _startup_diagnostics() -> tuple[str, Optional[dict]]:
     return install_path, read_last_update_result()
 
 
+async def _try_heartbeat(
+    client: CentralClient, install_path: str, update_result: Optional[dict]
+) -> bool:
+    """Heartbeat, reporting reachability instead of raising. True = central answered.
+
+    The heartbeat is a liveness ping, not a precondition for the rest of the
+    cycle. Letting its failure escape used to skip the poll below it, so a
+    central restart produced no readings at all for the whole outage -- not even
+    spooled ones -- which is precisely the hole in the meters and the supply
+    forecasts that the spool exists to prevent.
+    """
+    try:
+        await client.heartbeat(
+            __version__, install_path=install_path, last_update_result=update_result
+        )
+        return True
+    except Exception as exc:  # noqa: BLE001 - anything raised here means "central is down"
+        log.warning("heartbeat failed, treating central as down: %s", exc)
+        return False
+
+
 async def run_once(config: AgentConfig, backend: Optional[SnmpBackend] = None) -> dict:
-    """One full cycle: heartbeat, commands, poll, discover. Returns a summary."""
+    """One full cycle: heartbeat, commands, poll, discover. Returns a summary.
+
+    An unreachable central degrades the cycle instead of aborting it: the poll
+    still runs and its readings are spooled for replay. Discovery is skipped
+    while central is down -- ``/discovered`` is the only place its results can
+    go, so a sweep would just be thrown away. Note a one-shot run has no cached
+    target list to fall back on, so an offline cycle has nothing to poll; the
+    long-running loop is where the spool earns its keep.
+    """
     backend = backend or PysnmpBackend()
     client = CentralClient(
         config.central_url, config.agent_id, config.api_key, verify_tls=config.verify_tls
     )
     install_path, update_result = _startup_diagnostics()
     spool = _spool_for(config)
+    commands: List[dict] = []
+    disc = {"new_pending": 0}
     try:
-        await client.heartbeat(
-            __version__,
-            install_path=install_path,
-            last_update_result=update_result,
-        )
-        # Central answered the heartbeat -> it's reachable. Flush any readings
-        # spooled during a prior outage before doing anything else this cycle.
-        await drain_spool(client, spool)
-        config = await _effective_config(client, config)
-        commands = await client.get_commands()
-        await handle_commands(client, backend, config, commands, spool)
+        online = await _try_heartbeat(client, install_path, update_result)
+        if online:
+            # Central answered the heartbeat -> it's reachable. Flush any readings
+            # spooled during a prior outage before doing anything else this cycle.
+            await drain_spool(client, spool)
+            config = await _effective_config(client, config)
+            commands = await client.get_commands()
+            await handle_commands(client, backend, config, commands, spool)
         poll = await poll_targets(client, backend, config, spool)
-        disc = await discover_all(client, backend, config)
+        if online:
+            disc = await discover_all(client, backend, config)
         return {"commands": len(commands), "spooled": spool.count(), **poll, **disc}
     finally:
         await client.aclose()
@@ -335,6 +450,9 @@ async def run_forever(config: AgentConfig, backend: Optional[SnmpBackend] = None
     # central's merge_remote does not (and should not) override where local
     # state lives, so the cap is stable across config refreshes.
     spool = _spool_for(config)
+    # Likewise one target cache: it is what lets the poll below keep running
+    # (and spooling) while central is unreachable.
+    target_cache = TargetCache()
     log.info(
         "agent %d started -> %s (install: %s, version: %s)",
         config.agent_id, config.central_url, install_path, __version__,
@@ -342,23 +460,31 @@ async def run_forever(config: AgentConfig, backend: Optional[SnmpBackend] = None
     try:
         while True:
             now = time.monotonic()
-            try:
-                await client.heartbeat(
-                    __version__,
-                    install_path=install_path,
-                    last_update_result=pending_update_result,
-                )
+            online = await _try_heartbeat(client, install_path, pending_update_result)
+            if online:
                 pending_update_result = None  # only on the first heartbeat
-                # Heartbeat succeeded -> central is up. Flush the outage backlog
-                # first so spooled readings catch up before fresh ones pile on.
-                await drain_spool(client, spool)
-                effective = await _effective_config(client, config)
-                commands = await client.get_commands()
-                await handle_commands(client, backend, effective, commands, spool)
+            try:
+                # Central-side work: meaningful only while central answers, and
+                # guarded on its own so a failure here cannot take the poll with
+                # it. Flush the outage backlog first so spooled readings catch up
+                # before fresh ones pile on.
+                if online:
+                    await drain_spool(client, spool)
+                    effective = await _effective_config(client, config, effective)
+                    commands = await client.get_commands()
+                    await handle_commands(client, backend, effective, commands, spool)
+            except Exception:  # noqa: BLE001 - a bad sync must not cost us the poll
+                log.exception("central sync failed; continuing on last known good config")
+            try:
                 if _due(last_poll, effective.poll_interval_seconds, now):
-                    await poll_targets(client, backend, effective, spool)
+                    # Runs whether or not central answered: poll_targets falls
+                    # back to the cached target list and spools what it collects.
+                    await poll_targets(client, backend, effective, spool, target_cache)
                     last_poll = now
-                if _due(last_discovery, effective.discovery_interval_seconds, now):
+                # Discovery has no store-and-forward path -- /discovered is the
+                # only place its results can go -- so skip the sweep entirely
+                # while central is down rather than burn one we'd throw away.
+                if online and _due(last_discovery, effective.discovery_interval_seconds, now):
                     await discover_all(client, backend, effective)
                     last_discovery = now
             except Exception:  # noqa: BLE001 - keep the agent alive across transient errors

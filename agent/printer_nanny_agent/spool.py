@@ -159,10 +159,11 @@ class ReadingSpool:
     def append(self, readings: List[dict]) -> int:
         """Persist ``readings`` to the tail of the spool, enforcing the cap.
 
-        Returns the number of readings DROPPED to honor the cap (0 in the
-        normal case). When the combined size exceeds ``max_readings`` the
-        OLDEST readings are dropped and the count is logged -- the spool never
-        grows past the cap.
+        Returns the number of readings that did NOT make it in (0 in the normal
+        case): the OLDEST ones dropped to honor ``max_readings``, or the whole
+        batch when the write itself failed. When the combined size exceeds
+        ``max_readings`` the OLDEST readings are dropped and the count is
+        logged -- the spool never grows past the cap.
         """
         if not readings:
             return 0
@@ -176,7 +177,19 @@ class ReadingSpool:
                 "spool: cap %d exceeded, dropped %d oldest reading(s) from %s",
                 self._max, dropped, self._path,
             )
-        self._rewrite(combined)
+        if not self._rewrite(combined):
+            # Full or read-only data dir. Say so instead of reporting the batch
+            # as buffered: a reassuring "spooled for retry" line over readings
+            # that are actually gone hides a hole in the meters. _rewrite has
+            # already logged the OS error, and it swaps the file in atomically,
+            # so what was spooled before this call is still on disk -- only this
+            # batch is lost. Still no raise: the spool is a safety net and must
+            # not turn a disk problem into a crash loop.
+            log.warning(
+                "spool: could not persist %d reading(s) to %s -- they are LOST",
+                len(readings), self._path,
+            )
+            return len(readings)
         log.info(
             "spool: buffered %d reading(s) (now %d spooled%s)",
             len(readings), len(combined),
@@ -210,12 +223,15 @@ class ReadingSpool:
                 await send(batch)  # raises on connection error / non-2xx
                 sent += len(batch)
         finally:
-            # Persist the un-replayed remainder regardless of how we exit -- a
-            # clean full drain leaves nothing; a mid-drain failure leaves the
-            # readings central never acknowledged.
-            remainder = pending[sent:]
-            self._rewrite(remainder)
+            # Drop what central acknowledged, however we exit -- a clean full
+            # drain leaves nothing; a mid-drain failure leaves exactly the
+            # readings central never took. Nothing acknowledged means the file
+            # already IS the remainder, so skip the rewrite: through an outage
+            # this path runs on every poll cycle against a spool that may hold
+            # ``max_readings`` records.
             if sent:
+                remainder = pending[sent:]
+                self._rewrite(remainder)
                 log.info(
                     "spool: replayed %d reading(s); %d remain spooled",
                     sent, len(remainder),
