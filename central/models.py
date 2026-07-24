@@ -19,11 +19,13 @@ from sqlalchemy import (
     Enum,
     Float,
     ForeignKey,
+    Index,
     Integer,
     LargeBinary,
     String,
     Text,
     UniqueConstraint,
+    text,
 )
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
@@ -302,6 +304,8 @@ class Printer(Base):
     display_name: Mapped[Optional[str]] = mapped_column(String(200), default=None)
     brand: Mapped[Optional[str]] = mapped_column(String(100), default=None)
     model: Mapped[Optional[str]] = mapped_column(String(200), default=None)
+    # Lookups are always site-scoped, so the composite index in __table_args__
+    # covers this column -- see services.find_printer_in_sites.
     serial: Mapped[Optional[str]] = mapped_column(String(120), default=None)
     location: Mapped[Optional[str]] = mapped_column(String(200), default=None)
     # Firmware / version string, best-effort from sysDescr (or a vendor field)
@@ -359,7 +363,29 @@ class Printer(Base):
         back_populates="printer", cascade="all, delete-orphan"
     )
 
-    __table_args__ = (UniqueConstraint("site_id", "ip", name="uq_printer_site_ip"),)
+    # Identity is the serial, not the address. `(site_id, ip)` used to be UNIQUE,
+    # which encoded "an IP identifies a printer at a site" -- the assumption that
+    # makes DHCP churn corrupt data. It also made the correct behaviour
+    # impossible to express: once a replaced device is recorded separately from
+    # the one it replaced, both legitimately reference the same address (one
+    # retired, one live), so a hard uniqueness rule could only be satisfied by
+    # merging their histories, which is the very thing that breaks billing.
+    #
+    # Uniqueness now sits where identity actually lives. The index is partial
+    # because plenty of devices report no serial over SNMP; those rows fall back
+    # to IP matching and must not all collide on NULL. Both Postgres and SQLite
+    # support partial indexes.
+    __table_args__ = (
+        Index(
+            "uq_printer_site_serial",
+            "site_id",
+            "serial",
+            unique=True,
+            postgresql_where=text("serial IS NOT NULL"),
+            sqlite_where=text("serial IS NOT NULL"),
+        ),
+        Index("ix_printer_site_ip", "site_id", "ip"),
+    )
 
 
 class Supply(Base):

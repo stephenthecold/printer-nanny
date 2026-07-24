@@ -20,12 +20,6 @@ def _now() -> datetime:
     return datetime.now(timezone.utc)
 
 
-def find_printer_by_ip(db: Session, site_id: int, ip: str) -> Optional[m.Printer]:
-    return db.scalar(
-        select(m.Printer).where(m.Printer.site_id == site_id, m.Printer.ip == ip)
-    )
-
-
 def sites_served_by_agent(db: Session, agent: m.Agent) -> set[int]:
     """The set of site_ids this agent collects for.
 
@@ -49,6 +43,48 @@ def find_printer_by_ip_in_sites(
     return db.scalar(
         select(m.Printer).where(m.Printer.site_id.in_(site_ids), m.Printer.ip == ip)
     )
+
+
+def find_printer_in_sites(
+    db: Session, site_ids: set[int], ip: str, serial: Optional[str] = None
+) -> Optional[m.Printer]:
+    """Resolve a device to its Printer row, preferring serial over IP.
+
+    IP is a location, not an identity. Matching on it alone gets both halves of
+    DHCP churn wrong:
+
+      * A printer that changes lease looks brand new, so a second row is
+        created and the first is stranded -- still ``approved``, still polled,
+        its status and last_seen frozen at their last-good values. Page meters
+        then double-count across the two rows and corrupt billing.
+      * Worse in the other direction: a *different* printer that inherits a
+        recycled IP silently adopts the old row, along with its id, reading
+        history, page counts, asset tag and maintenance records.
+
+    So: match on serial first (scoped to the sites this agent serves), and only
+    fall back to IP when the device reports no serial or no serial matches.
+    A row found by IP whose serial contradicts the device is deliberately NOT
+    returned -- the caller creates a new row instead, which keeps the two
+    devices' histories apart. Rows with no serial recorded yet still match by
+    IP, so existing fleets keep working and get their serial backfilled.
+    """
+    if not site_ids:
+        return None
+
+    serial = (serial or "").strip() or None
+    if serial:
+        by_serial = db.scalar(
+            select(m.Printer).where(
+                m.Printer.site_id.in_(site_ids), m.Printer.serial == serial
+            )
+        )
+        if by_serial is not None:
+            return by_serial
+
+    by_ip = find_printer_by_ip_in_sites(db, site_ids, ip)
+    if by_ip is not None and serial and by_ip.serial and by_ip.serial != serial:
+        return None  # recycled IP, different hardware -- don't inherit its history
+    return by_ip
 
 
 def find_subnet_for_agent_cidr(
@@ -136,16 +172,17 @@ def apply_reading(db: Session, site_id, reading: s.ReadingIn) -> Optional[m.Prin
     """Apply one poll result to a known, approved printer.
 
     ``site_id`` may be a single int (legacy) or a set of int (the multi-client
-    agent path -- one agent serves several sites). The printer is looked up by
-    IP across whichever site_ids are passed in.
+    agent path -- one agent serves several sites). The printer is resolved by
+    serial where the device reports one, falling back to IP -- see
+    ``find_printer_in_sites`` for why IP alone is unsafe. This matters more here
+    than in discovery: readings carry the page meters, so binding one to the
+    wrong row corrupts billing rather than just the device list.
 
     Returns the printer, or None if no matching approved printer exists at the
     site(s) (discovery happens via the separate /discovered endpoint, not here).
     """
-    if isinstance(site_id, (set, list, tuple, frozenset)):
-        printer = find_printer_by_ip_in_sites(db, set(site_id), reading.ip)
-    else:
-        printer = find_printer_by_ip(db, site_id, reading.ip)
+    site_ids = set(site_id) if isinstance(site_id, (set, list, tuple, frozenset)) else {site_id}
+    printer = find_printer_in_sites(db, site_ids, reading.ip, reading.serial)
     if printer is None or printer.discovery_state != m.DiscoveryState.approved:
         return None
 
@@ -256,8 +293,8 @@ def record_discovered(
         if sub is not None:
             target_site_id = sub.site_id
 
-    existing = find_printer_by_ip_in_sites(
-        db, sites_served_by_agent(db, agent), device.ip
+    existing = find_printer_in_sites(
+        db, sites_served_by_agent(db, agent), device.ip, device.serial
     )
     if existing is not None:
         # Refresh identity but never downgrade an approved/ignored device to pending.
@@ -265,6 +302,16 @@ def record_discovered(
             val = getattr(device, attr)
             if val and not getattr(existing, attr):
                 setattr(existing, attr, val)
+        # Matched by serial from a new address: the printer moved (DHCP lease,
+        # re-cabling). Follow it rather than leaving a stale row polling a dead
+        # address -- unless another row already holds that address in the same
+        # site, which would break the (site_id, ip) uniqueness. That collision
+        # means there are genuinely two rows for one device; leave both intact
+        # for the operator to merge rather than guessing here.
+        if existing.ip != device.ip:
+            clash = find_printer_by_ip_in_sites(db, {existing.site_id}, device.ip)
+            if clash is None:
+                existing.ip = device.ip
         return existing, False
 
     site = db.get(m.Site, target_site_id)
