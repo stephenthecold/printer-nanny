@@ -64,6 +64,16 @@ printer_nanny_agent = ["agent.example.toml"]
 line-length = 100
 target-version = "py39"
 
+# Pin the rule set explicitly. Without a `select`, ruff applies whatever its
+# *current* default happens to be, so a new ruff release silently changes what
+# CI enforces -- 0.16.0 widened the defaults and turned a green tree into 853
+# errors with no source change. These four are ruff's long-standing default
+# (pycodestyle errors + pyflakes) and are what this codebase was written
+# against. Widening the set is a deliberate choice, not something a dependency
+# upgrade should make for us.
+[tool.ruff.lint]
+select = ["E4", "E7", "E9", "F"]
+
 [tool.black]
 line-length = 100
 
