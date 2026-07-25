@@ -126,10 +126,13 @@ enforced; none of them is optional.
   - `mdns.py` — optional Bonjour/DNS-SD discovery (`agent[mdns]` extras).
   - `updater.py` — self-update via `update_agent` command; writes
     `.pn-update-result.json` so the dashboard can show success/failure.
-- `migrations/` — Alembic environment + versions (0001 → 0013).
+- `migrations/` — Alembic environment + versions (0001 → 0025). Revision 0001 is
+  `Base.metadata.create_all()`, so **the ORM metadata is what builds a fresh DB** —
+  an index declared only in a later migration is silently absent on new installs.
+  Declare indexes in the model's `__table_args__` and mirror them in the migration.
 - `deploy/` — Caddyfile, installer scripts (`install-agent.sh`/`.ps1`), sample
   systemd unit, and `WINDOWS-MSI-TESTING.md` (build + Server 2016→2025 smoke).
-- `tests/` — pytest suite (~906 tests; ~2min end-to-end on Postgres-less SQLite).
+- `tests/` — pytest suite (~941 tests; ~2min end-to-end on Postgres-less SQLite).
 
 ## Conventions
 - Python 3.12 in Docker; code stays 3.9-compatible (`from __future__ import
@@ -149,6 +152,21 @@ enforced; none of them is optional.
   reports, branding, agent install source) lives in DB via `central/runtime.py`
   and is edited in the Settings UI **grouped into tabs**. Only `DATABASE_URL` +
   `SECRET_KEY` come from env (`central/config.py`).
+- **Quiet hours / maintenance windows** (`central/suppression.py`,
+  `suppression_windows`). One model covers both: recurring weekly quiet hours
+  (weekday mask + local minutes-from-midnight, wrap-aware) and one-off dated
+  maintenance ranges (absolute UTC). `evaluate()` returns dispatch / defer /
+  suppress. **Recurring windows are wall-clock-local to the scoped client**
+  (`clients.timezone`, else `alerts.default_timezone`), so a single global
+  "18:00–07:00" gives every client its own night; an unresolvable zone degrades to
+  UTC and never raises. A wrapped window's weekday mask gates its **start** day —
+  a Fri-night window still covers 03:00 Saturday. `defer` writes one idempotent
+  `deferred` delivery row whose `next_attempt_at` is the window's end, so the
+  existing retry sweeper is the wake mechanism and `flush_quiet_hours` releases it
+  as **one digest per client**; `suppress` writes a terminal `suppressed` row
+  (recorded, not merely absent). `allow_breakthrough=False` is total silence —
+  it's a separate flag because `critical` is the top of `EventSeverity`, so a
+  floor alone can only ever loosen a window.
 - **Alert noise is damped, and non-delivery is never called delivery.** Two
   independent mechanisms, because neither covers both shapes: a *deadband*
   (`alerts.supply_deadband_pct`) holds a live low-supply alert until the level
@@ -222,7 +240,8 @@ enforced; none of them is optional.
 Production-ready feature surface (as of PR #46):
 
 **Core**: central server, multi-tenant model, push-based agents, brand-agnostic
-SNMP, alerting with dedupe + auto-resolve + flap damping, scheduled reports, friendly names,
+SNMP, alerting with dedupe + auto-resolve + flap damping, quiet hours + maintenance
+windows, scheduled reports, friendly names,
 days-until-order supply forecasts, per-client / per-site rollups, recent
 activity, maintenance schedules, audit log, DB backup/restore.
 

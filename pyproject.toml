@@ -1,6 +1,6 @@
 [project]
 name = "printer-nanny"
-version = "0.11.0"
+version = "0.12.0"
 description = "Self-hosted fleet management for printers across MSP clients/sites"
 readme = "README.md"
 license = "Apache-2.0"
@@ -23,6 +23,12 @@ dependencies = [
     # Encryption-at-rest for stored credentials (central/secrets.py). Already
     # a transitive dep via authlib; pinned explicitly because we import it.
     "cryptography>=42",
+    # zoneinfo is stdlib from 3.9, but it reads the SYSTEM tz database, which
+    # python:*-slim images do not reliably ship. Quiet hours are wall-clock-local
+    # and would silently fall back to UTC without it -- moving an operator's
+    # window by hours. This pure-Python copy makes resolution deterministic
+    # everywhere; central.suppression still degrades to UTC rather than raising.
+    "tzdata>=2024.1",
 ]
 
 [project.optional-dependencies]

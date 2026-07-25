@@ -146,6 +146,12 @@ SPECS: List[Spec] = [
          "original alert instead of raising a new one, and don't re-notify — "
          "one incident, one notification. Covers flapping that a supply margin "
          "can't, like an error code or a printer bouncing offline. 0 disables."),
+    Spec("alerts.default_timezone", "str", "Alerts", "Default timezone", "UTC",
+         "IANA zone name (e.g. America/New_York) used to interpret quiet hours "
+         "for clients that haven't set their own. Quiet hours are wall-clock "
+         "local — 'after 18:00' means the client's 18:00 — so this is the "
+         "fallback when a client's timezone is blank. An unrecognised name "
+         "falls back to UTC rather than failing."),
     Spec("alerts.max_error_alerts_per_printer", "int", "Alerts",
          "Max error alerts per printer", 5,
          "One alert per distinct error code, capped here so a misbehaving "

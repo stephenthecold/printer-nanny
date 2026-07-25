@@ -77,6 +77,18 @@
       <form method="post" action="/manage/clients/{{ client.id }}" class="space-y-2">
         <input name="name" value="{{ client.name }}" required class="w-full border rounded px-3 py-2 text-sm" />
         <textarea name="notes" rows="3" class="w-full border rounded px-3 py-2 text-sm" placeholder="Notes">{{ client.notes or '' }}</textarea>
+        <label class="block text-xs text-slate-500 pt-1">Timezone</label>
+        <input name="client_timezone" value="{{ client.timezone or '' }}" list="tz-options"
+               placeholder="{{ default_tz }} (inherited)"
+               class="w-full border rounded px-3 py-2 text-sm" />
+        <datalist id="tz-options">
+          {% for tz in tz_choices %}<option value="{{ tz }}"></option>{% endfor %}
+        </datalist>
+        <p class="text-[11px] text-slate-400">
+          IANA name, e.g. <code>America/New_York</code>. Used to read
+          <a href="/manage/suppression" class="text-sky-700 hover:underline">quiet hours</a>
+          in this client's local time. Blank inherits <code>{{ default_tz }}</code>.
+        </p>
         <button class="w-full bg-slate-900 text-white rounded py-2 text-sm font-medium">Save</button>
       </form>
     </section>

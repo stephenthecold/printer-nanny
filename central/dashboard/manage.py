@@ -8,8 +8,9 @@ from __future__ import annotations
 
 import shutil
 import tempfile
+from datetime import datetime, timezone
 from pathlib import Path
-from typing import Optional
+from typing import List, Optional
 
 from fastapi import APIRouter, Depends, Form, Request
 from fastapi.responses import FileResponse, HTMLResponse, RedirectResponse
@@ -19,11 +20,12 @@ from sqlalchemy.orm import Session
 from starlette.background import BackgroundTask
 
 from central import models as m
+from central import suppression
 from central.audit import record
 from central.dashboard import _keystore
 from central.db import get_db
 from central.health import worker_banner
-from central.runtime import app_branding
+from central.runtime import app_branding, load_settings
 from central.security import generate_api_key, hash_api_key, hash_password
 
 
@@ -125,6 +127,24 @@ def create_client(
     return _redirect("/manage")
 
 
+def _timezone_choices() -> list:
+    """IANA zone names for the client-edit datalist, common ones first.
+
+    Falls back to a small hand-list if the tz database isn't installed (slim
+    containers), so the field is still usable rather than empty.
+    """
+    try:
+        from zoneinfo import available_timezones
+
+        return sorted(available_timezones())
+    except Exception:  # noqa: BLE001
+        return [
+            "UTC", "America/New_York", "America/Chicago", "America/Denver",
+            "America/Los_Angeles", "Europe/London", "Europe/Dublin",
+            "Europe/Paris", "Europe/Berlin", "Australia/Sydney",
+        ]
+
+
 @router.get("/clients/{client_id}", response_class=HTMLResponse)
 def client_manage(client_id: int, request: Request, db: Session = Depends(get_db)):
     user = _manager(request, db)
@@ -136,26 +156,42 @@ def client_manage(client_id: int, request: Request, db: Session = Depends(get_db
     printers = list(
         db.scalars(select(m.Printer).where(m.Printer.client_id == client_id).order_by(m.Printer.ip))
     )
+    runtime = load_settings(db)
     return _tpl(
         request, "client_manage.html", db,
         user=user, client=client, sites=client.sites,
         printers=printers, flash=_pop_flash(request),
+        default_tz=(runtime.get("alerts.default_timezone") or "UTC"),
+        tz_choices=_timezone_choices(),
     )
 
 
 @router.post("/clients/{client_id}")
 def update_client(
     client_id: int, request: Request,
-    name: str = Form(...), notes: str = Form(""), db: Session = Depends(get_db),
+    name: str = Form(...), notes: str = Form(""),
+    client_timezone: str = Form(""),
+    db: Session = Depends(get_db),
 ):
-    if _manager(request, db) is None:
+    """``client_timezone`` is the IANA zone quiet hours are read in for this
+    client. Blank means "inherit alerts.default_timezone". Rejected rather than
+    stored when unresolvable: a bad zone silently falling back to UTC would move
+    someone's quiet hours by hours without telling them."""
+    actor = _manager(request, db)
+    if actor is None:
         return _redirect("/login")
     client = db.get(m.Client, client_id)
     if client:
+        tz = client_timezone.strip()
+        if tz and not suppression.valid_timezone(tz):
+            _flash(request, f"'{tz}' isn't a recognised timezone — left unchanged.")
+            return _redirect(f"/manage/clients/{client_id}")
         client.name = name.strip() or client.name
         client.notes = notes.strip() or None
-        record(db, request, _manager(request, db), "client.update",
-               target=f"client:{client.id} {client.name}")
+        client.timezone = tz or None
+        record(db, request, actor, "client.update",
+               target=f"client:{client.id} {client.name}",
+               detail=f"timezone={client.timezone or 'inherit'}")
         db.commit()
         _flash(request, "Client updated.")
     return _redirect(f"/manage/clients/{client_id}")
@@ -1390,3 +1426,286 @@ def user_delete(user_id: int, request: Request, db: Session = Depends(get_db)):
     db.commit()
     _flash(request, f"User '{target.username}' deleted.")
     return _redirect("/manage/users")
+
+
+# --------------------------------------------------------------------------- #
+# Suppression windows — quiet hours + planned maintenance.
+#
+# Recurring windows are stored as LOCAL minutes-from-midnight, so the form takes
+# HH:MM and converts. Everything here is audit-logged: silencing alerts is
+# exactly the kind of change an operator needs to be able to account for later
+# ("why didn't we hear about Saturday?"), and the audit row is where that
+# question gets answered.
+# --------------------------------------------------------------------------- #
+_WEEKDAY_LABELS = ("Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun")
+
+
+def _parse_hhmm(raw: str):
+    """'HH:MM' -> minutes from midnight, or None. Accepts '24:00' as end-of-day."""
+    if not raw or not raw.strip():
+        return None
+    text = raw.strip()
+    try:
+        hh, _, mm = text.partition(":")
+        hours, minutes = int(hh), int(mm or 0)
+    except ValueError:
+        return None
+    if not (0 <= hours <= 24) or not (0 <= minutes < 60):
+        return None
+    total = hours * 60 + minutes
+    return total if 0 <= total <= 24 * 60 else None
+
+
+def _fmt_hhmm(minutes) -> str:
+    if minutes is None:
+        return ""
+    minutes = int(minutes)
+    return "%02d:%02d" % (minutes // 60 % 25, minutes % 60)
+
+
+def _parse_local_dt(raw: str):
+    """'YYYY-MM-DDTHH:MM' from <input type=datetime-local> -> tz-aware UTC.
+
+    Read as UTC deliberately: a maintenance window is a single absolute range,
+    and the form labels the fields UTC rather than guessing which client's clock
+    an admin meant while scheduling across several of them.
+    """
+    from datetime import datetime as _dt
+    from datetime import timezone as _tz
+
+    if not raw or not raw.strip():
+        return None
+    text = raw.strip().replace(" ", "T")
+    for fmt in ("%Y-%m-%dT%H:%M", "%Y-%m-%dT%H:%M:%S"):
+        try:
+            return _dt.strptime(text, fmt).replace(tzinfo=_tz.utc)
+        except ValueError:
+            continue
+    return None
+
+
+def _parse_weekdays(raw_list) -> Optional[list]:
+    """Form checkbox values -> sorted [0..6], or None for 'every day'."""
+    out = set()
+    for raw in raw_list or []:
+        try:
+            day = int(raw)
+        except (TypeError, ValueError):
+            continue
+        if 0 <= day <= 6:
+            out.add(day)
+    # All seven selected is the same policy as none, stored as None so the
+    # evaluator takes its cheaper "every day" path.
+    if not out or len(out) == 7:
+        return None
+    return sorted(out)
+
+
+def _window_scope(scope: str, scope_id: str):
+    """Validate scope/scope_id together; a scoped window needs a target id."""
+    try:
+        scope_enum = m.AlertScope(scope)
+    except ValueError:
+        scope_enum = m.AlertScope.global_
+    if scope_enum == m.AlertScope.global_:
+        return scope_enum, None
+    try:
+        target = int(scope_id)
+    except (TypeError, ValueError):
+        return None, None
+    return scope_enum, target
+
+
+@router.get("/suppression", response_class=HTMLResponse)
+def suppression_home(request: Request, db: Session = Depends(get_db)):
+    """Quiet hours + maintenance windows, with a live 'active now' indicator."""
+    user = _manager(request, db)
+    if user is None:
+        return _redirect("/login")
+    windows = list(db.scalars(
+        select(m.SuppressionWindow).order_by(
+            m.SuppressionWindow.kind, m.SuppressionWindow.id.desc()
+        )
+    ))
+    clients = list(db.scalars(select(m.Client).order_by(m.Client.name)))
+    sites = list(db.scalars(select(m.Site).order_by(m.Site.name)))
+    printers = list(db.scalars(
+        select(m.Printer)
+        .where(m.Printer.discovery_state == m.DiscoveryState.approved)
+        .order_by(m.Printer.client_id, m.Printer.ip)
+    ))
+    # "Is it on right now?" per window, evaluated against a representative
+    # printer in its scope so the client timezone in play is the real one.
+    now = datetime.now(timezone.utc)
+    runtime = load_settings(db)
+    active_ids = set()
+    for window in windows:
+        probe = _scope_probe_printer(db, window, printers)
+        for hit, _ends in suppression.active_windows(
+            db, probe, now, runtime=runtime, windows=[window]
+        ):
+            active_ids.add(hit.id)
+    return _tpl(
+        request, "suppression.html", db,
+        user=user, windows=windows, clients=clients, sites=sites,
+        printers=printers, active_ids=active_ids,
+        weekday_labels=list(enumerate(_WEEKDAY_LABELS)),
+        fmt_hhmm=_fmt_hhmm,
+        default_tz=(runtime.get("alerts.default_timezone") or "UTC"),
+        flash=_pop_flash(request),
+    )
+
+
+def _scope_probe_printer(db: Session, window, printers: list):
+    """A printer inside ``window``'s scope, for evaluating it in the right zone.
+
+    Global windows have no single client, so the first approved printer stands in
+    -- the "active now" badge is informational, and picking any in-scope device
+    gives the operator a truthful answer for at least one of them.
+    """
+    if window.scope == m.AlertScope.printer:
+        return db.get(m.Printer, window.scope_id) if window.scope_id else None
+    if window.scope == m.AlertScope.site:
+        return next((p for p in printers if p.site_id == window.scope_id), None)
+    if window.scope == m.AlertScope.client:
+        return next((p for p in printers if p.client_id == window.scope_id), None)
+    return printers[0] if printers else None
+
+
+@router.post("/suppression")
+def suppression_create(
+    request: Request,
+    name: str = Form(...),
+    kind: str = Form("quiet_hours"),
+    action: str = Form(""),
+    scope: str = Form("global"),
+    scope_id: str = Form(""),
+    min_severity_breakthrough: str = Form("critical"),
+    start_time: str = Form(""),
+    end_time: str = Form(""),
+    weekdays: List[str] = Form(default=[]),
+    starts_at: str = Form(""),
+    ends_at: str = Form(""),
+    db: Session = Depends(get_db),
+):
+    """Create a window. Validation refuses a half-specified one rather than
+    storing something that silently never matches -- a suppression window that
+    quietly does nothing is worse than an error message, because the operator
+    believes they are covered."""
+    actor = _manager(request, db)
+    if actor is None:
+        return _redirect("/login")
+    name = name.strip()
+    if not name:
+        _flash(request, "Window name is required.")
+        return _redirect("/manage/suppression")
+
+    try:
+        kind_enum = m.SuppressionKind(kind)
+    except ValueError:
+        kind_enum = m.SuppressionKind.quiet_hours
+    # Default the action per kind: a digest of expected maintenance noise
+    # defeats the point of declaring the window, so maintenance suppresses.
+    if action:
+        try:
+            action_enum = m.SuppressionAction(action)
+        except ValueError:
+            action_enum = m.SuppressionAction.defer
+    else:
+        action_enum = (
+            m.SuppressionAction.suppress
+            if kind_enum == m.SuppressionKind.maintenance
+            else m.SuppressionAction.defer
+        )
+    # "none" is a deliberate choice, not a parse failure: it means nothing breaks
+    # through. Anything unrecognised still falls back to the safe default.
+    allow_breakthrough = min_severity_breakthrough.strip().lower() != "none"
+    try:
+        floor = m.EventSeverity(min_severity_breakthrough)
+    except ValueError:
+        floor = m.EventSeverity.critical
+
+    scope_enum, target = _window_scope(scope, scope_id)
+    if scope_enum is None:
+        _flash(request, "Pick a target for a client/site/printer-scoped window.")
+        return _redirect("/manage/suppression")
+
+    start = end = None
+    days = None
+    begins = finishes = None
+    if kind_enum == m.SuppressionKind.quiet_hours:
+        start = _parse_hhmm(start_time)
+        end = _parse_hhmm(end_time)
+        if start is None or end is None:
+            _flash(request, "Quiet hours need a start and end time (HH:MM).")
+            return _redirect("/manage/suppression")
+        days = _parse_weekdays(weekdays)
+    else:
+        begins = _parse_local_dt(starts_at)
+        finishes = _parse_local_dt(ends_at)
+        if begins is None or finishes is None:
+            _flash(request, "A maintenance window needs a start and end date/time.")
+            return _redirect("/manage/suppression")
+        if finishes <= begins:
+            _flash(request, "The maintenance window must end after it starts.")
+            return _redirect("/manage/suppression")
+
+    window = m.SuppressionWindow(
+        name=name, kind=kind_enum, action=action_enum,
+        scope=scope_enum, scope_id=target,
+        min_severity_breakthrough=floor,
+        allow_breakthrough=allow_breakthrough,
+        start_minute=start, end_minute=end, weekdays=days,
+        starts_at=begins, ends_at=finishes,
+        enabled=True,
+    )
+    db.add(window)
+    record(db, request, actor, "suppression_window.create",
+           target=f"window:{name}",
+           detail=(f"kind={kind_enum.value} action={action_enum.value} "
+                   f"scope={scope_enum.value}:{target or '-'} "
+                   f"breakthrough={floor.value if allow_breakthrough else 'none'} "
+                   f"local={_fmt_hhmm(start)}-{_fmt_hhmm(end)} "
+                   f"days={days or 'all'} "
+                   f"utc={begins.isoformat() if begins else '-'}"
+                   f"..{finishes.isoformat() if finishes else '-'}"))
+    db.commit()
+    _flash(request, f"Window '{name}' added.")
+    return _redirect("/manage/suppression")
+
+
+@router.post("/suppression/{window_id}/toggle")
+def suppression_toggle(window_id: int, request: Request, db: Session = Depends(get_db)):
+    """Enable/disable without deleting -- the usual way a seasonal policy is parked."""
+    actor = _manager(request, db)
+    if actor is None:
+        return _redirect("/login")
+    window = db.get(m.SuppressionWindow, window_id)
+    if window is None:
+        _flash(request, "That window no longer exists.")
+        return _redirect("/manage/suppression")
+    window.enabled = not window.enabled
+    record(db, request, actor, "suppression_window.update",
+           target=f"window:{window.name}",
+           detail=f"enabled={window.enabled}")
+    db.commit()
+    _flash(request, f"Window '{window.name}' {'enabled' if window.enabled else 'disabled'}.")
+    return _redirect("/manage/suppression")
+
+
+@router.post("/suppression/{window_id}/delete")
+def suppression_delete(window_id: int, request: Request, db: Session = Depends(get_db)):
+    actor = _manager(request, db)
+    if actor is None:
+        return _redirect("/login")
+    window = db.get(m.SuppressionWindow, window_id)
+    if window is None:
+        _flash(request, "That window no longer exists.")
+        return _redirect("/manage/suppression")
+    record(db, request, actor, "suppression_window.delete",
+           target=f"window:{window.name}",
+           detail=f"kind={window.kind.value} scope={window.scope.value}")
+    db.delete(window)
+    db.commit()
+    _flash(request, f"Window '{window.name}' deleted.")
+    return _redirect("/manage/suppression")

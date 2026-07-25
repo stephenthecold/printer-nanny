@@ -18,7 +18,14 @@ from central.channels import (
     routable_channels,
     route_channels,
 )
-from central.channels.delivery import channel_badges, record_dispatch
+from central import suppression
+from central.channels.delivery import (
+    WITHHELD_CHANNEL_KEY,
+    channel_badges,
+    notification_payload,
+    record_dispatch,
+)
+from central.channels.delivery import flush_deferred as _flush_deferred
 from central.channels.delivery import retry_due as _retry_due
 from central.channels.freescout import FreeScoutChannel
 from central.runtime import load_settings
@@ -237,7 +244,8 @@ def _notify_alert(
     candidates: list,
     now: datetime,
     runtime: Optional[dict] = None,
-) -> None:
+    windows: Optional[list] = None,
+) -> bool:
     """Build the notification, route it, deliver durably, and stamp bookkeeping.
 
     Routing honors ``rule.channel_ids`` and per-channel scope/severity (see
@@ -246,7 +254,25 @@ def _notify_alert(
     retry_deliveries instead of being silently dropped. Captures the FreeScout
     ticket id on ``external_ref`` and sets ``last_notified_at`` so the escalation
     pass can measure how long an alert has gone un-escalated.
+
+    Suppression windows are consulted FIRST, and because both the initial open
+    and every escalation come through here, one check covers both. Returns True
+    when a notification was actually dispatched and False when a window held or
+    dropped it, so callers can avoid counting a send that didn't happen.
+
+    On a deferral ``last_notified_at`` is deliberately NOT stamped -- nothing was
+    sent, and stamping it would make the escalation clock measure from a
+    non-event. The held row itself is idempotent, so an escalation that arrives
+    during the window doesn't stack duplicates.
     """
+    runtime = runtime or load_settings(db)
+    decision = suppression.evaluate(
+        db, printer, alert.severity.value, now, runtime=runtime, windows=windows
+    )
+    if not decision.dispatch:
+        _record_withheld(db, alert, decision, now)
+        return False
+
     client_name = site_name = None
     if printer is not None:
         client = db.get(m.Client, printer.client_id)
@@ -266,9 +292,7 @@ def _notify_alert(
     channels = route_channels(
         candidates, rule=rule, printer=printer, severity=alert.severity.value
     )
-    results = record_dispatch(
-        db, alert.id, note, channels, runtime=runtime or load_settings(db)
-    )
+    results = record_dispatch(db, alert.id, note, channels, runtime=runtime)
     alert.notified_channels = channel_badges(results)
     # Never clear a ref we already hold: escalation re-dispatches through this
     # same path, and FreeScout only returns a conversation id when it CREATES
@@ -276,6 +300,72 @@ def _notify_alert(
     # closed-loop resolver lost the ticket and the next round opened a duplicate.
     alert.external_ref = _external_ref_from(results, channels) or alert.external_ref
     alert.last_notified_at = now
+    return True
+
+
+def _record_withheld(
+    db: Session, alert: m.Alert, decision, now: datetime,
+) -> None:
+    """Persist the fact that a window held or dropped this alert's notification.
+
+    A deferral writes ONE ``deferred`` row carrying ``next_attempt_at`` = the
+    window's end, which makes the existing retry sweeper the wake mechanism --
+    no second scheduler, no polling. It is idempotent per alert: an escalation
+    arriving mid-window must not stack a second held row, and re-evaluating on
+    every cycle must not either. The stored end is refreshed on each pass so an
+    operator extending the window is honoured.
+
+    A suppression writes a terminal ``suppressed`` row rather than nothing at
+    all. Writing nothing would be indistinguishable from "no alert fired", and
+    an operator asking for silence still deserves an answer to "what did I miss
+    on Saturday?".
+
+    The badge on the alert says which happened, so the Alerts page shows "held"
+    or "suppressed" instead of leaving the alert looking simply un-notified.
+    """
+    existing = db.scalar(
+        select(m.NotificationDelivery).where(
+            m.NotificationDelivery.alert_id == alert.id,
+            m.NotificationDelivery.status.in_(
+                (m.DeliveryStatus.deferred, m.DeliveryStatus.suppressed)
+            ),
+        )
+    )
+    payload = notification_payload(Notification(
+        title=alert.title,
+        body=alert.detail or "",
+        severity=alert.severity.value,
+        printer_label=None,
+        alert_id=alert.id,
+    ))
+    if decision.suppress:
+        status = m.DeliveryStatus.suppressed
+        next_at = None
+    else:
+        status = m.DeliveryStatus.deferred
+        next_at = decision.deferred_until
+
+    if existing is not None:
+        # Refresh in place rather than adding a row.
+        existing.status = status
+        existing.next_attempt_at = next_at
+        existing.last_error = decision.reason[:2000]
+    else:
+        db.add(m.NotificationDelivery(
+            alert_id=alert.id,
+            channel_key=WITHHELD_CHANNEL_KEY,
+            status=status,
+            attempts=0,
+            last_error=decision.reason[:2000],
+            next_attempt_at=next_at,
+            payload=payload,
+        ))
+    alert.notified_channels = [{
+        "channel": "quiet hours" if decision.defer else "suppressed",
+        "ok": True,
+        "sent": False,
+        "detail": decision.reason,
+    }]
 
 
 def _open_alert(
@@ -576,12 +666,16 @@ def _escalate_alerts(
             continue
         rule = db.get(m.AlertRule, alert.rule_id) if alert.rule_id else None
         printer = db.get(m.Printer, alert.printer_id) if alert.printer_id else None
-        alert.escalation_level = (alert.escalation_level or 0) + 1
-        _notify_alert(
+        # Bump only if the notification actually went out. A quiet-hours window
+        # returns False here, and counting that as an escalation would inflate the
+        # level once per cycle all night -- so an alert would emerge at 07:00
+        # reading "escalation level 480" having never escalated to anyone.
+        if _notify_alert(
             db, alert, rule=rule, printer=printer,
             candidates=candidates, now=now, runtime=runtime,
-        )
-        escalated += 1
+        ):
+            alert.escalation_level = (alert.escalation_level or 0) + 1
+            escalated += 1
     return escalated
 
 
@@ -916,6 +1010,18 @@ def retry_deliveries(db: Session, now: Optional[datetime] = None) -> dict:
     delivered/dead rows are terminal and never re-sent (see channels.delivery).
     """
     return _retry_due(db, load_settings(db), now or _now())
+
+
+def flush_quiet_hours(db: Session, now: Optional[datetime] = None) -> dict:
+    """Deliver notifications held by a quiet-hours window, batched into a digest.
+
+    A held notification is a ``deferred`` delivery row whose ``next_attempt_at``
+    is the instant its window closes, so this job needs no schedule of its own --
+    it simply finds the rows that have come due. One digest per client rather than
+    one message per alert, which is the whole point of deferring instead of
+    suppressing: the operator hears about the night once, in the morning.
+    """
+    return _flush_deferred(db, load_settings(db), now or _now())
 
 
 def _open_forecast_alert(
