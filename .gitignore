@@ -15,6 +15,16 @@ env/
 .env
 .env.local
 
+# Local compose customisation. Deliberately untracked so `install.sh --update`
+# can fast-forward docker-compose.yml underneath it without ever colliding.
+# Start from docker-compose.override.yml.example (which IS tracked).
+docker-compose.override.yml
+docker-compose.override.yaml
+compose.override.yml
+compose.override.yaml
+# Backups install.sh --migrate-compose takes before resetting a hand-edited file
+docker-compose.yml.bak.*
+
 # Agent self-update marker (runtime artifact, never source)
 .pn-update-result.json
 
