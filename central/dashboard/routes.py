@@ -443,6 +443,7 @@ def approvals(request: Request, db: Session = Depends(get_db)):
     return _render(
         request, "approvals.html", db=db, user=user,
         pending=pending, agents_by_id=agents_by_id,
+        approvals_flash=request.session.pop("approvals_flash", None),
     )
 
 
@@ -467,6 +468,66 @@ def approval_action(
         db.commit()
     # HTMX swaps out the row; return empty so the row disappears.
     return HTMLResponse("")
+
+
+@router.post("/approvals/bulk")
+def approval_bulk(
+    request: Request,
+    printer_ids: list[int] = Form(default=[]),
+    action: str = Form(...),
+    db: Session = Depends(get_db),
+):
+    """Approve or ignore a whole discovery batch in one submit.
+
+    A new site arrives as tens of devices at once, and clearing that queue one
+    button at a time is the single biggest click cost in onboarding.
+
+    Every id is re-fetched and re-checked here rather than trusted from the
+    form: the posted list is attacker-controllable, so an id that does not
+    exist, or that names a printer which is no longer pending, is skipped
+    instead of acted on. That also makes a double-submit harmless -- the second
+    one finds nothing pending and changes nothing, rather than flipping a
+    device somebody has since ignored back to approved.
+    """
+    user = _user(request, db)
+    if user is None:
+        return _login_redirect()
+    if user.role == m.UserRole.client_readonly:
+        return RedirectResponse("/", status_code=303)
+    if action not in ("approve", "ignore"):
+        return RedirectResponse("/approvals", status_code=303)
+
+    from central.audit import record
+
+    new_state = (
+        m.DiscoveryState.approved if action == "approve" else m.DiscoveryState.ignored
+    )
+    changed = []
+    for printer_id in printer_ids:
+        printer = db.get(m.Printer, printer_id)
+        if printer is None or printer.discovery_state != m.DiscoveryState.pending:
+            continue
+        printer.discovery_state = new_state
+        changed.append(printer)
+
+    if changed:
+        # One audit row for the batch, but naming every printer it touched --
+        # "approved 40 devices" without the list is not an audit trail. Capped
+        # so a huge sweep can't blow the detail column, with the overflow
+        # disclosed rather than silently truncated.
+        shown = [f"{p.id}:{p.ip}" for p in changed[:50]]
+        overflow = len(changed) - len(shown)
+        detail = ", ".join(shown) + (f" (+{overflow} more)" if overflow else "")
+        record(db, request, user, f"printer.bulk_{action}",
+               target=f"{len(changed)} printers", detail=detail)
+        db.commit()
+        request.session["approvals_flash"] = (
+            f"{len(changed)} device{'s' if len(changed) != 1 else ''} "
+            f"{'approved' if action == 'approve' else 'ignored'}."
+        )
+    else:
+        request.session["approvals_flash"] = "Nothing to do — those devices are no longer pending."
+    return RedirectResponse("/approvals", status_code=303)
 
 
 # --- Alerts inbox ----------------------------------------------------------- #

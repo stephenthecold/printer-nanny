@@ -304,6 +304,66 @@ class Agent(Base):
     )
 
 
+class AgentClaimToken(Base):
+    """A short-lived, single-use code that lets an agent enroll itself.
+
+    The existing path mints the agent first and makes the operator carry its id
+    and API key to the site by hand. That key is long-lived and full-privilege
+    from the moment it is displayed, so every copy of it -- the clipboard, the
+    chat message it was pasted into, the ticket it was attached to -- is a
+    standing credential. A claim code inverts that: it is worthless after one
+    redemption and after its TTL, so the thing that travels is the thing that
+    expires, and the long-lived key is minted at the destination and never
+    leaves it.
+
+    What the redeeming agent may NOT choose is the important part. ``site_id``
+    is fixed by the operator at mint time, because the code is a bearer
+    credential -- anyone holding it could otherwise self-declare a tenant and
+    land inside another client's fleet. The agent supplies only a hostname,
+    which is device-supplied input and is therefore treated as a display label
+    and nothing more.
+
+    ``token_hash`` stores SHA-256 of the code, never the code, mirroring
+    ``Agent.api_key_hash``: a database dump must not yield a working
+    enrollment. Single use is enforced as a conditional UPDATE on ``used_at``
+    rather than a read-then-write, so two agents racing the same code cannot
+    both win.
+    """
+
+    __tablename__ = "agent_claim_tokens"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    token_hash: Mapped[str] = mapped_column(String(128), unique=True, index=True)
+    site_id: Mapped[int] = mapped_column(
+        ForeignKey("sites.id", ondelete="CASCADE"), index=True
+    )
+    # Name for the agent created on redemption. Operator-supplied, so it is the
+    # one piece of naming that is trustworthy; a hostname reported by the
+    # machine only ever appends to it.
+    agent_name: Mapped[Optional[str]] = mapped_column(String(200), default=None)
+    created_by_user_id: Mapped[Optional[int]] = mapped_column(
+        ForeignKey("users.id", ondelete="SET NULL"), default=None
+    )
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+    expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    used_at: Mapped[Optional[datetime]] = mapped_column(
+        DateTime(timezone=True), default=None
+    )
+    used_by_agent_id: Mapped[Optional[int]] = mapped_column(
+        ForeignKey("agents.id", ondelete="SET NULL"), default=None
+    )
+
+    site: Mapped[Site] = relationship()
+
+    # Redemption looks up by hash and then filters on "still valid", and the
+    # expiry sweep scans by expires_at; both are covered here rather than only
+    # in the migration, because revision 0001 is ``create_all()`` -- an index
+    # declared only in a migration is silently absent on every fresh install.
+    __table_args__ = (
+        Index("ix_agent_claim_token_expires", "expires_at"),
+    )
+
+
 class Subnet(Base):
     __tablename__ = "subnets"
 
@@ -335,6 +395,20 @@ class Subnet(Base):
     # internal RFC 1918 CIDRs overlap (each tunnel terminates at a different
     # local IP / interface; bind-per-subnet routes packets to the right one).
     bind_interface: Mapped[Optional[str]] = mapped_column(String(64), default=None)
+    # Auto-approve discoveries found here instead of queueing them for review.
+    #
+    # This is the ONLY thing that can move a device into a tenant's fleet without
+    # a human, so it is deliberately a property of the subnet rather than a
+    # global switch: an operator had to type this CIDR and its SNMP credentials
+    # by hand to create the row at all, and marking it trusted re-uses that
+    # existing deliberate act rather than inventing new trust. A device on a
+    # CIDR nobody enrolled still queues, and so does one whose subnet_cidr the
+    # agent doesn't report -- "unknown provenance" must never mean "approved".
+    #
+    # Defaults False so an upgrade changes nobody's behaviour, and so a subnet
+    # created in a hurry is not silently more permissive than one created
+    # carefully.
+    trusted: Mapped[bool] = mapped_column(Boolean, default=False)
     # Discovery status (updated by the ingest endpoint on each /discovered batch).
     last_discovery_at: Mapped[Optional[datetime]] = mapped_column(
         DateTime(timezone=True), default=None
@@ -622,10 +696,14 @@ class SuppressionWindow(Base):
 
     ``scope``/``scope_id`` reuse the AlertRule and NotificationChannel
     convention, so an operator already knows what global/client/site/printer
-    means here. Overlap is resolved most-specific-scope-first (see
-    ``central.suppression``) -- a printer-level window beats a client-level one,
-    which is what makes "silence this one flaky device" possible without
-    punching a hole in the client's policy.
+    means here. Overlap is resolved FLAT rather than most-specific-first (see
+    ``central.suppression.evaluate``): every covering window the severity does
+    not break through is considered, any ``suppress`` wins, and otherwise the
+    notification defers until the latest end among them. Scope ranking was
+    rejected on purpose -- it implies exclusions ("this printer is exempt from
+    the client policy") that this model cannot express, and a precedence rule
+    that silently *reduces* suppression is the dangerous direction to be wrong
+    in.
 
     ``min_severity_breakthrough`` is the safety valve: alerts at or above it
     ignore the window entirely. It defaults to ``critical`` because silencing a

@@ -6,6 +6,7 @@ Resolution order for the path: explicit ``--config`` arg -> ``$PRINTER_NANNY_CON
 
 from __future__ import annotations
 
+import logging
 import os
 from dataclasses import dataclass, field, replace
 from typing import List, Optional
@@ -23,6 +24,8 @@ except ModuleNotFoundError:  # 3.9/3.10
         return _toml.load(fp)
 
 from printer_nanny_agent.snmp import SnmpParams
+
+_log = logging.getLogger(__name__)
 
 DEFAULT_CONFIG_PATH = "/etc/printer-nanny/agent.toml"
 # Where the agent keeps durable local state (the store-and-forward spool, and
@@ -141,6 +144,7 @@ _ENV_MAP = {
     "central_url": "PN_CENTRAL_URL",
     "agent_id": "PN_AGENT_ID",
     "api_key": "PN_API_KEY",
+    "claim_code": "PN_CLAIM_CODE",
     "verify_tls": "PN_VERIFY_TLS",
     "data_dir": "PRINTER_NANNY_DATA_DIR",
 }
@@ -163,6 +167,15 @@ def load_config(
 
     Precedence: CLI flags > env vars > file. A file is optional -- env/flags alone
     are enough, which is what the one-line installer relies on.
+
+    A ``claim_code`` with no credentials alongside it triggers self-enrollment:
+    the code is redeemed for an agent_id + api_key, which are written back to
+    the config file before anything else happens. That write is what makes the
+    next restart a no-op -- the code is single-use, so re-redeeming it would
+    fail and the agent would be permanently broken.
+
+    Credentials already present always win. An operator who pastes a claim code
+    onto a box that is already enrolled gets a warning, not a second identity.
     """
     data: dict = {}
     config_path = resolve_config_path(path)
@@ -172,7 +185,38 @@ def load_config(
     data.update(_env_overrides())
     if cli:
         data.update({k: v for k, v in cli.items() if v is not None})
+
+    claim_code = str(data.pop("claim_code", "") or "").strip()
+    have_creds = bool(data.get("agent_id")) and bool(data.get("api_key"))
+    if claim_code and not have_creds:
+        data.update(_enroll_with_claim_code(data, claim_code, config_path))
+    elif claim_code and have_creds:
+        _log.warning(
+            "ignoring claim code: this agent is already enrolled as agent_id=%s",
+            data.get("agent_id"),
+        )
     return parse_config(data)
+
+
+def _enroll_with_claim_code(data: dict, claim_code: str, config_path: str) -> dict:
+    """Redeem the code and persist what comes back. Returns the new creds."""
+    from printer_nanny_agent import __version__
+    from printer_nanny_agent.enrollment import persist_credentials, redeem_claim_code
+
+    central_url = str(data.get("central_url") or "").rstrip("/")
+    if not central_url:
+        raise ValueError("claim_code given but central_url is missing")
+
+    creds = redeem_claim_code(
+        central_url,
+        claim_code,
+        verify_tls=bool(data.get("verify_tls", True)),
+        version=__version__,
+    )
+    # Persist BEFORE returning, so a crash between here and the first heartbeat
+    # still leaves a usable install rather than a spent code and no identity.
+    persist_credentials(config_path, creds)
+    return {"agent_id": creds["agent_id"], "api_key": creds["api_key"]}
 
 
 def parse_config(data: dict) -> AgentConfig:

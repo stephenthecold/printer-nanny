@@ -6,12 +6,13 @@ seed script and unit tests exercise exactly the same code the agent ingest uses.
 
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Optional
 
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
+from central import audit
 from central import models as m
 from central import schemas as s
 
@@ -286,8 +287,19 @@ def record_discovered(
     site (the multi-client agent path -- HQ agent collecting for Beta drops the
     printer into Beta's site, not HQ's). Falls back to agent.site_id when no
     subnet_cidr is given or the CIDR isn't enrolled.
+
+    Devices found on a subnet an operator marked ``trusted`` skip the approvals
+    queue and land approved. Everything else queues -- including a device whose
+    subnet_cidr resolves to no enrolled Subnet row, and a legacy agent that
+    reports no CIDR at all, because unknown provenance must never mean approved.
+
+    Auto-approval applies only to a row created *here*. Marking a subnet trusted
+    does not retroactively sweep a backlog, because those rows may already carry
+    a decision a human made; changing one silently is the failure mode this
+    whole gate exists to avoid. Clearing a backlog is what bulk approve is for.
     """
     target_site_id = agent.site_id
+    sub = None
     if device.subnet_cidr:
         sub = find_subnet_for_agent_cidr(db, agent.id, device.subnet_cidr)
         if sub is not None:
@@ -315,6 +327,7 @@ def record_discovered(
         return existing, False
 
     site = db.get(m.Site, target_site_id)
+    auto_approved = bool(sub is not None and sub.trusted)
     printer = m.Printer(
         client_id=site.client_id,
         site_id=target_site_id,
@@ -326,8 +339,252 @@ def record_discovered(
         model=device.model,
         serial=device.serial,
         firmware=device.firmware,
-        discovery_state=m.DiscoveryState.pending,
+        discovery_state=(
+            m.DiscoveryState.approved if auto_approved else m.DiscoveryState.pending
+        ),
         status=m.PrinterStatus.unknown,
     )
     db.add(printer)
+    if auto_approved:
+        # Auto-approval is the one path that puts a device into a tenant's fleet
+        # with no human in the loop, so it is recorded rather than merely
+        # happening. No Request and no User: the actor is the agent, and saying
+        # so beats attributing it to whoever last logged in. Identity fields are
+        # device-supplied, so only the IP (validated on the way in) goes in the
+        # target and the rest stays out of the audit string entirely.
+        audit.record(
+            db, None, None, "printer.auto_approve",
+            target=f"printer:{device.ip} site:{target_site_id}",
+            detail=(
+                f"discovered by agent {agent.id} on trusted subnet "
+                f"{sub.cidr} (subnet:{sub.id})"
+            ),
+        )
     return printer, True
+
+
+# --------------------------------------------------------------------------- #
+# Agent claim codes: mint, redeem, expire
+# --------------------------------------------------------------------------- #
+# Default lifetime of a minted code. Short on purpose: the code is the thing
+# that travels (chat message, ticket, runbook), so its window of usefulness to
+# anyone who intercepts it should be the install itself, not the week around it.
+CLAIM_CODE_TTL_MINUTES = 60
+CLAIM_CODE_MAX_TTL_MINUTES = 60 * 24 * 7
+
+
+def mint_claim_token(
+    db: Session,
+    *,
+    site_id: int,
+    agent_name: str,
+    ttl_minutes: int = CLAIM_CODE_TTL_MINUTES,
+    created_by_user_id: Optional[int] = None,
+) -> tuple[m.AgentClaimToken, str]:
+    """Create a claim code for ``site_id``. Returns (row, plaintext code).
+
+    The plaintext is returned to the caller and never stored -- same contract as
+    agent API keys, so the UI must show it once and mean it.
+    """
+    from central.security import generate_claim_code, hash_claim_code
+
+    ttl = max(1, min(int(ttl_minutes), CLAIM_CODE_MAX_TTL_MINUTES))
+    code = generate_claim_code()
+    token = m.AgentClaimToken(
+        token_hash=hash_claim_code(code),
+        site_id=site_id,
+        agent_name=(agent_name or "").strip() or None,
+        created_by_user_id=created_by_user_id,
+        expires_at=_now() + timedelta(minutes=ttl),
+    )
+    db.add(token)
+    return token, code
+
+
+def redeem_claim_token(
+    db: Session, code: str, *, hostname: Optional[str] = None
+) -> Optional[tuple[m.Agent, str]]:
+    """Exchange a claim code for a real agent + API key. Returns None if the
+    code is unknown, expired, or already redeemed -- the caller must not
+    distinguish those to the client.
+
+    Single use is enforced as a conditional UPDATE rather than read-then-write:
+    two agents booting from the same baked image would otherwise both pass the
+    check and both get an agent. The UPDATE's rowcount is the interlock -- only
+    the transaction that actually flipped ``used_at`` from NULL proceeds.
+    """
+    from sqlalchemy import update
+
+    from central.security import (
+        generate_api_key,
+        hash_api_key,
+        hash_claim_code,
+    )
+
+    now = _now()
+    result = db.execute(
+        update(m.AgentClaimToken)
+        .where(
+            m.AgentClaimToken.token_hash == hash_claim_code(code or ""),
+            m.AgentClaimToken.used_at.is_(None),
+            m.AgentClaimToken.expires_at > now,
+        )
+        .values(used_at=now)
+    )
+    if result.rowcount != 1:
+        return None
+
+    token = db.scalar(
+        select(m.AgentClaimToken).where(
+            m.AgentClaimToken.token_hash == hash_claim_code(code or "")
+        )
+    )
+    if token is None:  # pragma: no cover - the UPDATE just matched it
+        return None
+
+    site = db.get(m.Site, token.site_id)
+    if site is None:
+        # The site was deleted between mint and redeem. The code is already
+        # burned by the UPDATE above, which is the right way round: fail closed
+        # and make the operator mint a new one rather than guessing a home.
+        return None
+
+    # The hostname is machine-reported and therefore untrusted: it only ever
+    # decorates the operator's chosen name, never replaces it, and is length
+    # -capped so a hostile agent can't push a novel into the UI.
+    base = token.agent_name or f"Agent for {site.name}"
+    clean_host = (hostname or "").strip()[:60]
+    name = f"{base} ({clean_host})" if clean_host else base
+
+    api_key = generate_api_key()
+    agent = m.Agent(
+        site_id=token.site_id,
+        name=name[:200],
+        api_key_hash=hash_api_key(api_key),
+    )
+    db.add(agent)
+    db.flush()
+    token.used_by_agent_id = agent.id
+
+    # Adopt this site's orphaned subnets. With claim-code enrollment the subnet
+    # is declared before the agent exists (that is the point -- the operator
+    # sets the site up, then the box shows up and enrolls itself), so without
+    # this the agent would come online with nothing to scan and the operator
+    # would have to go back and wire them up by hand, which is the manual step
+    # this whole path exists to remove.
+    #
+    # Strictly ``agent_id IS NULL`` and strictly this site: an unassigned subnet
+    # has no owner to take it from, and never touching an assigned one means a
+    # second agent at the same site cannot silently steal the first one's work.
+    orphans = list(db.scalars(
+        select(m.Subnet).where(
+            m.Subnet.site_id == token.site_id, m.Subnet.agent_id.is_(None)
+        )
+    ))
+    for subnet in orphans:
+        subnet.agent_id = agent.id
+    if orphans:
+        audit.record(
+            db, None, None, "subnet.auto_assign",
+            target=f"agent:{agent.id} site:{token.site_id}",
+            detail="adopted on enrollment: " + ", ".join(s.cidr for s in orphans[:20]),
+        )
+    return agent, api_key
+
+
+def purge_expired_claim_tokens(db: Session) -> int:
+    """Delete claim tokens that are spent or long past their window.
+
+    Redeemed rows are kept briefly so the Agents page can show "claimed at" and
+    the audit trail has something to point at; beyond that they are noise, and a
+    table of dead credentials is a table worth not having.
+    """
+    from sqlalchemy import delete, or_
+
+    cutoff = _now() - timedelta(days=7)
+    result = db.execute(
+        delete(m.AgentClaimToken).where(
+            or_(
+                m.AgentClaimToken.expires_at < cutoff,
+                m.AgentClaimToken.used_at < cutoff,
+            )
+        )
+    )
+    return int(result.rowcount or 0)
+
+
+# --------------------------------------------------------------------------- #
+# Onboarding defaults
+# --------------------------------------------------------------------------- #
+def _parse_quiet_hours(raw: str) -> Optional[tuple]:
+    """"HH:MM-HH:MM" -> (start_minute, end_minute), or None if unparseable.
+
+    Returns None rather than raising: a malformed setting should cost the new
+    client its quiet-hours window, not block onboarding entirely.
+    """
+    try:
+        start_s, end_s = str(raw or "").strip().split("-", 1)
+        sh, sm = (int(p) for p in start_s.strip().split(":", 1))
+        eh, em = (int(p) for p in end_s.strip().split(":", 1))
+    except (AttributeError, TypeError, ValueError):
+        return None
+    if not (0 <= sh < 24 and 0 <= eh < 24 and 0 <= sm < 60 and 0 <= em < 60):
+        return None
+    return sh * 60 + sm, eh * 60 + em
+
+
+def _parse_weekdays(raw: str) -> list:
+    days = []
+    for part in str(raw or "").split(","):
+        part = part.strip()
+        if part.isdigit() and 0 <= int(part) <= 6 and int(part) not in days:
+            days.append(int(part))
+    return days or [0, 1, 2, 3, 4, 5, 6]
+
+
+def apply_onboarding_defaults(db: Session, client: m.Client, runtime: dict) -> list:
+    """Give a freshly created client its starting rules. Returns what was made.
+
+    Applied once, at creation, and never again: these are a starting point the
+    client then owns. Re-applying on every settings change would quietly
+    overwrite thresholds an operator tuned for that customer, which is the
+    behaviour that makes people stop trusting defaults.
+
+    The return value is what the caller audits -- "we created these three
+    things on your behalf" is the difference between a helpful default and an
+    unexplained row appearing in someone's alert rules.
+    """
+    created = []
+    if not runtime.get("onboarding.apply_defaults"):
+        return created
+
+    threshold = int(runtime.get("onboarding.low_supply_pct") or 0)
+    if threshold > 0:
+        db.add(m.AlertRule(
+            name=f"{client.name}: low supply",
+            scope=m.AlertScope.client,
+            scope_id=client.id,
+            condition_type=m.AlertConditionType.supply_below,
+            threshold=float(threshold),
+            severity=m.EventSeverity.warning,
+        ))
+        created.append(f"low-supply rule at {threshold}%")
+
+    window = _parse_quiet_hours(runtime.get("onboarding.quiet_hours") or "")
+    if window:
+        start_minute, end_minute = window
+        db.add(m.SuppressionWindow(
+            name=f"{client.name}: quiet hours",
+            kind=m.SuppressionKind.quiet_hours,
+            action=m.SuppressionAction.defer,
+            scope=m.AlertScope.client,
+            scope_id=client.id,
+            start_minute=start_minute,
+            end_minute=end_minute,
+            weekdays=_parse_weekdays(runtime.get("onboarding.quiet_hours_weekdays") or ""),
+        ))
+        created.append(
+            f"quiet hours {start_minute // 60:02d}:{start_minute % 60:02d}"
+            f"-{end_minute // 60:02d}:{end_minute % 60:02d} (client-local)"
+        )
+    return created

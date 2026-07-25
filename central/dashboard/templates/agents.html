@@ -33,6 +33,33 @@
 </details>
 {% endif %}
 
+{% if new_claim %}
+{% set claim_linux = 'curl -fsSL ' ~ central_url ~ '/install-agent.sh | sudo bash -s -- --central-url ' ~ central_url ~ ' --claim-code ' ~ new_claim.code ~ ' --pip-source "' ~ pip_source ~ '"' %}
+{% set claim_windows = '$env:PN_CENTRAL_URL="' ~ central_url ~ '"; $env:PN_CLAIM_CODE="' ~ new_claim.code ~ '"; $env:PN_PIP_SOURCE="' ~ pip_source ~ '"; Set-ExecutionPolicy -Scope Process Bypass -Force; $p="$env:TEMP\\install-pn-agent.ps1"; iwr -useb ' ~ central_url ~ '/install-agent.ps1 -OutFile $p; & $p' %}
+<div class="mb-5 rounded-lg border border-emerald-300 bg-emerald-50 p-4">
+  <div class="font-semibold text-emerald-900">Claim code for {{ new_claim.site }}</div>
+  <p class="text-sm text-emerald-800 mt-1">
+    Single use, expires <strong>{{ new_claim.expires_at.strftime('%Y-%m-%d %H:%M') }} UTC</strong>.
+    The agent enrolls itself with it and gets its own key — no key to carry.
+    Shown <strong>only once</strong>.
+  </p>
+  <div class="mt-3">
+    <div class="text-xs font-medium text-emerald-900 mb-1">Linux (systemd)</div>
+    <div class="relative">
+      <pre id="cmd-claim-linux" class="bg-slate-900 text-slate-100 rounded p-3 text-xs overflow-x-auto whitespace-pre-wrap break-all select-all">{{ claim_linux }}</pre>
+      <button type="button" onclick="navigator.clipboard.writeText(document.getElementById('cmd-claim-linux').innerText)" class="absolute top-2 right-2 text-xs bg-white/10 hover:bg-white/20 text-white rounded px-2 py-1">Copy</button>
+    </div>
+  </div>
+  <div class="mt-3">
+    <div class="text-xs font-medium text-emerald-900 mb-1">Windows (PowerShell, as Administrator)</div>
+    <div class="relative">
+      <pre id="cmd-claim-win" class="bg-slate-900 text-slate-100 rounded p-3 text-xs overflow-x-auto whitespace-pre-wrap break-all select-all">{{ claim_windows }}</pre>
+      <button type="button" onclick="navigator.clipboard.writeText(document.getElementById('cmd-claim-win').innerText)" class="absolute top-2 right-2 text-xs bg-white/10 hover:bg-white/20 text-white rounded px-2 py-1">Copy</button>
+    </div>
+  </div>
+</div>
+{% endif %}
+
 {% if new_key %}
 {% set install_cmd = 'curl -fsSL ' ~ central_url ~ '/install-agent.sh | sudo bash -s -- --central-url ' ~ central_url ~ ' --agent-id ' ~ new_key.id ~ ' --api-key ' ~ new_key.key ~ ' --pip-source "' ~ pip_source ~ '"' %}
 {% set windows_cmd = '$env:PN_CENTRAL_URL="' ~ central_url ~ '"; $env:PN_AGENT_ID="' ~ new_key.id ~ '"; $env:PN_API_KEY="' ~ new_key.key ~ '"; $env:PN_PIP_SOURCE="' ~ pip_source ~ '"; Set-ExecutionPolicy -Scope Process Bypass -Force; $p="$env:TEMP\\install-pn-agent.ps1"; iwr -useb ' ~ central_url ~ '/install-agent.ps1 -OutFile $p; & $p' %}
@@ -175,6 +202,7 @@
               <th class="py-1 pr-2 w-20">Community</th>
               <th class="py-1 pr-2 w-14">Ver</th>
               <th class="py-1 pr-2 w-24">Bind IP</th>
+              <th class="py-1 pr-2 w-20" title="Auto-approve devices discovered on this subnet instead of queueing them for review.">Trusted</th>
               <th class="py-1 pr-2 w-44">Last discovery</th>
               <th class="py-1 w-16"></th>
             </tr>
@@ -202,6 +230,19 @@
                 </select>
               </td>
               <td class="py-1.5 pr-2"><input form="subnet-{{ s.id }}" name="bind_interface" value="{{ s.bind_interface or '' }}" placeholder="—" title="Source IP to bind when scanning (multi-client overlap). Empty = OS default route." class="border rounded px-2 py-1 w-full" /></td>
+              {# The hidden marker says "this form carries the checkbox". Without it an
+                 unchecked box (which posts nothing) is indistinguishable from a form that
+                 never had the field, and every inline edit would silently untrust the subnet. #}
+              <td class="py-1.5 pr-2">
+                <input form="subnet-{{ s.id }}" type="hidden" name="trusted_present" value="1" />
+                <label class="inline-flex items-center gap-1 cursor-pointer">
+                  <input form="subnet-{{ s.id }}" type="checkbox" name="trusted" value="1"
+                         id="subnet-trusted-{{ s.id }}"
+                         {% if s.trusted %}checked{% endif %}
+                         title="Auto-approve devices discovered here. Only enable for a subnet you control." />
+                  <span class="{{ 'text-emerald-700' if s.trusted else 'text-slate-400' }}">{{ 'auto' if s.trusted else 'review' }}</span>
+                </label>
+              </td>
               <td class="py-1.5 pr-2 text-slate-500">
                 {% if s.last_discovery_at %}
                 {{ s.last_discovery_at.strftime('%m-%d %H:%M') }}
@@ -284,7 +325,7 @@
               </td>
             </tr>
             {% else %}
-            <tr><td colspan="7" class="py-2 text-slate-400 text-sm">No subnets assigned.</td></tr>
+            <tr><td colspan="8" class="py-2 text-slate-400 text-sm">No subnets assigned.</td></tr>
             {% endfor %}
           </tbody>
         </table>
@@ -317,6 +358,16 @@
                 {% endfor %}
                 {% endfor %}
               </select>
+              <label class="col-span-4 inline-flex items-start gap-2 text-xs text-slate-600">
+                <input type="checkbox" name="trusted" value="1" class="mt-0.5" />
+                <span>
+                  <span class="font-medium">Trust this subnet</span> — approve discovered
+                  devices automatically instead of queueing them.
+                  <span class="text-slate-400">Only for a network you control: an approved
+                  device joins this client's fleet and its self-reported name shows up in
+                  dashboards and alerts.</span>
+                </span>
+              </label>
             </div>
             <details>
               <summary class="text-xs text-slate-500 cursor-pointer">SNMPv3 credentials (used when version=3)</summary>
@@ -395,6 +446,38 @@
         <input name="name" placeholder="Agent name" required class="w-full border rounded px-3 py-2 text-sm" />
         <button class="w-full bg-slate-900 text-white rounded py-2 text-sm font-medium">Create &amp; show key</button>
         <p class="text-xs text-slate-400">After creating, assign subnets -- you can mix subnets from any client/site (multi-client pattern).</p>
+      </form>
+    </section>
+
+    <section class="bg-white rounded-lg shadow p-4 h-fit">
+      <h2 class="font-semibold mb-1">Claim code</h2>
+      <p class="text-xs text-slate-500 mb-3">
+        Hand the site a code instead of a key. The agent redeems it once on first
+        start and mints its own credentials, so nothing long-lived travels — and
+        the copy left in a chat log stops working after the first install.
+      </p>
+      <form method="post" action="/manage/agents/claim-code" class="space-y-2">
+        <label class="block">
+          <span class="text-xs text-slate-500">Site the agent will join</span>
+          <select name="site_id" required class="w-full border rounded px-3 py-2 text-sm">
+            {% for client in clients %}
+            {% for site in sites_by_client.get(client.id, []) %}
+            <option value="{{ site.id }}">{{ client.name }} / {{ site.name }}</option>
+            {% endfor %}
+            {% endfor %}
+          </select>
+        </label>
+        <input name="name" placeholder="Agent name (optional)" class="w-full border rounded px-3 py-2 text-sm" />
+        <label class="block">
+          <span class="text-xs text-slate-500">Valid for</span>
+          <select name="ttl_minutes" class="w-full border rounded px-3 py-2 text-sm">
+            <option value="60">1 hour</option>
+            <option value="240">4 hours</option>
+            <option value="1440">1 day</option>
+            <option value="10080">7 days (maximum)</option>
+          </select>
+        </label>
+        <button class="w-full bg-emerald-700 text-white rounded py-2 text-sm font-medium">Mint claim code</button>
       </form>
     </section>
 

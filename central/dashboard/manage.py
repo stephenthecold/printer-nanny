@@ -20,6 +20,7 @@ from sqlalchemy.orm import Session
 from starlette.background import BackgroundTask
 
 from central import models as m
+from central import services
 from central import suppression
 from central.audit import record
 from central.dashboard import _keystore
@@ -506,6 +507,7 @@ def agents_home(request: Request, db: Session = Depends(get_db)):
         sites_by_client=sites_by_client,
         pending_by_site=pending_by_site,
         new_key=_keystore.pop(request.session.pop("new_agent_key_token", None)),
+        new_claim=_keystore.pop(request.session.pop("new_claim_code_token", None)),
         central_url=public_url,
         pip_source=rt["agent.pip_source"],
         docker_image=rt["agent.docker_image"],
@@ -537,6 +539,176 @@ def agent_create(
     request.session["new_agent_key_token"] = _keystore.put(
         {"id": agent.id, "name": agent.name, "key": api_key}
     )
+    return _redirect("/manage/agents")
+
+
+@router.get("/onboard", response_class=HTMLResponse)
+def onboard_form(request: Request, db: Session = Depends(get_db)):
+    """One screen for "a new customer signed, get them monitored".
+
+    The pieces already existed -- client, site, subnet, agent -- but as four
+    forms on three pages, none of which carried context to the next. Nothing
+    here is a new concept; it is the same four objects created in one
+    transaction, ending on the install command instead of leaving the operator
+    to go find it.
+    """
+    user = _manager(request, db)
+    if user is None:
+        return _redirect("/login")
+    runtime = load_settings(db)
+    return _tpl(
+        request, "onboard.html", db, user=user,
+        clients=list(db.scalars(select(m.Client).order_by(m.Client.name))),
+        tz_choices=_timezone_choices(),
+        default_tz=(runtime.get("alerts.default_timezone") or "UTC"),
+        flash=_pop_flash(request),
+    )
+
+
+@router.post("/onboard")
+def onboard_submit(
+    request: Request,
+    client_name: str = Form(...),
+    client_timezone: str = Form(""),
+    site_name: str = Form(...),
+    agent_name: str = Form(""),
+    cidr: str = Form(""),
+    snmp_community: str = Form("public"),
+    snmp_version: str = Form("2c"),
+    trusted: str = Form(""),
+    ttl_minutes: int = Form(1440),
+    db: Session = Depends(get_db),
+):
+    """Create client + site + (optional) subnet, and mint the claim code.
+
+    An existing client of the same name is reused rather than rejected --
+    onboarding a second site for a customer you already have is the common
+    case, and ``clients.name`` is unique, so creating blindly would just 500.
+    The site is not reused: two sites with the same name under one client is a
+    legitimate thing to want, and silently merging them would be worse than a
+    duplicate an operator can rename.
+
+    Everything commits together. A half-built customer (client, no site, no
+    code) is the state that makes an operator start over by hand, so the whole
+    point is that this either lands or doesn't.
+    """
+    user = _manager(request, db)
+    if user is None:
+        return _redirect("/login")
+
+    client_name = client_name.strip()
+    site_name = site_name.strip()
+    if not client_name or not site_name:
+        _flash(request, "Client and site names are both required.")
+        return _redirect("/manage/onboard")
+
+    tz = client_timezone.strip()
+    if tz and not suppression.valid_timezone(tz):
+        _flash(request, f"'{tz}' isn't a recognised timezone — pick one from the list.")
+        return _redirect("/manage/onboard")
+
+    client = db.scalar(select(m.Client).where(m.Client.name == client_name))
+    if client is None:
+        client = m.Client(name=client_name, timezone=tz or None)
+        db.add(client)
+        db.flush()
+        record(db, request, user, "client.create", target=f"client:{client_name}",
+               detail="via onboarding")
+        # Only for a brand-new client. Re-applying to an existing one would
+        # stack a second copy of every default and overwrite nothing usefully.
+        applied = services.apply_onboarding_defaults(db, client, load_settings(db))
+        if applied:
+            record(db, request, user, "client.defaults_applied",
+                   target=f"client:{client.id} {client_name}",
+                   detail="; ".join(applied))
+    elif tz and not client.timezone:
+        # Only fill a gap; never overwrite a zone somebody already set.
+        client.timezone = tz
+
+    site = m.Site(client_id=client.id, name=site_name)
+    db.add(site)
+    db.flush()
+    record(db, request, user, "site.create",
+           target=f"site:{site.id} {site_name} (client:{client.id})",
+           detail="via onboarding")
+
+    cidr = cidr.strip()
+    if cidr:
+        is_trusted = bool(trusted.strip())
+        # agent_id stays NULL: the agent does not exist yet and will adopt this
+        # subnet when it redeems the claim code (see services.redeem_claim_token).
+        db.add(m.Subnet(
+            site_id=site.id, agent_id=None, cidr=cidr,
+            snmp_community=snmp_community.strip() or "public",
+            snmp_version=snmp_version, trusted=is_trusted,
+        ))
+        record(db, request, user, "subnet.create",
+               target=f"subnet:{cidr} site:{site.id}",
+               detail=f"snmp v{snmp_version} via onboarding"
+                      + (" trusted=on (auto-approves discoveries)" if is_trusted else ""))
+
+    name = agent_name.strip() or f"{client_name} {site_name} agent"
+    token, code = services.mint_claim_token(
+        db, site_id=site.id, agent_name=name,
+        ttl_minutes=ttl_minutes, created_by_user_id=user.id,
+    )
+    record(db, request, user, "agent.claim_code_mint",
+           target=f"claim_token:{token.id} site:{site.id}",
+           detail=f"via onboarding, expires {token.expires_at:%Y-%m-%d %H:%M} UTC")
+    db.commit()
+
+    request.session["new_claim_code_token"] = _keystore.put({
+        "code": code,
+        "site": f"{client_name} / {site_name}",
+        "name": name,
+        "expires_at": token.expires_at,
+    })
+    _flash(request, f"{client_name} / {site_name} is ready — run the install command below.")
+    return _redirect("/manage/agents")
+
+
+@router.post("/agents/claim-code")
+def agent_claim_code(
+    request: Request,
+    site_id: int = Form(...),
+    name: str = Form(""),
+    ttl_minutes: int = Form(60),
+    db: Session = Depends(get_db),
+):
+    """Mint a single-use claim code so an agent can enroll itself.
+
+    The alternative this replaces is pasting a long-lived API key into whatever
+    channel reaches the site. That key stays valid wherever it was pasted; a
+    claim code stops being worth anything the moment it is used, so the copy
+    left behind in a chat log is inert.
+
+    Shown once, like the API key it replaces, and via the same server-side
+    one-shot store -- the session cookie is signed but readable, so a live
+    credential must not travel in it.
+    """
+    user = _manager(request, db)
+    if user is None:
+        return _redirect("/login")
+    site = db.get(m.Site, site_id)
+    if site is None:
+        _flash(request, "Pick a site for the claim code.")
+        return _redirect("/manage/agents")
+
+    token, code = services.mint_claim_token(
+        db, site_id=site.id, agent_name=name.strip(),
+        ttl_minutes=ttl_minutes, created_by_user_id=user.id,
+    )
+    # Target/detail carry the token id and its window, never the code itself.
+    record(db, request, user, "agent.claim_code_mint",
+           target=f"claim_token:{token.id} site:{site.id}",
+           detail=f"expires {token.expires_at:%Y-%m-%d %H:%M} UTC")
+    db.commit()
+    request.session["new_claim_code_token"] = _keystore.put({
+        "code": code,
+        "site": f"{site.client.name} / {site.name}" if site.client else site.name,
+        "name": name.strip() or f"Agent for {site.name}",
+        "expires_at": token.expires_at,
+    })
     return _redirect("/manage/agents")
 
 
@@ -840,6 +1012,7 @@ def subnet_add(
     snmp_v3_priv_protocol: str = Form(""),
     snmp_v3_priv_password: str = Form(""),
     snmp_v3_context_name: str = Form(""),
+    trusted: str = Form(""),
     db: Session = Depends(get_db),
 ):
     """Create a subnet and bind it to this agent.
@@ -852,6 +1025,10 @@ def subnet_add(
     SNMPv3 fields are picked up when ``snmp_version="3"``; for v1/v2c they're
     ignored. The agent receives the v3 blob through the existing /config
     endpoint and uses it to build a USM auth context.
+
+    ``trusted`` opts this subnet into auto-approving discoveries. Absent (an
+    unchecked box posts nothing) means false, which is both the form default
+    and the safe one.
     """
     if _manager(request, db) is None:
         return _redirect("/login")
@@ -863,10 +1040,12 @@ def subnet_add(
                 effective_site_id = int(site_id)
             except ValueError:
                 pass
+        is_trusted = bool(trusted.strip())
         db.add(m.Subnet(
             site_id=effective_site_id, agent_id=agent.id, cidr=cidr.strip(),
             snmp_community=snmp_community.strip() or "public",
             snmp_version=snmp_version,
+            trusted=is_trusted,
             bind_interface=bind_interface.strip() or None,
             snmp_v3=_build_v3_blob(
                 user=snmp_v3_user,
@@ -880,7 +1059,8 @@ def subnet_add(
         ))
         record(db, request, _manager(request, db), "subnet.create",
                target=f"subnet:{cidr.strip()} agent:{agent.id}",
-               detail=f"snmp v{snmp_version}")
+               detail=f"snmp v{snmp_version}"
+                      + (" trusted=on (auto-approves discoveries)" if is_trusted else ""))
         db.commit()
         _flash(request, f"Subnet {cidr} assigned.")
     return _redirect("/manage/agents")
@@ -916,6 +1096,8 @@ def subnet_update(
     snmp_v3_priv_password: str = Form(""),
     snmp_v3_context_name: str = Form(""),
     snmp_v3_clear: str = Form(""),
+    trusted: str = Form(""),
+    trusted_present: str = Form(""),
     db: Session = Depends(get_db),
 ):
     """Edit a subnet's friendly label, SNMP creds, source-bind address, and
@@ -927,6 +1109,13 @@ def subnet_update(
     doesn't accidentally wipe other settings when an operator just renames.
     ``snmp_v3_clear=1`` is the explicit "blow away v3 creds" signal -- without
     it, omitting v3 form fields keeps the existing creds.
+
+    ``trusted`` needs the same care for the opposite reason: an unchecked
+    checkbox posts NOTHING, so reading it directly would make every form that
+    omits the control -- the inline rename, for one -- silently turn
+    auto-approval off. ``trusted_present`` is the "this form carried the
+    checkbox" marker, so absence means "not my field" and only an actual
+    unchecked box clears the flag.
     """
     if _manager(request, db) is None:
         return _redirect("/login")
@@ -966,8 +1155,21 @@ def subnet_update(
                 new_agent = None
             if new_agent is not None:
                 subnet.agent_id = new_agent.id
+        # Only a form that actually carried the checkbox may change the trust
+        # gate, and a flip is audited on its own line: this is the switch that
+        # decides whether devices enter a tenant's fleet without a human.
+        trust_note = ""
+        if trusted_present.strip():
+            new_trusted = bool(trusted.strip())
+            if new_trusted != subnet.trusted:
+                trust_note = (
+                    " trusted=on (auto-approves discoveries)" if new_trusted
+                    else " trusted=off"
+                )
+            subnet.trusted = new_trusted
         record(db, request, _manager(request, db), "subnet.update",
-               target=f"subnet:{subnet.id} {subnet.cidr}")
+               target=f"subnet:{subnet.id} {subnet.cidr}",
+               detail=trust_note.strip())
         db.commit()
         _flash(request, f"Subnet {subnet.cidr} updated.")
     return _redirect("/manage/agents")

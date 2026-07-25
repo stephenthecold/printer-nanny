@@ -29,6 +29,7 @@
     <a href="/alerts" class="hover:text-white/80 text-sm">Alerts</a>
     <a href="/manage/maintenance" class="hover:text-white/80 text-sm">Maintenance</a>
     {% if user.role.value != 'client_readonly' %}
+    <a href="/manage/onboard" class="hover:text-white/80 text-sm">Onboard</a>
     <a href="/manage/suppression" class="hover:text-white/80 text-sm">Quiet hours</a>
     <a href="/security/posture" class="hover:text-white/80 text-sm">Security</a>
     {% endif %}

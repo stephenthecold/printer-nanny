@@ -219,6 +219,31 @@ class AgentCreated(AgentOut):
     api_key: str
 
 
+class AgentRegisterIn(BaseModel):
+    """What a self-registering agent sends when it redeems a claim code.
+
+    Note what is absent: no site, no client, no name it can rely on. Those come
+    from the token the operator minted, because this request is authenticated
+    only by a bearer code -- letting the caller nominate a tenant would make
+    holding a code equivalent to choosing whose fleet to join.
+    """
+
+    claim_code: str
+    # Reported by the machine, so display-only. It is stored as a suffix on the
+    # operator's chosen name rather than as the name itself.
+    hostname: Optional[str] = None
+    version: Optional[str] = None
+
+
+class AgentRegistered(BaseModel):
+    """The one and only time the minted key is transmitted."""
+
+    agent_id: int
+    api_key: str
+    site_id: int
+    name: str
+
+
 class PrinterIn(BaseModel):
     client_id: int
     site_id: int

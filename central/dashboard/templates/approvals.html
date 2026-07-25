@@ -5,13 +5,34 @@
 <p class="text-sm text-slate-500 mb-4">
   Devices agents found on their subnets. Quick-approve to start monitoring with the
   defaults, <em>Review</em> to set location / SNMP / asset tag first, or Ignore.
+  To skip this queue entirely for a network you control, mark its subnet
+  <a href="/manage/agents" class="text-sky-700 hover:underline">trusted</a>.
 </p>
 
-<div class="bg-white rounded-lg shadow overflow-hidden">
+{% if approvals_flash %}
+<div class="mb-3 rounded border border-sky-200 bg-sky-50 text-sky-900 px-3 py-2 text-sm">{{ approvals_flash }}</div>
+{% endif %}
+
+<form method="post" action="/approvals/bulk" id="bulk-form">
+<div class="bg-white rounded-lg shadow overflow-x-auto">
+  {% if pending %}
+  <div class="flex flex-wrap items-center gap-2 px-4 py-2 border-b bg-slate-50 text-sm">
+    <span class="text-slate-500" id="bulk-count">0 selected</span>
+    <span class="flex-1"></span>
+    <button type="submit" name="action" value="approve"
+            class="bg-green-600 hover:bg-green-700 text-white rounded px-3 py-1.5 text-xs">Approve selected</button>
+    <button type="submit" name="action" value="ignore"
+            class="bg-slate-300 hover:bg-slate-400 text-slate-700 rounded px-3 py-1.5 text-xs">Ignore selected</button>
+  </div>
+  {% endif %}
   <table class="w-full text-sm">
     <thead class="text-left text-slate-500 bg-slate-50">
       <tr>
-        <th class="px-4 py-2">IP</th>
+        <th class="px-4 py-2 w-8">
+          <input type="checkbox" id="bulk-all" title="Select all"
+                 onclick="document.querySelectorAll('.bulk-row').forEach(c => c.checked = this.checked); bulkCount();" />
+        </th>
+        <th class="py-2">IP</th>
         <th class="py-2">Host / model</th>
         <th class="py-2">MAC</th>
         <th class="py-2">Discovered by</th>
@@ -23,7 +44,11 @@
       {% for p in pending %}
       {% set found_by = agents_by_id.get(p.discovered_by_agent_id) if p.discovered_by_agent_id else None %}
       <tr class="border-t" id="pending-{{ p.id }}">
-        <td class="px-4 py-2 tabular-nums">{{ p.ip }}</td>
+        <td class="px-4 py-2">
+          <input type="checkbox" class="bulk-row" form="bulk-form" name="printer_ids"
+                 value="{{ p.id }}" onclick="bulkCount()" aria-label="Select {{ p.ip }}" />
+        </td>
+        <td class="py-2 tabular-nums">{{ p.ip }}</td>
         <td class="py-2">{{ p.hostname or '—' }} <span class="text-slate-400">{{ p.brand or '' }} {{ p.model or '' }}</span></td>
         <td class="py-2 text-slate-400">{{ p.mac or '—' }}</td>
         <td class="py-2 text-slate-500">{{ found_by.name if found_by else '—' }}</td>
@@ -31,16 +56,33 @@
         <td class="py-2 text-right pr-4 space-x-1">
           <a href="/manage/printers/{{ p.id }}/edit?from_approvals=1"
              class="bg-sky-600 text-white rounded px-2 py-1 text-xs">Review</a>
-          <button hx-post="/approvals/{{ p.id }}/approve" hx-target="#pending-{{ p.id }}" hx-swap="outerHTML"
+          {# type="button" is load-bearing: these live inside the bulk form now, and a
+             button with no type defaults to submit -- clicking one row's Approve would
+             post the whole batch. #}
+          <button type="button" hx-post="/approvals/{{ p.id }}/approve" hx-target="#pending-{{ p.id }}" hx-swap="outerHTML"
                   class="bg-green-600 text-white rounded px-2 py-1 text-xs">Quick approve</button>
-          <button hx-post="/approvals/{{ p.id }}/ignore" hx-target="#pending-{{ p.id }}" hx-swap="outerHTML"
+          <button type="button" hx-post="/approvals/{{ p.id }}/ignore" hx-target="#pending-{{ p.id }}" hx-swap="outerHTML"
                   class="bg-slate-300 text-slate-700 rounded px-2 py-1 text-xs">Ignore</button>
         </td>
       </tr>
       {% else %}
-      <tr><td class="px-4 py-4 text-slate-400" colspan="6">Nothing pending. 🎉</td></tr>
+      <tr><td class="px-4 py-4 text-slate-400" colspan="7">Nothing pending. 🎉</td></tr>
       {% endfor %}
     </tbody>
   </table>
 </div>
+</form>
+
+<script>
+  // Selection count only -- the submit is a plain form post, so the page works
+  // with JS disabled (you just don't get the running total or select-all).
+  function bulkCount() {
+    var n = document.querySelectorAll('.bulk-row:checked').length;
+    var label = document.getElementById('bulk-count');
+    if (label) label.textContent = n + ' selected';
+    var all = document.getElementById('bulk-all');
+    var rows = document.querySelectorAll('.bulk-row').length;
+    if (all) all.indeterminate = n > 0 && n < rows;
+  }
+</script>
 {% endblock %}

@@ -38,3 +38,25 @@ def hash_api_key(api_key: str) -> str:
 
 def api_key_matches(api_key: str, stored_hash: str) -> bool:
     return hmac.compare_digest(hash_api_key(api_key), stored_hash)
+
+
+# --- Agent claim codes -------------------------------------------------------
+# A claim code is what travels to the site: an operator pastes it into an
+# installer, the agent redeems it once for a real API key, and it is dead
+# thereafter. Same storage discipline as API keys -- only the SHA-256 digest is
+# persisted, so a database dump yields nothing redeemable.
+#
+# Entropy is the primary defence and is deliberately not reduced for typing
+# comfort: 32 urlsafe bytes is ~192 bits, so guessing one is not a threat model
+# worth rate-limiting against. The properties that actually need enforcing are
+# the ones a guess can't help with -- single use and a short TTL -- and both are
+# enforced in the database rather than here.
+CLAIM_CODE_PREFIX = "pnc_"
+
+
+def generate_claim_code() -> str:
+    return CLAIM_CODE_PREFIX + secrets.token_urlsafe(32)
+
+
+def hash_claim_code(code: str) -> str:
+    return hashlib.sha256(code.encode("utf-8")).hexdigest()
