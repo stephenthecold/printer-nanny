@@ -39,6 +39,11 @@ class ChannelResult:
     made the durable delivery log record a *delivered* row -- and the alerts
     page render a green tick -- for a notification that was never transmitted.
     Anything that reports success without transmitting must set ``sent=False``.
+
+    ``sent`` is only meaningful when ``ok`` is True. A failure is already its own
+    terminal/retryable state, so error paths leave ``sent`` at its default rather
+    than each having to restate it -- do not read ``sent=True`` on an ``ok=False``
+    result as a claim that anything was transmitted.
     """
 
     ok: bool

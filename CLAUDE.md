@@ -129,7 +129,7 @@ enforced; none of them is optional.
 - `migrations/` — Alembic environment + versions (0001 → 0013).
 - `deploy/` — Caddyfile, installer scripts (`install-agent.sh`/`.ps1`), sample
   systemd unit, and `WINDOWS-MSI-TESTING.md` (build + Server 2016→2025 smoke).
-- `tests/` — pytest suite (~413 tests; ~25s end-to-end on Postgres-less SQLite).
+- `tests/` — pytest suite (~906 tests; ~2min end-to-end on Postgres-less SQLite).
 
 ## Conventions
 - Python 3.12 in Docker; code stays 3.9-compatible (`from __future__ import
@@ -149,6 +149,20 @@ enforced; none of them is optional.
   reports, branding, agent install source) lives in DB via `central/runtime.py`
   and is edited in the Settings UI **grouped into tabs**. Only `DATABASE_URL` +
   `SECRET_KEY` come from env (`central/config.py`).
+- **Alert noise is damped, and non-delivery is never called delivery.** Two
+  independent mechanisms, because neither covers both shapes: a *deadband*
+  (`alerts.supply_deadband_pct`) holds a live low-supply alert until the level
+  climbs that margin above the threshold, and a *flap cooldown*
+  (`alerts.renotify_cooldown_min`) folds a re-fire of any condition back into the
+  alert it already raised — bumping `alerts.flap_count`, deliberately **not**
+  re-notifying, and leaving `last_notified_at` alone so escalation still measures
+  from the real notification. Error alerts are one-per-distinct-code (capped by
+  `alerts.max_error_alerts_per_printer`, overflow disclosed in the detail, never
+  dropped silently). On the delivery side `ChannelResult.sent` is separate from
+  `ok` — "did a message leave the building" vs "did anything go wrong" — so a
+  severity skip or unconfigured dry-run terminates as `DeliveryStatus.skipped`
+  rather than `delivered`. When adding a channel or an early-return, anything
+  that reports success without transmitting **must** set `sent=False`.
 - Secret-typed settings + SNMPv3 USM passwords are **encrypted at rest** with
   a Fernet key derived from `SECRET_KEY`. Lazy migration: legacy plaintext is
   swept into encrypted form on every save and at api startup.
@@ -208,7 +222,7 @@ enforced; none of them is optional.
 Production-ready feature surface (as of PR #46):
 
 **Core**: central server, multi-tenant model, push-based agents, brand-agnostic
-SNMP, alerting with dedupe + auto-resolve, scheduled reports, friendly names,
+SNMP, alerting with dedupe + auto-resolve + flap damping, scheduled reports, friendly names,
 days-until-order supply forecasts, per-client / per-site rollups, recent
 activity, maintenance schedules, audit log, DB backup/restore.
 
