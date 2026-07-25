@@ -1,0 +1,251 @@
+{% extends "base.html" %}
+{% block title %}People · {{ app.name or 'Printer Nanny' }}{% endblock %}
+{% block body %}
+<h1 class="text-2xl font-semibold mb-1">People</h1>
+<p class="text-sm text-slate-500 mb-4">
+  The customer's staff and the printers assigned to them. Distinct from
+  <a href="/manage/users" class="text-sky-700 hover:underline">Users</a>, who
+  administer <em>this</em> system. Assign printers directly to a person, or to a
+  group so the assignment survives staff turnover.
+</p>
+
+{% if flash %}
+<div class="mb-4 rounded bg-amber-50 border border-amber-200 text-amber-900 px-4 py-2 text-sm">{{ flash }}</div>
+{% endif %}
+
+{% if not clients %}
+<div class="bg-white rounded-lg shadow p-6 text-sm text-slate-600">
+  No clients yet. <a href="/manage/onboard" class="text-sky-700 hover:underline">Onboard one</a> first.
+</div>
+{% else %}
+
+<form method="get" class="mb-5 flex items-end gap-2">
+  <label class="text-sm">
+    <span class="block text-xs text-slate-500 mb-1">Client</span>
+    <select name="client_id" class="border rounded px-2 py-1.5 text-sm min-w-64"
+            onchange="this.form.submit()">
+      {% for c in clients %}
+      <option value="{{ c.id }}" {% if client and c.id == client.id %}selected{% endif %}>{{ c.name }}</option>
+      {% endfor %}
+    </select>
+  </label>
+  <noscript><button class="rounded bg-slate-700 text-white text-sm px-3 py-1.5">Show</button></noscript>
+</form>
+
+<div class="grid lg:grid-cols-3 gap-6">
+  <!-- ------------------------------- people ------------------------------ -->
+  <section class="lg:col-span-2 bg-white rounded-lg shadow overflow-x-auto">
+    <div class="px-4 py-3 border-b font-semibold flex items-center justify-between">
+      <span>Staff at {{ client.name }}</span>
+      <span class="text-xs font-normal text-slate-500">{{ people | length }} total</span>
+    </div>
+    {% if people %}
+    <table class="w-full text-sm">
+      <thead class="text-left text-xs text-slate-500 bg-slate-50">
+        <tr>
+          <th class="px-4 py-2">Person</th>
+          <th class="py-2">Source</th>
+          <th class="py-2">Printers</th>
+          <th class="py-2 w-28 text-right pr-4"></th>
+        </tr>
+      </thead>
+      <tbody>
+        {% for p in people %}
+        <tr class="border-t align-top {% if not p.active %}bg-slate-50 text-slate-400{% endif %}">
+          <td class="px-4 py-2">
+            <div class="font-medium">{{ p.display_name or p.email or p.upn }}</div>
+            {% if p.email and p.display_name %}<div class="text-xs text-slate-400">{{ p.email }}</div>{% endif %}
+            {% if not p.active %}<div class="text-xs text-slate-500 mt-0.5">deactivated</div>{% endif %}
+          </td>
+          <td class="py-2 text-xs">
+            <span class="inline-block rounded bg-slate-100 text-slate-600 px-1.5 py-0.5">{{ p.directory_source.value }}</span>
+          </td>
+          <td class="py-2 text-xs">
+            {% set eff = resolved.get(p.id) or [] %}
+            {% if eff %}
+            <ul class="space-y-0.5">
+              {% for printer, is_default, via in eff %}
+              <li>
+                <a href="/printers/{{ printer.id }}" class="text-sky-700 hover:underline">{{ printer.display_name or printer.model or printer.ip }}</a>
+                {% if is_default %}<span class="ml-1 rounded bg-emerald-100 text-emerald-800 px-1">default</span>{% endif %}
+                {% if via %}<span class="ml-1 text-slate-400">via {{ via }}</span>{% endif %}
+              </li>
+              {% endfor %}
+            </ul>
+            {% elif not p.active %}
+            <span class="text-slate-400">none — deactivated</span>
+            {% else %}
+            <span class="text-slate-400">none</span>
+            {% endif %}
+          </td>
+          <td class="py-2 pr-4 text-right">
+            <form method="post" action="/manage/people/{{ p.id }}/active" class="inline">
+              {% if p.active %}
+              <button class="text-xs rounded border px-2 py-1 hover:bg-slate-50">Deactivate</button>
+              {% else %}
+              <input type="hidden" name="active" value="1" />
+              <button class="text-xs rounded border px-2 py-1 hover:bg-slate-50">Reactivate</button>
+              {% endif %}
+            </form>
+          </td>
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+    {% else %}
+    <p class="px-4 py-6 text-sm text-slate-500">Nobody yet. Add someone on the right.</p>
+    {% endif %}
+  </section>
+
+  <!-- ------------------------------- add + assign ------------------------ -->
+  <aside class="space-y-6">
+    <section class="bg-white rounded-lg shadow p-4">
+      <div class="font-semibold mb-2 text-sm">Add a person</div>
+      <form method="post" action="/manage/people/create" class="space-y-2">
+        <input type="hidden" name="client_id" value="{{ client.id }}" />
+        <input name="display_name" placeholder="Full name" class="w-full border rounded px-2 py-1.5 text-sm" />
+        <input name="email" type="email" placeholder="Email" class="w-full border rounded px-2 py-1.5 text-sm" />
+        <input name="upn" placeholder="Username / UPN (optional)" class="w-full border rounded px-2 py-1.5 text-sm" />
+        <button class="w-full rounded bg-sky-700 hover:bg-sky-800 text-white text-sm px-3 py-1.5">Add</button>
+      </form>
+      <p class="text-xs text-slate-400 mt-2">
+        Any one field is enough. Directory sync will match on email or username
+        when it lands, so a person with neither can't be linked later.
+      </p>
+    </section>
+
+    <section class="bg-white rounded-lg shadow p-4">
+      <div class="font-semibold mb-2 text-sm">Assign a printer</div>
+      {% if printers and (people or groups) %}
+      <form method="post" action="/manage/people/assign" class="space-y-2">
+        <select name="printer_id" class="w-full border rounded px-2 py-1.5 text-sm" required>
+          <option value="">Printer…</option>
+          {% for pr in printers %}
+          <option value="{{ pr.id }}">{{ pr.display_name or pr.model or pr.ip }}</option>
+          {% endfor %}
+        </select>
+        <select name="end_user_id" class="w-full border rounded px-2 py-1.5 text-sm">
+          <option value="">— to a person —</option>
+          {% for p in people if p.active %}
+          <option value="{{ p.id }}">{{ p.display_name or p.email or p.upn }}</option>
+          {% endfor %}
+        </select>
+        <select name="group_id" class="w-full border rounded px-2 py-1.5 text-sm">
+          <option value="">— or to a group —</option>
+          {% for g in groups %}
+          <option value="{{ g.id }}">{{ g.name }}</option>
+          {% endfor %}
+        </select>
+        <label class="flex items-center gap-2 text-xs text-slate-600">
+          <input type="checkbox" name="is_default" value="1" class="rounded" />
+          Make it their default printer
+        </label>
+        <button class="w-full rounded bg-sky-700 hover:bg-sky-800 text-white text-sm px-3 py-1.5">Assign</button>
+      </form>
+      <p class="text-xs text-slate-400 mt-2">
+        Pick exactly one of person or group. Only approved printers appear here.
+      </p>
+      {% else %}
+      <p class="text-xs text-slate-500">
+        {% if not printers %}No approved printers for this client yet.{% else %}Add a person or a group first.{% endif %}
+      </p>
+      {% endif %}
+    </section>
+
+    <section class="bg-white rounded-lg shadow p-4">
+      <div class="font-semibold mb-2 text-sm">New group</div>
+      <form method="post" action="/manage/people/groups/create" class="flex gap-2">
+        <input type="hidden" name="client_id" value="{{ client.id }}" />
+        <input name="name" placeholder="e.g. Accounting" class="flex-1 border rounded px-2 py-1.5 text-sm" required />
+        <button class="rounded bg-slate-700 hover:bg-slate-800 text-white text-sm px-3 py-1.5">Create</button>
+      </form>
+    </section>
+  </aside>
+</div>
+
+<!-- --------------------------------- groups ------------------------------ -->
+{% if groups %}
+<section class="mt-6 bg-white rounded-lg shadow">
+  <div class="px-4 py-3 border-b font-semibold">Groups</div>
+  <div class="divide-y">
+    {% for g in groups %}
+    <div class="px-4 py-3">
+      <div class="flex items-start justify-between gap-4">
+        <div>
+          <div class="font-medium text-sm">{{ g.name }}</div>
+          <div class="text-xs text-slate-500 mt-0.5">
+            {% set ga = (group_assignments.get(g.id) if group_assignments else []) or [] %}
+            {% if ga %}
+            Printers:
+            {% for a in ga %}
+              <span class="inline-block">{{ a.printer.display_name or a.printer.model or a.printer.ip }}{% if a.is_default %} <span class="rounded bg-emerald-100 text-emerald-800 px-1">default</span>{% endif %}</span>
+              <form method="post" action="/manage/people/unassign" class="inline">
+                <input type="hidden" name="assignment_id" value="{{ a.id }}" />
+                <button class="text-slate-400 hover:text-rose-600" title="Remove">×</button>
+              </form>{% if not loop.last %}<span class="text-slate-300">·</span> {% endif %}
+            {% endfor %}
+            {% else %}
+            No printers assigned to this group yet.
+            {% endif %}
+          </div>
+        </div>
+        <span class="text-xs text-slate-400 whitespace-nowrap">
+          {{ (memberships.get(g.id) or []) | length }} member(s)
+        </span>
+      </div>
+      {% if people %}
+      <form method="post" action="/manage/people/groups/{{ g.id }}/members" class="mt-2">
+        <div class="flex flex-wrap gap-x-4 gap-y-1">
+          {% set members = memberships.get(g.id) or [] %}
+          {% for p in people if p.active %}
+          <label class="flex items-center gap-1.5 text-xs">
+            <input type="checkbox" name="member_ids" value="{{ p.id }}" class="rounded"
+                   {% if p.id in members %}checked{% endif %} />
+            {{ p.display_name or p.email or p.upn }}
+          </label>
+          {% endfor %}
+        </div>
+        <button class="mt-2 text-xs rounded border px-2 py-1 hover:bg-slate-50">Save membership</button>
+      </form>
+      {% endif %}
+    </div>
+    {% endfor %}
+  </div>
+</section>
+{% endif %}
+
+<!-- ------------------------- direct assignments -------------------------- -->
+{% set any_direct = [] %}
+{% for p in people %}{% for printer, is_default, via in (resolved.get(p.id) or []) %}{% if via is none %}{% set _ = any_direct.append(1) %}{% endif %}{% endfor %}{% endfor %}
+{% if any_direct %}
+<section class="mt-6 bg-white rounded-lg shadow overflow-x-auto">
+  <div class="px-4 py-3 border-b font-semibold">Direct assignments</div>
+  <table class="w-full text-sm">
+    <thead class="text-left text-xs text-slate-500 bg-slate-50">
+      <tr><th class="px-4 py-2">Person</th><th class="py-2">Printer</th><th class="py-2 w-20 text-right pr-4"></th></tr>
+    </thead>
+    <tbody>
+      {% for p in people %}
+        {% for a in p.assignments %}
+        <tr class="border-t">
+          <td class="px-4 py-2">{{ p.display_name or p.email or p.upn }}</td>
+          <td class="py-2">
+            {{ a.printer.display_name or a.printer.model or a.printer.ip }}
+            {% if a.is_default %}<span class="ml-1 text-xs rounded bg-emerald-100 text-emerald-800 px-1">default</span>{% endif %}
+          </td>
+          <td class="py-2 pr-4 text-right">
+            <form method="post" action="/manage/people/unassign" class="inline">
+              <input type="hidden" name="assignment_id" value="{{ a.id }}" />
+              <button class="text-xs rounded border px-2 py-1 hover:bg-slate-50">Remove</button>
+            </form>
+          </td>
+        </tr>
+        {% endfor %}
+      {% endfor %}
+    </tbody>
+  </table>
+</section>
+{% endif %}
+
+{% endif %}
+{% endblock %}

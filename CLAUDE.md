@@ -98,6 +98,7 @@ enforced; none of them is optional.
       account, **customer portal** (`/portal` for client_readonly users).
     - `manage.py` — CRUD for clients, sites, printers, agents, subnets, users,
       **maintenance schedules** + **audit log** viewer.
+    - `people.py` — **end users, groups, and printer assignment** (`/manage/people`).
     - `settings_routes.py` — grouped settings tabs (Branding / Notifications /
       Alerts & Reports / Polling & SNMP / Authentication / Agents).
     - `backup_routes.py` — admin-only DB backup & restore.
@@ -235,6 +236,33 @@ enforced; none of them is optional.
     creation and are then owned by the client — re-applying would overwrite
     thresholds an operator tuned, which is how people learn to distrust
     defaults. What was created is audited (`client.defaults_applied`).
+- **End users are not operators, and the two tables must stay apart.** `users`
+  are dashboard operators: globally-unique usernames, password hashes, roles,
+  session auth. `end_users` are the customer's staff — tenant-scoped (two
+  customers each having a "jsmith" is normal, so global uniqueness breaks on the
+  second customer), arriving in the thousands from a directory sync, and never
+  logging in here. Folding them together would force a uniqueness rule the real
+  world violates on day one and would put non-login rows in the table the auth
+  path scans. The URLs keep the distinction visible: **Users** administer the
+  system at `/manage/users`, **People** print things at `/manage/people`.
+- **Printer assignment tenancy is a service-layer invariant, by necessity.**
+  "The printer and its target belong to the same client" spans three tables, so
+  no CHECK can state it; it lives in `services.assign_printer` /
+  `sync_group_members` and every route goes through them. A cross-tenant attempt
+  raises `TenancyError` (its own type — a form typo and a reach into another
+  customer's fleet are different events) and is audited as
+  `printer_assignment.refused`. What the schema *does* enforce is shape: a
+  CHECK that an assignment targets exactly one of user/group. Denormalising
+  `client_id` onto the row would let the DB carry tenancy, but it would drift
+  the moment a printer moves between clients — a checked invariant traded for a
+  silently stale one.
+- **Effective printers resolve deterministically.** `effective_printers_for`
+  merges direct and group-inherited assignments; **direct beats group** (somebody
+  singled this person out — more specific than "they're in Accounting"), and
+  exactly one default comes back, tie-broken by lowest printer id. Last-writer-
+  wins would make a workstation's default printer depend on dict ordering.
+  Inactive users resolve to **nothing** while keeping their rows, so
+  deprovisioning takes effect immediately and history survives.
 - **Checkbox booleans need a presence marker.** An unchecked box posts nothing,
   so a handler that ignores empty fields (`subnet_update`) cannot tell "unchecked"
   from "this form didn't carry the field" — reading it directly makes an inline
@@ -268,6 +296,12 @@ enforced; none of them is optional.
 
 ## Status
 Production-ready feature surface (as of PR #46):
+
+**Print management** (in progress — this is the Printix-shaped half): end users,
+groups, and per-user / per-group printer assignment with a deterministic
+resolver, at `/manage/people`. Directory sync (Entra / Google / on-prem AD) and
+the Windows workstation client are **not built yet** — assignments are real data
+that nothing acts on until the client lands.
 
 **Core**: central server, multi-tenant model, push-based agents, brand-agnostic
 SNMP, alerting with dedupe + auto-resolve + flap damping, quiet hours + maintenance

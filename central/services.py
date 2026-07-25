@@ -588,3 +588,196 @@ def apply_onboarding_defaults(db: Session, client: m.Client, runtime: dict) -> l
             f"-{end_minute // 60:02d}:{end_minute % 60:02d} (client-local)"
         )
     return created
+
+
+# --------------------------------------------------------------------------- #
+# End users + printer assignment
+# --------------------------------------------------------------------------- #
+class TenancyError(ValueError):
+    """A cross-tenant reference was attempted.
+
+    Its own type, not a bare ValueError, because callers must be able to tell
+    "you sent me a bad field" from "you tried to reach into another customer's
+    fleet". The first is a form error; the second is a security event worth
+    auditing and worth never rendering as a routine validation message.
+    """
+
+
+def assign_printer(
+    db: Session,
+    *,
+    printer: m.Printer,
+    end_user: Optional[m.EndUser] = None,
+    group: Optional[m.EndUserGroup] = None,
+    is_default: bool = False,
+    operator_id: Optional[int] = None,
+) -> m.PrinterAssignment:
+    """Assign a printer to one end user or one group, same-tenant only.
+
+    This function exists to own the invariant the schema cannot state: the
+    printer and its target must belong to the same client. A multi-tenant
+    product where an operator can attach customer A's printer to customer B's
+    staff is not merely wrong, it leaks the existence and identity of one
+    customer's hardware into another's UI -- so the check is here, in the one
+    place every caller has to pass through, rather than repeated per route.
+
+    Re-assigning an existing pair is idempotent and updates ``is_default``,
+    because the natural operator gesture (tick the box again) should not be a
+    unique-constraint 500.
+    """
+    if (end_user is None) == (group is None):
+        raise ValueError("assign_printer needs exactly one of end_user or group")
+
+    target_client_id = end_user.client_id if end_user is not None else group.client_id
+    if target_client_id != printer.client_id:
+        raise TenancyError(
+            f"printer {printer.id} belongs to client {printer.client_id}, "
+            f"target belongs to client {target_client_id}"
+        )
+
+    existing = db.scalar(
+        select(m.PrinterAssignment).where(
+            m.PrinterAssignment.printer_id == printer.id,
+            m.PrinterAssignment.end_user_id == (end_user.id if end_user else None),
+            m.PrinterAssignment.group_id == (group.id if group else None),
+        )
+    )
+    if existing is not None:
+        existing.is_default = is_default
+        return existing
+
+    row = m.PrinterAssignment(
+        printer_id=printer.id,
+        end_user_id=end_user.id if end_user else None,
+        group_id=group.id if group else None,
+        is_default=is_default,
+        created_by_user_id=operator_id,
+    )
+    db.add(row)
+    db.flush()
+    return row
+
+
+def effective_printers_for(db: Session, end_user: m.EndUser) -> list:
+    """Every printer this person should have, direct + inherited from groups.
+
+    Returns ``[(printer, is_default, via_group_name_or_None), ...]`` ordered by
+    printer id, with duplicates collapsed.
+
+    Two resolution rules, both deliberate:
+
+    * **A direct assignment outranks a group one.** Somebody singled this person
+      out; that is more specific information than "they are in Accounting".
+    * **Exactly one default, chosen deterministically.** A person in three
+      groups can easily be handed three "make this default" flags. Rather than
+      let the last writer win (which makes the workstation's default printer
+      depend on dictionary ordering), direct assignments win first, then the
+      lowest printer id. Boring and stable beats clever and irreproducible --
+      an operator asking "why is that their default?" gets an answer.
+
+    Inactive users resolve to nothing. A deprovisioned person keeps their rows
+    for audit, but must not keep their printers.
+    """
+    if not end_user.active:
+        return []
+
+    direct = db.scalars(
+        select(m.PrinterAssignment).where(
+            m.PrinterAssignment.end_user_id == end_user.id
+        )
+    ).all()
+
+    group_ids = list(
+        db.scalars(
+            select(m.EndUserGroupMember.group_id).where(
+                m.EndUserGroupMember.end_user_id == end_user.id
+            )
+        ).all()
+    )
+    via_group = []
+    if group_ids:
+        via_group = db.scalars(
+            select(m.PrinterAssignment).where(
+                m.PrinterAssignment.group_id.in_(group_ids)
+            )
+        ).all()
+
+    # printer_id -> (is_default, group_name or None, is_direct)
+    merged: dict = {}
+    for a in via_group:
+        name = a.group.name if a.group is not None else None
+        prev = merged.get(a.printer_id)
+        # Among groups alone, a default flag anywhere wins; the tie-break below
+        # settles which printer actually ends up default.
+        if prev is None:
+            merged[a.printer_id] = (a.is_default, name, False)
+        elif not prev[0] and a.is_default:
+            merged[a.printer_id] = (True, name, False)
+    for a in direct:
+        merged[a.printer_id] = (a.is_default, None, True)
+
+    if not merged:
+        return []
+
+    printers = {
+        p.id: p
+        for p in db.scalars(
+            select(m.Printer).where(m.Printer.id.in_(list(merged.keys())))
+        ).all()
+    }
+
+    # Pick the single winner: direct beats group, then lowest printer id.
+    candidates = [pid for pid, (is_def, _, _) in merged.items() if is_def]
+    winner = None
+    if candidates:
+        direct_defaults = [pid for pid in candidates if merged[pid][2]]
+        winner = min(direct_defaults) if direct_defaults else min(candidates)
+
+    out = []
+    for pid in sorted(merged):
+        printer = printers.get(pid)
+        if printer is None:  # pragma: no cover - FK makes this unreachable
+            continue
+        _, group_name, _ = merged[pid]
+        out.append((printer, pid == winner, group_name))
+    return out
+
+
+def sync_group_members(
+    db: Session, *, group: m.EndUserGroup, end_users: list
+) -> tuple:
+    """Set a group's membership to exactly ``end_users``. Returns (added, removed).
+
+    Same-tenant only, for the reason in ``assign_printer``. Written as a set
+    difference rather than delete-all-then-insert so that a membership refresh
+    is not a window in which everybody briefly has no printers -- with a sync
+    running on a schedule, that window would be real and recurring.
+    """
+    for u in end_users:
+        if u.client_id != group.client_id:
+            raise TenancyError(
+                f"group {group.id} belongs to client {group.client_id}, "
+                f"end user {u.id} belongs to client {u.client_id}"
+            )
+
+    want = {u.id for u in end_users}
+    have = set(
+        db.scalars(
+            select(m.EndUserGroupMember.end_user_id).where(
+                m.EndUserGroupMember.group_id == group.id
+            )
+        ).all()
+    )
+
+    for uid in want - have:
+        db.add(m.EndUserGroupMember(group_id=group.id, end_user_id=uid))
+    if have - want:
+        for row in db.scalars(
+            select(m.EndUserGroupMember).where(
+                m.EndUserGroupMember.group_id == group.id,
+                m.EndUserGroupMember.end_user_id.in_(list(have - want)),
+            )
+        ).all():
+            db.delete(row)
+    db.flush()
+    return len(want - have), len(have - want)

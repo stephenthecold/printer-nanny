@@ -15,6 +15,7 @@ from typing import Optional
 from sqlalchemy import (
     JSON,
     Boolean,
+    CheckConstraint,
     DateTime,
     Enum,
     Float,
@@ -1037,4 +1038,211 @@ class WorkerJobRun(Base):
     consecutive_failures: Mapped[int] = mapped_column(Integer, default=0)
     expected_interval_seconds: Mapped[int] = mapped_column(
         Integer, default=60, server_default=text("60")
+    )
+
+
+# --------------------------------------------------------------------------- #
+# End users + printer assignment (print management)
+#
+# This is the identity half of print management: WHO prints, and WHICH printers
+# they should have. Collection answers "what is on the network"; this answers
+# "who is it for".
+# --------------------------------------------------------------------------- #
+class DirectorySource(str, enum.Enum):
+    """Where an end user or group record came from.
+
+    ``manual`` is not a lesser case -- an operator adding a person by hand is a
+    first-class path, and a synced directory must never silently delete or
+    overwrite a manually-created record it does not know about.
+    """
+
+    manual = "manual"
+    entra = "entra"
+    google = "google"
+    ad = "ad"
+
+
+class EndUser(Base):
+    """A customer's staff member -- the person who prints.
+
+    Deliberately NOT a row in ``users``. That table is dashboard *operators*:
+    globally-unique usernames, password hashes, roles, session auth. End users
+    are a different population with incompatible rules:
+
+    * They are **tenant-scoped**. Two customers each having a "jsmith" is the
+      normal case, so the global uniqueness ``users.username`` enforces would be
+      violated on the first day of the second customer.
+    * They arrive in the **thousands** from a directory sync, and they do not
+      log into this dashboard at all. Folding them in would bloat the table the
+      login path scans with rows that can never authenticate.
+    * Their lifecycle is owned by an external directory, not by an operator.
+
+    Keeping them separate also keeps the blast radius of a sync bug away from
+    the table that governs who can administer the system.
+
+    ``directory_source`` / ``directory_id`` are populated now even though sync
+    lands later, so the connectors slot in without a second migration over a
+    table that by then holds real customer data.
+    """
+
+    __tablename__ = "end_users"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    client_id: Mapped[int] = mapped_column(
+        ForeignKey("clients.id", ondelete="CASCADE"), index=True
+    )
+
+    # Identity as the directory knows it. All optional because the three sources
+    # disagree about what is mandatory: Entra and Google are email-centric, while
+    # on-prem AD may hand us a sAMAccountName and no mailbox at all. A record
+    # with neither is still legitimate (hand-entered) -- it just cannot be
+    # matched by a future sync, which is the honest consequence.
+    email: Mapped[Optional[str]] = mapped_column(String(320), default=None)
+    upn: Mapped[Optional[str]] = mapped_column(String(320), default=None)
+    display_name: Mapped[Optional[str]] = mapped_column(String(200), default=None)
+
+    directory_source: Mapped[DirectorySource] = mapped_column(
+        _enum(DirectorySource), default=DirectorySource.manual
+    )
+    # The IdP's immutable object id. Not the email: people get married, and a
+    # sync keyed on a mutable attribute renames a person into a stranger.
+    directory_id: Mapped[Optional[str]] = mapped_column(String(200), default=None)
+
+    # Deactivated rather than deleted, exactly as the operator `users` table
+    # does it: assignment history stays attributable after somebody leaves, and
+    # a directory that flips `active` back on restores the same record.
+    active: Mapped[bool] = mapped_column(Boolean, default=True)
+
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=utcnow, onupdate=utcnow
+    )
+
+    client: Mapped[Client] = relationship()
+    assignments: Mapped[list[PrinterAssignment]] = relationship(
+        back_populates="end_user", cascade="all, delete-orphan"
+    )
+
+    __table_args__ = (
+        # Tenant-scoped uniqueness, never global. NULLs do not collide in either
+        # backend, so AD users with no mailbox coexist freely.
+        UniqueConstraint("client_id", "email", name="uq_end_users_client_email"),
+        UniqueConstraint(
+            "client_id", "directory_source", "directory_id",
+            name="uq_end_users_client_directory",
+        ),
+        Index("ix_end_users_client_active", "client_id", "active"),
+    )
+
+
+class EndUserGroup(Base):
+    """A directory group (or a hand-made one) that printers can be assigned to.
+
+    Group assignment is what makes this manageable at scale: "everyone in
+    Accounting gets the 3rd-floor MFP" survives staff turnover, where a hundred
+    per-person assignments do not.
+    """
+
+    __tablename__ = "end_user_groups"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    client_id: Mapped[int] = mapped_column(
+        ForeignKey("clients.id", ondelete="CASCADE"), index=True
+    )
+    name: Mapped[str] = mapped_column(String(200))
+    directory_source: Mapped[DirectorySource] = mapped_column(
+        _enum(DirectorySource), default=DirectorySource.manual
+    )
+    directory_id: Mapped[Optional[str]] = mapped_column(String(200), default=None)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+
+    client: Mapped[Client] = relationship()
+    assignments: Mapped[list[PrinterAssignment]] = relationship(
+        back_populates="group", cascade="all, delete-orphan"
+    )
+
+    __table_args__ = (
+        UniqueConstraint("client_id", "name", name="uq_end_user_groups_client_name"),
+        UniqueConstraint(
+            "client_id", "directory_source", "directory_id",
+            name="uq_end_user_groups_client_directory",
+        ),
+    )
+
+
+class EndUserGroupMember(Base):
+    """Membership. A plain association table -- no surrogate key, so the
+    composite PK is itself the "one row per person per group" guarantee."""
+
+    __tablename__ = "end_user_group_members"
+
+    group_id: Mapped[int] = mapped_column(
+        ForeignKey("end_user_groups.id", ondelete="CASCADE"), primary_key=True
+    )
+    end_user_id: Mapped[int] = mapped_column(
+        ForeignKey("end_users.id", ondelete="CASCADE"), primary_key=True
+    )
+
+    __table_args__ = (Index("ix_end_user_group_members_user", "end_user_id"),)
+
+
+class PrinterAssignment(Base):
+    """"This printer belongs to this person (or this group)."
+
+    Targets exactly one of ``end_user_id`` / ``group_id``, enforced by a CHECK
+    rather than by convention -- a row that targets both would have no defined
+    meaning, and a row that targets neither is an orphan the UI would render as
+    a blank. Both mistakes are cheap to make from a form handler and expensive
+    to find later.
+
+    **Tenancy is NOT expressible here.** The invariant that matters -- the
+    printer and the target belong to the same client -- spans three tables, so a
+    CHECK cannot state it. It is enforced in ``services.assign_printer`` and
+    covered by tests that specifically try to cross tenants. Denormalising
+    ``client_id`` onto this row would let a database constraint carry it, but it
+    would then drift the moment a printer is moved between clients, trading a
+    checked invariant for a silently stale one.
+    """
+
+    __tablename__ = "printer_assignments"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    printer_id: Mapped[int] = mapped_column(
+        ForeignKey("printers.id", ondelete="CASCADE"), index=True
+    )
+    end_user_id: Mapped[Optional[int]] = mapped_column(
+        ForeignKey("end_users.id", ondelete="CASCADE"), default=None, index=True
+    )
+    group_id: Mapped[Optional[int]] = mapped_column(
+        ForeignKey("end_user_groups.id", ondelete="CASCADE"), default=None, index=True
+    )
+
+    # "Make this the workstation's default printer." Conflicts are inevitable
+    # once groups are involved, so this is a request, not a guarantee --
+    # services.effective_printers_for resolves it deterministically.
+    is_default: Mapped[bool] = mapped_column(Boolean, default=False)
+
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+    # Which operator made the assignment. SET NULL rather than CASCADE: deleting
+    # a departed admin must not silently delete every printer assignment they
+    # ever made.
+    created_by_user_id: Mapped[Optional[int]] = mapped_column(
+        ForeignKey("users.id", ondelete="SET NULL"), default=None
+    )
+
+    printer: Mapped[Printer] = relationship()
+    end_user: Mapped[Optional[EndUser]] = relationship(back_populates="assignments")
+    group: Mapped[Optional[EndUserGroup]] = relationship(back_populates="assignments")
+
+    __table_args__ = (
+        CheckConstraint(
+            "(end_user_id IS NULL) <> (group_id IS NULL)",
+            name="ck_printer_assignments_one_target",
+        ),
+        UniqueConstraint(
+            "printer_id", "end_user_id", name="uq_printer_assignments_printer_user"
+        ),
+        UniqueConstraint(
+            "printer_id", "group_id", name="uq_printer_assignments_printer_group"
+        ),
     )
