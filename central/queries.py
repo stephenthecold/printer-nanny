@@ -187,6 +187,46 @@ def open_alerts(db: Session, limit: int = 100) -> list[m.Alert]:
     )
 
 
+def undelivered_notifications(db: Session) -> dict:
+    """Notifications an operator still owes somebody, for the Alerts-page banner.
+
+    ``owed`` counts channel-less deliveries (see
+    ``central.channels.delivery.UNROUTED_CHANNEL_KEY``): an alert fired while
+    every channel was disabled or excluded, so nothing was sent and nothing will
+    be until a channel exists. That state is otherwise invisible -- the alert
+    looks merely un-notified -- which is exactly how alerts used to be lost.
+
+    ``dead`` counts per-channel deliveries that exhausted their retry cap while
+    their alert is STILL live -- a channel that is broken, not merely off. Dead
+    letters for resolved alerts are history rather than a to-do, and channel-less
+    rows are excluded because their terminal states (the alert resolved first, a
+    sibling delivery superseded them, or the give-up window elapsed) are either
+    already accounted for or recorded in the audit log; counting them here would
+    keep the banner red over notifications that did in fact go out.
+    """
+    from central.channels.delivery import UNROUTED_CHANNEL_KEY
+
+    owed = db.scalar(
+        select(func.count())
+        .select_from(m.NotificationDelivery)
+        .where(
+            m.NotificationDelivery.channel_key == UNROUTED_CHANNEL_KEY,
+            m.NotificationDelivery.status == m.DeliveryStatus.pending,
+        )
+    ) or 0
+    dead = db.scalar(
+        select(func.count())
+        .select_from(m.NotificationDelivery)
+        .join(m.Alert, m.Alert.id == m.NotificationDelivery.alert_id)
+        .where(
+            m.NotificationDelivery.status == m.DeliveryStatus.dead,
+            m.NotificationDelivery.channel_key != UNROUTED_CHANNEL_KEY,
+            m.Alert.state != m.AlertState.resolved,
+        )
+    ) or 0
+    return {"owed": owed, "dead": dead}
+
+
 def maintenance_due(db: Session, now: Optional[datetime] = None) -> list[m.MaintenanceSchedule]:
     now = now or datetime.now(timezone.utc)
     return list(

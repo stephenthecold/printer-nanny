@@ -44,6 +44,24 @@ def test_parse_reversed_keyword_order():
     CYAN_TONER=85
     """
     assert _parse_pjl_response(text) == {"black": 18, "cyan": 85}
+    # Separator forms that keep working (the anchor must not reject these).
+    assert _parse_pjl_response("K TONER=50") == {"black": 50}
+    assert _parse_pjl_response("SUPPLIES_K_TONER=60") == {"black": 60}
+    assert _parse_pjl_response("Y-TONER=33") == {"yellow": 33}
+
+
+@pytest.mark.parametrize("line", [
+    "PRIMARY_TONER=95",     # "PRIMARY" -> Y : read as yellow 95%
+    "SECONDARY_TONER=40",   # "SECONDARY" -> Y
+    "MK_TONER=20",          # maintenance kit -> read as black 20%
+    "CMYK_TONER=10",
+    "MAX_TONER_TOTAL=7",
+])
+def test_parse_never_takes_a_color_from_a_word_tail(line):
+    """The <COLOR>_TONER ordering had no left anchor, so the color code was
+    taken from the tail of the preceding word -- a wrong percentage written
+    onto a real cartridge. Same bug class as the Brother alert-text regex."""
+    assert _parse_pjl_response(line) == {}
 
 
 def test_parse_compact_form_brscript():

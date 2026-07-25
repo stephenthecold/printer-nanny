@@ -3,6 +3,35 @@
 {% block body %}
 <h1 class="text-2xl font-semibold mb-4">Alerts</h1>
 
+{# Undelivered notifications: alerts nobody was told about. `owed` means no
+   channel was enabled/routed when the alert fired -- the notification is queued
+   and will be sent as soon as one is; `dead` means we gave up while the
+   condition is still outstanding. #}
+{% if undelivered is defined and (undelivered.owed or undelivered.dead) %}
+<div class="mb-4 rounded bg-red-50 border border-red-200 text-red-800 text-sm px-3 py-2">
+  <div class="font-semibold">Notifications were not delivered</div>
+  <ul class="mt-1 list-disc list-inside space-y-0.5">
+    {% if undelivered.owed %}
+    <li>
+      <span class="font-medium tabular-nums">{{ undelivered.owed }}</span>
+      alert notification{{ 's' if undelivered.owed != 1 }} queued with nowhere to send —
+      no channel is enabled. Turn one on under
+      {% if user.role.value == 'admin' %}<a href="/settings?group=notifications" class="underline">Settings → Notifications</a>{% else %}Settings → Notifications (ask an admin){% endif %}
+      and {{ 'they' if undelivered.owed != 1 else 'it' }} will be delivered on the next worker cycle.
+    </li>
+    {% endif %}
+    {% if undelivered.dead %}
+    <li>
+      <span class="font-medium tabular-nums">{{ undelivered.dead }}</span>
+      delivery attempt{{ 's' if undelivered.dead != 1 }} gave up on
+      still-unresolved alert{{ 's' if undelivered.dead != 1 }} — check the channel
+      credentials and the worker log.
+    </li>
+    {% endif %}
+  </ul>
+</div>
+{% endif %}
+
 <div class="bg-white rounded-lg shadow overflow-hidden">
   <table class="w-full text-sm">
     <thead class="text-left text-slate-500 bg-slate-50">

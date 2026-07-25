@@ -64,9 +64,14 @@ _COLOR_KEYWORDS = {
 # Format 1 (most modern Brother lasers, e.g. HL-L2370DW, MFC-L8900CDW with
 # recent firmware): each line is "<KEYWORD>_<COLOR>=NN" or "<KEYWORD>=NN".
 # Tolerates both ordering: TONER_BLACK vs BLACK_TONER, with optional %.
+# The <COLOR>_TONER ordering needs a left anchor, or the color code is taken
+# from the tail of whatever word precedes "TONER": "PRIMARY_TONER=95" read as
+# yellow 95% and "MK_TONER=20" (maintenance kit) as black 20%. The lookbehind
+# rejects an alphanumeric neighbour but still allows the "_K_TONER" form, where
+# the separator is a word character and \b would not fire.
 _RE_TONER_KEY_VALUE = re.compile(
     r"""(?:TONER[_\-\s]*(?P<color1>BLACK|CYAN|MAGENTA|YELLOW|BK|K|C|M|Y)
-        |(?P<color2>BLACK|CYAN|MAGENTA|YELLOW|BK|K|C|M|Y)[_\-\s]*TONER)
+        |(?<![A-Za-z0-9])(?P<color2>BLACK|CYAN|MAGENTA|YELLOW|BK|K|C|M|Y)[_\-\s]*TONER)
         [_\-\s]*(?:LIFE)?[_\-\s]*(?:REMAINING|REMAIN|LIFE)?
         \s*=\s*(?P<pct>\d{1,3})\s*%?""",
     re.IGNORECASE | re.VERBOSE,

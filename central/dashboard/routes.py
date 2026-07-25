@@ -484,7 +484,14 @@ def alerts_inbox(request: Request, db: Session = Depends(get_db)):
             .order_by(m.Alert.created_at.desc())
         )
     )
-    return _render(request, "alerts.html", db=db, user=user, alerts=rows)
+    # Notifications that were owed but never delivered (no channel enabled, or a
+    # dead-letter on a still-live alert) are invisible otherwise -- an alert with
+    # no badges reads as "not notified yet", not "nobody was told and nobody will
+    # be". Surface them at the top of the inbox with the fix.
+    return _render(
+        request, "alerts.html", db=db, user=user, alerts=rows,
+        undelivered=queries.undelivered_notifications(db),
+    )
 
 
 @router.post("/alerts/{alert_id}/{action}", response_class=HTMLResponse)
