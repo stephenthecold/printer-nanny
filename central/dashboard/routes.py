@@ -15,6 +15,7 @@ from sqlalchemy.orm import Session
 from central import models as m
 from central import queries
 from central.db import get_db
+from central.health import worker_banner
 from central.runtime import app_branding
 from central.security import hash_password, verify_password
 
@@ -59,6 +60,11 @@ def _render(
             .select_from(m.Printer)
             .where(m.Printer.discovery_state == m.DiscoveryState.pending)
         ) or 0
+    # Stalled-worker banner (base.html). A dead worker stops marking agents and
+    # printers offline, so without this every page renders a green fleet over
+    # frozen data. Returns None when healthy; never raises.
+    if db is not None and "worker_banner" not in ctx:
+        ctx["worker_banner"] = worker_banner(db, ctx.get("user"))
     return _templates.TemplateResponse(request, template, ctx)
 
 

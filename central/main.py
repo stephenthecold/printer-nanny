@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
-from fastapi import FastAPI
+from fastapi import Depends, FastAPI
+from fastapi.responses import JSONResponse
+from sqlalchemy.orm import Session
 from starlette.middleware.sessions import SessionMiddleware
 from uvicorn.middleware.proxy_headers import ProxyHeadersMiddleware
 
@@ -10,9 +12,10 @@ from central import auth_oauth_smtp, auth_oidc
 from central.api import exports, ingest, management, reporting, scim
 from central.config import settings
 from central.dashboard import backup_routes, installer, manage, routes as dashboard, settings_routes
-from central.db import create_all
+from central.db import create_all, get_db
+from central.health import database_ok, worker_health
 
-app = FastAPI(title="Printer Nanny", version="0.8.0")
+app = FastAPI(title="Printer Nanny", version="0.9.1")
 # Honor X-Forwarded-Proto/For from the reverse proxy so request.base_url returns
 # https:// when Caddy/Nginx terminates TLS in front of us. Without this, the
 # agent install command on /manage/agents leaks http://… to operators behind
@@ -46,7 +49,68 @@ app.include_router(installer.router)
 
 @app.get("/healthz", tags=["meta"])
 def healthz():
+    """LIVENESS only: this process is up and serving HTTP.
+
+    Deliberately touches nothing -- no database, no worker state -- because it is
+    polled at container/proxy frequency and because "restart me" is the only
+    sensible response to it failing. A 200 here says nothing about whether the
+    deployment is *working*; that is ``/readyz``.
+    """
     return {"status": "ok", "version": app.version}
+
+
+@app.get("/readyz", tags=["meta"])
+def readyz(worker: str = "check", db: Session = Depends(get_db)):
+    """READINESS: the database answers and the background worker is not stalled.
+
+    503 when either check fails, 200 otherwise. This is the endpoint to point
+    uptime monitoring at -- ``/healthz`` cannot detect the failure this exists
+    for (a dead worker leaves the dashboard showing a green fleet over frozen
+    data, because ``mark_offline_agents`` is itself a worker job).
+
+    A worker that has *never* stamped (fresh install, first cycle not finished)
+    is reported as ``never_ran`` and does NOT fail the probe -- a new deployment
+    must not come up 503. That case is covered by the dashboard banner and by the
+    worker container's own healthcheck, which does fail on it after its
+    start_period. Likewise a missing table mid-migration reads ``unknown`` and
+    passes, so a migration window is not an outage.
+
+    ``?worker=skip`` narrows this to the database check. Used by the api
+    container's healthcheck so a stalled *worker* does not mark the *api*
+    container unhealthy and send an operator debugging the wrong process. Any
+    other value keeps the full check, so a typo fails closed (stricter).
+
+    The response body is deliberately terse: a status, which checks passed, and
+    the stale job names -- enough to act on, with no exception text, driver
+    message, DSN, hostname or credential. This route is typically unauthenticated
+    behind the reverse proxy.
+    """
+    db_ok = database_ok(db)
+    checks = {"database": "ok" if db_ok else "error"}
+
+    if not db_ok:
+        # Nothing to read the stamps from, so the worker's state is unknowable.
+        checks["worker"] = "unknown"
+        return JSONResponse({"status": "degraded", "checks": checks}, status_code=503)
+
+    if worker == "skip":
+        checks["worker"] = "skipped"
+        return {"status": "ready", "checks": checks}
+
+    health = worker_health(db)
+    checks["worker"] = health["state"]
+    if health["state"] == "stale":
+        # Deliberately does NOT name the wedged jobs. The Caddyfile reverse-proxies
+        # every path, so this endpoint is reachable unauthenticated from the
+        # internet, and "which job is wedged" tells a caller that fleet monitoring
+        # is blind right now -- useful recon, no use to a container probe (which
+        # reads only the status code). Signed-in operators get the job names from
+        # the dashboard banner; the worker's own probe reads the table directly.
+        return JSONResponse(
+            {"status": "degraded", "checks": checks},
+            status_code=503,
+        )
+    return {"status": "ready", "checks": checks}
 
 
 @app.on_event("startup")

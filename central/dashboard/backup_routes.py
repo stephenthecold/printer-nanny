@@ -32,6 +32,7 @@ from central import models as m
 from central.audit import record
 from central.config import settings
 from central.db import get_db
+from central.health import worker_banner
 from central.runtime import app_branding
 
 router = APIRouter(prefix="/admin/backup", tags=["backup"])
@@ -52,6 +53,8 @@ def _tpl(request, name: str, db: Session, **ctx):
 
     ctx.setdefault("app", app_branding(db))
     ctx.setdefault("central_version", _v)
+    # Stalled-worker banner (base.html) -- see central.health.worker_banner.
+    ctx.setdefault("worker_banner", worker_banner(db, ctx.get("user")))
     return _templates.TemplateResponse(request, name, ctx)
 
 

@@ -22,6 +22,7 @@ from central import models as m
 from central.audit import record
 from central.dashboard import _keystore
 from central.db import get_db
+from central.health import worker_banner
 from central.runtime import app_branding
 from central.security import generate_api_key, hash_api_key, hash_password
 
@@ -86,6 +87,9 @@ def _tpl(request: Request, template: str, db: Session, **ctx) -> HTMLResponse:
             .select_from(m.Printer)
             .where(m.Printer.discovery_state == m.DiscoveryState.pending)
         ) or 0
+    # Stalled-worker banner (base.html) -- see central.health.worker_banner.
+    if "worker_banner" not in ctx:
+        ctx["worker_banner"] = worker_banner(db, ctx.get("user"))
     return _templates.TemplateResponse(request, template, ctx)
 
 

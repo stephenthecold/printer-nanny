@@ -18,7 +18,7 @@ def test_save_and_load_roundtrip(db):
         "smtp.host": "smtp.acme.test",
         "smtp.port": "2525",
         "alerts.low_supply_pct": "15",
-        # bool checkbox present → True; absent ones become False
+        # bool checkbox present → True
         "oidc.enabled": "on",
     })
     loaded = runtime.load_settings(db)
@@ -26,7 +26,54 @@ def test_save_and_load_roundtrip(db):
     assert loaded["smtp.port"] == 2525          # coerced to int
     assert loaded["alerts.low_supply_pct"] == 15.0
     assert loaded["oidc.enabled"] is True
-    assert loaded["oidc.auto_provision"] is False  # bool absent from form → False
+    # No `sections` scope → this is a partial update, so a bool that isn't in
+    # the payload was never submitted and keeps its value (here, its default).
+    assert loaded["oidc.auto_provision"] is True
+
+
+# --------------------------------------------------------------------------- #
+# Bool semantics: `sections` is what makes an absent checkbox mean "unchecked"
+# --------------------------------------------------------------------------- #
+def test_unscoped_save_leaves_absent_bools_alone(db):
+    """A partial write must not reset every other bool on the system.
+
+    Regression for the settings-clobber bug: callers that post a couple of keys
+    with no `sections` scope (logo upload, OAuth token refresh, seed, tooling)
+    used to switch off STARTTLS, every channel, SSO and SCIM as a side effect.
+    """
+    runtime.save_settings(db, {
+        "smtp.use_tls": "on", "email.enabled": "on", "slack.enabled": "on",
+        "oidc.enabled": "on", "scim.enabled": "on",
+    })
+    runtime.save_settings(db, {"app.logo_url": "/branding/logo"})
+    loaded = runtime.load_settings(db)
+    assert loaded["app.logo_url"] == "/branding/logo"   # the write took
+    for key in ("smtp.use_tls", "email.enabled", "slack.enabled",
+                "oidc.enabled", "scim.enabled"):
+        assert loaded[key] is True, key                 # nothing else moved
+
+
+def test_scoped_save_unchecks_absent_bools_in_scope(db):
+    """The other half of the contract: with `sections` given the payload IS the
+    rendered form, so an absent checkbox genuinely means the operator cleared
+    it. Locks the fix out of making checkboxes un-uncheckable."""
+    runtime.save_settings(db, {"email.enabled": "on", "slack.enabled": "on"})
+    runtime.save_settings(
+        db, {"smtp.host": "mail.example.com"},   # email.enabled checkbox absent
+        sections={"Email (SMTP)"},
+    )
+    loaded = runtime.load_settings(db)
+    assert loaded["email.enabled"] is False          # unchecked, in scope
+    assert loaded["slack.enabled"] is True           # different section, untouched
+
+
+def test_set_scim_token_does_not_disable_scim(db):
+    """Rotating the SCIM bearer token must not deprovision the IdP integration."""
+    runtime.save_settings(db, {"scim.enabled": "on"})
+    runtime.set_scim_token(db, "brand-new-idp-token")
+    loaded = runtime.load_settings(db)
+    assert loaded["scim.enabled"] is True
+    assert runtime.scim_token_matches(db, "brand-new-idp-token") is True
 
 
 def test_secret_placeholder_keeps_existing(db):

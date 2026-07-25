@@ -760,3 +760,42 @@ class ReportRun(Base):
     __table_args__ = (
         UniqueConstraint("report_type", "period_key", name="uq_report_run_type_period"),
     )
+
+
+class WorkerJobRun(Base):
+    """Per-job liveness stamp for the background worker (one row per job name).
+
+    Written by ``central.worker.run._run_jobs`` after every job in every cycle
+    and read by ``central.health`` (``/readyz``, the worker container's
+    healthcheck, the dashboard banner). Without it a dead worker is invisible:
+    ``mark_offline_agents`` is itself a job, so nothing marks agents offline and
+    the dashboard shows a green fleet over frozen data.
+
+    Keyed by job rather than one global "cycle ran" timestamp because
+    ``_run_jobs`` deliberately swallows a single job's exception to keep the rest
+    of the cycle alive -- so a global stamp would stay fresh while one job raised
+    on every pass. Per job, the wedged job names itself.
+
+    ``expected_interval_seconds`` is the cadence the worker is running with
+    (``--interval``), stamped here so the read side can derive each job's
+    staleness threshold from real configuration instead of a hardcoded age.
+
+    ``last_error_type`` holds the exception CLASS NAME only. Messages carry DSNs,
+    SQL and bound parameters, and this column is rendered in the dashboard; the
+    full traceback stays in the worker log.
+    """
+
+    __tablename__ = "worker_job_runs"
+
+    job: Mapped[str] = mapped_column(String(80), primary_key=True)
+    last_success_at: Mapped[Optional[datetime]] = mapped_column(
+        DateTime(timezone=True), default=None
+    )
+    last_error_at: Mapped[Optional[datetime]] = mapped_column(
+        DateTime(timezone=True), default=None
+    )
+    last_error_type: Mapped[Optional[str]] = mapped_column(String(80), default=None)
+    consecutive_failures: Mapped[int] = mapped_column(Integer, default=0)
+    expected_interval_seconds: Mapped[int] = mapped_column(
+        Integer, default=60, server_default=text("60")
+    )

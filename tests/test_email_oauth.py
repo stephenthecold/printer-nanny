@@ -117,6 +117,40 @@ def test_refresh_persists_rolling_refresh_token(db):
     assert saved["smtp.oauth_refresh_token"] == "new_rt"
 
 
+def test_refresh_does_not_clobber_tls_or_channel_settings(db):
+    """The dangerous one: this write happens unattended.
+
+    EmailChannel.send refreshes the access token roughly hourly, and the write
+    used to be treated as a full settings-form post -- so every checkbox absent
+    from it was recorded as unchecked. STARTTLS went off (the SMTP password then
+    goes out in the clear), every channel went off, SSO and SCIM went off, with
+    no operator in the room and the UI still showing the old config.
+    """
+    runtime.save_settings(db, {
+        "smtp.host": "smtp.office365.com",
+        "smtp.use_tls": "on",
+        "smtp.auth_type": "oauth_microsoft",
+        "smtp.oauth_client_id": "cid",
+        "smtp.oauth_refresh_token": "rt",
+        "smtp.oauth_access_token_expires_at": "0",  # expired → forces a refresh
+        "email.enabled": "on", "slack.enabled": "on", "teams.enabled": "on",
+        "oidc.enabled": "on", "scim.enabled": "on",
+    })
+    settings = runtime.load_settings(db)
+    assert settings["smtp.use_tls"] is True
+
+    fake = _FakeResponse({"access_token": "fresh_token", "expires_in": 3600})
+    with patch.object(httpx, "post", return_value=fake):
+        assert oauth_smtp.refresh_access_token(db, settings) == "fresh_token"
+
+    after = runtime.load_settings(db)
+    assert after["smtp.oauth_access_token"] == "fresh_token"  # refresh persisted
+    assert after["smtp.host"] == "smtp.office365.com"
+    for key in ("smtp.use_tls", "email.enabled", "slack.enabled",
+                "teams.enabled", "oidc.enabled", "scim.enabled"):
+        assert after[key] is True, key
+
+
 def test_refresh_no_op_when_basic_auth(db):
     """auth_type=basic must skip the OAuth machinery entirely."""
     settings = _settings(**{"smtp.auth_type": "basic"})

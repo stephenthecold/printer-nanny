@@ -46,6 +46,19 @@ services:
       sh -c "alembic upgrade head &&
              python -m central.seed --init &&
              uvicorn central.main:app --host 0.0.0.0 --port 8000"
+    # Readiness, not just liveness: /readyz fails when the database is
+    # unreachable (/healthz answers 200 regardless -- it is a pure process
+    # check). `worker=skip` narrows it to the DB check on purpose: a stalled
+    # worker is the WORKER container's fault, and marking api unhealthy for it
+    # would send an operator debugging the wrong process. The full check
+    # (GET /readyz, no params) is what uptime monitoring should poll.
+    # start_period covers `alembic upgrade head` + seed on first boot.
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fsS 'http://127.0.0.1:8000/readyz?worker=skip' >/dev/null"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 90s
     # Self-heal on host reboot. A transient docker-DNS race on boot (api
     # coming up before db's hostname is resolvable on the bridge network)
     # would otherwise leave the api dead and the site stuck on 502 until
@@ -67,6 +80,21 @@ services:
       db:
         condition: service_healthy
     command: ["python", "-m", "central.worker.run", "--interval", "60"]
+    # The worker has no HTTP surface, so this is a command-based check that
+    # inspects the per-job `worker_job_runs` stamps the cycle writes -- the same
+    # data /readyz reads (central.health), so the two can't disagree. It reads
+    # the stamps from the DB rather than "did I personally stamp", so a second
+    # worker container that loses the leader-lock race stays healthy while the
+    # leader does the work. Fails on stale, never-stamped, or DB-unreachable.
+    # start_period allows waiting on db + the first cycle (interval above).
+    # Note: under plain compose an unhealthy container is a SIGNAL (visible in
+    # `docker compose ps`), not a restart -- nothing here depends on it.
+    healthcheck:
+      test: ["CMD", "python", "-m", "central.worker.health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 180s
     restart: unless-stopped
 
   # Local SMTP catcher so email alerts are visible in dev (http://localhost:8025).

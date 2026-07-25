@@ -43,6 +43,32 @@
 </nav>
 {% endif %}
 <main class="max-w-7xl mx-auto px-4 py-6 flex-1 w-full">
+  {# Degraded-worker banner. A dead worker stops marking agents offline, so every
+     page below would otherwise render a green fleet over frozen data -- this is
+     the visible half of /readyz, for the operator who never curls anything.
+     Suppressed for client_readonly in central.health.worker_banner. #}
+  {% if worker_banner is defined and worker_banner %}
+  <div role="alert" class="mb-4 rounded border px-3 py-2 text-sm flex items-start gap-2
+       {% if worker_banner.state == 'never_ran' %}bg-amber-50 border-amber-300 text-amber-900{% else %}bg-red-50 border-red-300 text-red-900{% endif %}">
+    <span aria-hidden="true">⚠️</span>
+    <div>
+      {% if worker_banner.state == 'never_ran' %}
+      <strong>Background worker has never reported in.</strong>
+      Offline detection, alerts, forecasts and scheduled reports are not running,
+      so everything below is whatever was last recorded.
+      {% else %}
+      <strong>Background worker stalled.</strong>
+      {{ worker_banner.jobs|length }} job{{ '' if worker_banner.jobs|length == 1 else 's' }}
+      not completing: {{ worker_banner.jobs|join(', ') }}.
+      Fleet status below may be out of date — printers and agents are not being
+      marked offline.
+      {% endif %}
+      <span class="block text-xs opacity-80 mt-0.5">
+        Check the worker service (<code>docker compose logs worker</code>); machine-readable detail at <code>/readyz</code>.
+      </span>
+    </div>
+  </div>
+  {% endif %}
   {% if flash %}
   <div class="mb-4 rounded bg-emerald-50 border border-emerald-200 text-emerald-800 text-sm px-3 py-2">{{ flash }}</div>
   {% endif %}

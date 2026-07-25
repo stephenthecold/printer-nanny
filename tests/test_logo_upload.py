@@ -131,6 +131,63 @@ def test_delete_preserves_external_logo_url(admin_http, db):
     assert runtime.load_settings(db)["app.logo_url"] == "https://cdn.example.com/logo.png"
 
 
+def test_upload_does_not_clobber_tls_and_channel_settings(admin_http, db):
+    """Uploading a logo must not switch off STARTTLS / the alert channels / SSO.
+
+    The upload writes one setting (app.logo_url) outside any settings-form
+    group; it used to be treated as a full form post, so every checkbox missing
+    from it -- STARTTLS, every channel `enabled`, oidc.enabled -- was recorded
+    as unchecked. Credentials survived, so the UI still looked configured while
+    alerting was dark and the SMTP password went out in the clear.
+    """
+    # Configure the fleet the way an operator would: the real Settings form.
+    assert admin_http.post("/settings", data={
+        "_group": "notifications",
+        "smtp.host": "smtp.office365.com", "smtp.port": "587",
+        "smtp.user": "alerts@msp.example", "smtp.password": "correct-horse",
+        "smtp.use_tls": "on",
+        "email.enabled": "on", "email.default_recipients": "ops@msp.example",
+        "slack.enabled": "on", "slack.webhook_url": "https://hooks.slack.com/x",
+        "teams.enabled": "on", "teams.webhook_url": "https://outlook.office.com/x",
+    }, follow_redirects=False).status_code == 303
+    assert admin_http.post("/settings", data={
+        "_group": "auth", "oidc.enabled": "on", "oidc.issuer": "https://idp/",
+    }, follow_redirects=False).status_code == 303
+    armed = ("smtp.use_tls", "email.enabled", "slack.enabled", "teams.enabled",
+             "oidc.enabled")
+    before = runtime.load_settings(db)
+    assert all(before[k] is True for k in armed)
+
+    resp = admin_http.post(
+        "/settings/branding/logo",
+        files={"logo": ("brand.png", io.BytesIO(PNG_BYTES), "image/png")},
+        follow_redirects=False,
+    )
+    assert resp.status_code == 303
+
+    after = runtime.load_settings(db)
+    assert after["app.logo_url"] == "/branding/logo"   # the upload still wired up
+    assert [k for k in armed if not after[k]] == []    # and nothing else moved
+    # The alerting path is still live end-to-end.
+    from central.channels import active_channels
+    assert {c.name for c in active_channels(after)} >= {"Email", "Slack", "Teams"}
+
+
+def test_delete_logo_does_not_clobber_tls_and_channel_settings(admin_http, db):
+    """Same for the delete path, which clears app.logo_url the same way."""
+    admin_http.post(
+        "/settings/branding/logo",
+        files={"logo": ("a.png", io.BytesIO(PNG_BYTES), "image/png")},
+        follow_redirects=False,
+    )
+    runtime.save_settings(db, {"smtp.use_tls": "on", "email.enabled": "on"})
+    admin_http.post("/settings/branding/logo/delete", follow_redirects=False)
+    after = runtime.load_settings(db)
+    assert after["app.logo_url"] == ""
+    assert after["smtp.use_tls"] is True
+    assert after["email.enabled"] is True
+
+
 def test_upload_requires_admin(db):
     db.add(m.User(username="t", password_hash=hash_password("t"), role=m.UserRole.tech))
     db.commit()
