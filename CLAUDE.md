@@ -133,7 +133,7 @@ enforced; none of them is optional.
   Declare indexes in the model's `__table_args__` and mirror them in the migration.
 - `deploy/` — Caddyfile, installer scripts (`install-agent.sh`/`.ps1`), sample
   systemd unit, and `WINDOWS-MSI-TESTING.md` (build + Server 2016→2025 smoke).
-- `tests/` — pytest suite (~1109 tests; ~3min end-to-end on Postgres-less SQLite).
+- `tests/` — pytest suite (~1111 tests; ~3min end-to-end on Postgres-less SQLite).
   `test_compose_deployment.py` / `test_install_update.py` cover the deployment
   contract above; both skip cleanly where the docker CLI is absent.
 

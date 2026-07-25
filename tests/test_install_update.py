@@ -88,6 +88,15 @@ class World:
         _git(self.up, "add", "-A")
         _git(self.up, "commit", "-q", "-m", "upstream change")
 
+    def upstream_branch(self, name: str, compose: str) -> None:
+        """A second upstream branch, so --update --branch has to move HEAD."""
+        _git(self.up, "checkout", "-q", "-b", name)
+        self.upstream_commit(compose)
+        _git(self.up, "checkout", "-q", "main")
+
+    def branch(self) -> str:
+        return _git_out(self.site, "rev-parse", "--abbrev-ref", "HEAD")
+
     def edit_compose(self, compose: str) -> None:
         (self.site / "docker-compose.yml").write_text(compose)
 
@@ -159,6 +168,43 @@ def test_conflict_rolls_the_whole_update_back(world: World) -> None:
     assert _git_out(world.site, "diff", "--name-only", "--diff-filter=U") == "", \
         "unmerged entries left in the index"
     assert "--migrate-compose" in result.stderr, "no way forward offered"
+
+
+def test_conflict_while_switching_branches_rolls_back_fully(world: World) -> None:
+    """`--branch` moves HEAD before the pull, and the rollback must undo that too.
+
+    Regression: the pre-update state was sampled *after* `git checkout $BRANCH`,
+    so a rollback restored to the post-checkout commit -- leaving the operator on
+    a different branch, with conflict markers in the working tree and their work
+    stranded in an unmentioned stash, while printing "Nothing was changed".
+    """
+    world.edit_compose("services:\n  api:\n    image: MINE\n  db:\n    image: postgres:16\n")
+    world.upstream_branch(
+        "next", "services:\n  api:\n    image: THEIRS\n  db:\n    image: postgres:16\n"
+    )
+    before, before_branch = world.head(), world.branch()
+
+    result = world.run("--update", "--pull-only", "--branch", "next")
+
+    assert result.returncode != 0
+    assert world.head() == before, "checkout moved despite the failure"
+    assert world.branch() == before_branch, "left on a different branch"
+    assert "image: MINE" in world.compose(), "operator's edit was lost"
+    assert "<<<<<<<" not in world.compose(), "conflict markers left in the compose file"
+    assert world.stashes() == "", "edits stranded in an unannounced stash"
+    assert before in result.stderr, "reported a commit the checkout isn't on"
+
+
+def test_branch_switch_reports_movement_rather_than_already_latest(world: World) -> None:
+    """A clean checkout switching branches did move, so don't claim otherwise."""
+    world.upstream_branch("next", BASE_COMPOSE + "  extra:\n    image: x\n")
+    before = world.head()
+
+    result = world.run("--update", "--pull-only", "--branch", "next")
+
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert world.head() != before
+    assert "already at latest" not in result.stdout
 
 
 def test_clean_checkout_updates_without_stashing(world: World) -> None:

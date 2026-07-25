@@ -230,6 +230,14 @@ if [ "$UPDATE" -eq 1 ]; then
     echo "==> pulling latest from origin/$BRANCH"
     git fetch --quiet origin "$BRANCH"
 
+    # Everything needed to put the checkout back exactly as found, captured
+    # BEFORE anything moves. The branch checkout below is itself a state change
+    # (with --branch it relocates HEAD), so a "before" sampled after it would
+    # roll back to the wrong place and report success while having moved the
+    # operator's checkout.
+    START_COMMIT=$(git rev-parse HEAD)
+    START_REF=$(git symbolic-ref --quiet --short HEAD || echo "$START_COMMIT")
+
     # Local edits to tracked files make git refuse the pull outright ("Your
     # local changes to the following files would be overwritten by merge"),
     # which used to leave an operator who had touched docker-compose.yml with no
@@ -243,39 +251,59 @@ if [ "$UPDATE" -eq 1 ]; then
       STASHED=1
     fi
 
-    # Restore the tree to exactly how we found it, then fail. Used on every
-    # abort below so a failed update is never a half-applied one.
+    # Put the checkout back to START_COMMIT with the stashed edits re-applied.
+    # Restoring the exact commit the stash was taken against is what makes the
+    # pop conflict-free -- re-popping onto the *updated* tree would just hit the
+    # same conflict again, and silently swallowing that is how a rollback ends up
+    # leaving conflict markers behind while announcing that nothing changed.
+    # Echoes 0 on a clean restore, 1 when the edits could only be left in the
+    # stash; callers must not claim "nothing changed" on 1.
+    rollback() {
+      git checkout --quiet --force "$START_REF" >/dev/null 2>&1 || true
+      git reset --quiet --hard "$START_COMMIT" >/dev/null 2>&1 || true
+      if [ "$STASHED" -eq 1 ]; then
+        if ! git stash pop --quiet >/dev/null 2>&1; then
+          git reset --quiet --hard "$START_COMMIT" >/dev/null 2>&1 || true
+          return 1
+        fi
+      fi
+      return 0
+    }
+
     restore_and_die() {
-      git reset --quiet --hard "${BEFORE:-HEAD}" 2>/dev/null || true
-      [ "$STASHED" -eq 1 ] && git stash pop --quiet 2>/dev/null || true
+      if rollback; then
+        die "$1"
+      fi
+      echo "  Your local edits could not be re-applied automatically." >&2
+      echo "  They are safe in the git stash — recover with: git stash pop" >&2
       die "$1"
     }
 
-    git checkout --quiet "$BRANCH" 2>/dev/null || {
-      [ "$STASHED" -eq 1 ] && git stash pop --quiet 2>/dev/null || true
-      die "could not switch to branch $BRANCH"
-    }
-    BEFORE=$(git rev-parse --short HEAD)
+    git checkout --quiet "$BRANCH" 2>/dev/null \
+      || restore_and_die "could not switch to branch $BRANCH"
 
     git pull --quiet --ff-only origin "$BRANCH" \
       || restore_and_die "pull is not a fast-forward (local commits on $BRANCH?) — resolve with: git -C $(pwd) status"
     AFTER=$(git rev-parse --short HEAD)
 
     if [ "$STASHED" -eq 1 ]; then
-      if git stash pop --quiet 2>/dev/null; then
+      if git stash pop --quiet >/dev/null 2>&1; then
         echo "    re-applied your local changes on top of $AFTER"
       else
         # A failed pop leaves conflict markers in the tree AND keeps the stash
-        # entry. Neither is safe to hand to `docker compose build`, so unwind
-        # the whole update: reset to the pre-pull commit (the pull was a
-        # fast-forward, so no local commit can be lost), then pop cleanly onto
-        # the base the edits were written against.
+        # entry. Neither is safe to hand to `docker compose build`, so unwind the
+        # whole update rather than build from a half-merged checkout.
         CONFLICTS=$(git diff --name-only --diff-filter=U 2>/dev/null || true)
-        git reset --quiet --hard "$BEFORE" 2>/dev/null || true
-        git stash pop --quiet 2>/dev/null || true
+        ROLLED=0; rollback || ROLLED=$?
         echo >&2
         echo "  Your local edits conflict with the upstream update." >&2
-        echo "  Nothing was changed — still at $BEFORE with your edits in place." >&2
+        if [ "$ROLLED" -eq 0 ]; then
+          echo "  Nothing was changed — still at $(git rev-parse --short HEAD) with your edits in place." >&2
+        else
+          echo "  The checkout is back at $(git rev-parse --short HEAD), but your edits could" >&2
+          echo "  not be re-applied automatically. They are safe in the git stash:" >&2
+          echo "    git stash list && git stash pop" >&2
+        fi
         echo >&2
         [ -n "$CONFLICTS" ] && { echo "  Conflicting:" >&2; echo "$CONFLICTS" | sed 's/^/    /' >&2; echo >&2; }
         if printf '%s' "$CONFLICTS" | grep -qx 'docker-compose.yml'; then
@@ -290,11 +318,15 @@ if [ "$UPDATE" -eq 1 ]; then
       fi
     fi
 
-    if [ "$BEFORE" = "$AFTER" ]; then
+    # Report against where the operator actually started, not against the
+    # post-checkout commit: with --branch the checkout itself moves HEAD, and
+    # "already at latest" would be a lie about a checkout that did move.
+    START_SHORT=$(git rev-parse --short "$START_COMMIT")
+    if [ "$START_SHORT" = "$AFTER" ]; then
       echo "    already at latest ($AFTER) — nothing to pull."
     else
-      echo "    updated $BEFORE → $AFTER"
-      git --no-pager log --oneline "$BEFORE..$AFTER" | sed 's/^/    /'
+      echo "    updated $START_SHORT → $AFTER"
+      git --no-pager log --oneline "$START_COMMIT..$AFTER" | sed 's/^/    /'
     fi
 
     if compose_dirty; then
