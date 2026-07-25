@@ -43,6 +43,10 @@ dev = [
     "pytest-asyncio>=0.23",
     "ruff>=0.4",
     "black>=24.0",
+    # tests/test_compose_deployment.py parses docker-compose.yml directly, so the
+    # deployment contract is still asserted where the docker CLI isn't available
+    # to resolve it. Test-only -- nothing under central/ or agent/ reads YAML.
+    "pyyaml>=6.0",
 ]
 
 [project.scripts]
