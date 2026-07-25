@@ -1,4 +1,5 @@
 {% extends "base.html" %}
+{% from "_components.html" import btn, card_cls %}
 {% from "base.html" import status_badge, level_bar %}
 {% block title %}{{ client.name }} · {{ app.name or 'Printer Nanny' }}{% endblock %}
 {% block body %}
@@ -12,7 +13,7 @@
 </div>
 
 {% if esg and esg.sheets > 0 %}
-<section class="bg-white rounded-lg shadow p-4 mb-6" id="esg-panel">
+<section class="{{ card_cls('md', 'mb-6') }}" id="esg-panel">
   <div class="flex items-baseline justify-between mb-3 flex-wrap gap-2">
     <h2 class="font-semibold">Sustainability footprint</h2>
     <span class="text-xs text-slate-400">estimated from your print volume</span>
@@ -47,7 +48,7 @@
 {% endif %}
 
 <div class="grid md:grid-cols-3 gap-6 mb-6">
-  <section class="bg-white rounded-lg shadow p-4 md:col-span-2">
+  <section class="{{ card_cls('md', 'md:col-span-2') }}">
     <h2 class="font-semibold mb-3">Your printers</h2>
     {% if printers %}
     <table class="w-full text-sm">
@@ -91,7 +92,7 @@
     {% endif %}
   </section>
 
-  <section class="bg-white rounded-lg shadow p-4 h-fit">
+  <section class="{{ card_cls('md', 'h-fit') }}">
     <h2 class="font-semibold mb-2">Report a problem</h2>
     {% if freescout_enabled %}
     <p class="text-xs text-slate-500 mb-3">Opens a support ticket. We'll see your name, the printer, and your message.</p>
@@ -110,13 +111,13 @@
       </label>
       <input name="subject" required placeholder="What's wrong?" class="w-full border rounded px-3 py-2 text-sm" />
       <textarea name="body" required rows="4" placeholder="Describe the issue..." class="w-full border rounded px-3 py-2 text-sm"></textarea>
-      <button class="w-full bg-slate-900 text-white rounded py-2 text-sm font-medium">Send to support</button>
+      <button class="{{ btn('primary', 'md', 'w-full') }}">Send to support</button>
     </form>
   </section>
 </div>
 
 <div class="grid md:grid-cols-2 gap-6">
-  <section class="bg-white rounded-lg shadow p-4">
+  <section class="{{ card_cls() }}">
     <h2 class="font-semibold mb-3">Low supplies</h2>
     <table class="w-full text-sm">
       <tbody>
@@ -133,7 +134,7 @@
     </table>
   </section>
 
-  <section class="bg-white rounded-lg shadow p-4">
+  <section class="{{ card_cls() }}">
     <h2 class="font-semibold mb-3">Open issues</h2>
     <ul class="space-y-2 text-sm">
       {% for a in open_alerts %}

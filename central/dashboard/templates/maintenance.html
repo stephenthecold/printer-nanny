@@ -1,4 +1,5 @@
 {% extends "base.html" %}
+{% from "_components.html" import btn, card_cls %}
 {% block title %}Maintenance · {{ app.name or 'Printer Nanny' }}{% endblock %}
 {% block body %}
 <h1 class="text-2xl font-semibold mb-1">Maintenance</h1>
@@ -10,7 +11,7 @@
 </p>
 
 <div class="grid md:grid-cols-3 gap-6">
-  <section class="md:col-span-2 bg-white rounded-lg shadow overflow-x-auto">
+  <section class="{{ card_cls('none', 'md:col-span-2 overflow-x-auto') }}">
     <div class="px-4 py-3 border-b font-semibold">Schedules</div>
     {% if schedules %}
     <table class="w-full text-sm">
@@ -56,13 +57,13 @@
               <input type="hidden" name="page_threshold" value="{{ s.page_threshold or '' }}" />
               <input type="hidden" name="component_type" value="{{ s.component_type or '' }}" />
               <input type="hidden" name="life_threshold" value="{{ s.life_threshold if s.life_threshold is not none else '' }}" />
-              <button class="text-xs bg-slate-700 text-white rounded px-2 py-0.5">Save</button>
+              <button class="{{ btn('primary', 'sm') }}">Save</button>
             </form>
           </td>
           <td class="py-2 pr-4 text-right text-xs">
             <form method="post" action="/manage/maintenance/schedules/{{ s.id }}/log" class="inline">
               <input name="performed_by" placeholder="Tech name (opt)" class="border rounded px-1 py-0.5 text-xs w-24" />
-              <button class="bg-emerald-600 text-white rounded px-2 py-0.5 ml-1">Mark serviced</button>
+              <button class="{{ btn('success', 'sm', 'ml-1') }}">Mark serviced</button>
             </form>
             <form method="post" action="/manage/maintenance/schedules/{{ s.id }}/delete" class="inline ml-1"
                   onsubmit="return confirm('Delete schedule {{ s.name }}?')">
@@ -78,7 +79,7 @@
     {% endif %}
   </section>
 
-  <section class="bg-white rounded-lg shadow p-4 h-fit">
+  <section class="{{ card_cls('md', 'h-fit') }}">
     <h2 class="font-semibold mb-3">Add schedule</h2>
     <form method="post" action="/manage/maintenance/schedules" class="space-y-2">
       <label class="block">
@@ -129,13 +130,13 @@
         <span class="text-xs text-slate-500">Next due</span>
         <input name="next_due" type="date" class="w-full border rounded px-3 py-2 text-sm" />
       </label>
-      <button class="w-full bg-slate-900 text-white rounded py-2 text-sm font-medium">Add schedule</button>
+      <button class="{{ btn('primary', 'md', 'w-full') }}">Add schedule</button>
     </form>
   </section>
 </div>
 
 {% if records %}
-<section class="bg-white rounded-lg shadow mt-6 overflow-x-auto">
+<section class="{{ card_cls('none', 'mt-6 overflow-x-auto') }}">
   <div class="px-4 py-3 border-b font-semibold">Recent service log</div>
   <table class="w-full text-sm">
     <thead class="text-left text-xs text-slate-500 bg-slate-50">

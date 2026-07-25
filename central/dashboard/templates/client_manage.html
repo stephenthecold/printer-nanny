@@ -1,4 +1,5 @@
 {% extends "base.html" %}
+{% from "_components.html" import btn, card_cls %}
 {% from "base.html" import status_badge %}
 {% block title %}{{ client.name }} · Manage · Printer Nanny{% endblock %}
 {% block body %}
@@ -11,7 +12,7 @@
 <div class="grid md:grid-cols-3 gap-6">
   <div class="md:col-span-2 space-y-6">
     <!-- Sites -->
-    <section id="sites" class="bg-white rounded-lg shadow">
+    <section id="sites" class="{{ card_cls('none') }}">
       <div class="px-4 py-3 border-b font-semibold">Sites</div>
       <table class="w-full text-sm">
         <tbody>
@@ -37,15 +38,15 @@
         <input name="name" placeholder="Site name" required class="border rounded px-3 py-2 text-sm" />
         <input name="address" placeholder="Address (optional)" class="border rounded px-3 py-2 text-sm" />
         <input name="contact" placeholder="Contact (optional)" class="border rounded px-3 py-2 text-sm col-span-2" />
-        <button class="col-span-2 bg-slate-900 text-white rounded py-2 text-sm font-medium">Add site</button>
+        <button class="{{ btn('primary', 'md', 'col-span-2') }}">Add site</button>
       </form>
     </section>
 
     <!-- Printers -->
-    <section class="bg-white rounded-lg shadow">
+    <section class="{{ card_cls('none') }}">
       <div class="px-4 py-3 border-b flex justify-between items-center">
         <span class="font-semibold">Printers</span>
-        <a href="/manage/printers/new?client_id={{ client.id }}" class="text-xs bg-sky-600 text-white rounded px-2 py-1">+ Add printer</a>
+        <a href="/manage/printers/new?client_id={{ client.id }}" class="{{ btn('accent', 'sm') }}">+ Add printer</a>
       </div>
       <table class="w-full text-sm">
         <thead class="text-left text-slate-500"><tr><th class="px-4 py-2">IP</th><th class="py-2">Model</th><th class="py-2">State</th><th class="py-2 text-right pr-4"></th></tr></thead>
@@ -72,7 +73,7 @@
 
   <!-- Edit client / danger zone -->
   <div class="space-y-6">
-    <section class="bg-white rounded-lg shadow p-4">
+    <section class="{{ card_cls() }}">
       <h2 class="font-semibold mb-3">Edit client</h2>
       <form method="post" action="/manage/clients/{{ client.id }}" class="space-y-2">
         <input name="name" value="{{ client.name }}" required class="w-full border rounded px-3 py-2 text-sm" />
@@ -89,11 +90,11 @@
           <a href="/manage/suppression" class="text-sky-700 hover:underline">quiet hours</a>
           in this client's local time. Blank inherits <code>{{ default_tz }}</code>.
         </p>
-        <button class="w-full bg-slate-900 text-white rounded py-2 text-sm font-medium">Save</button>
+        <button class="{{ btn('primary', 'md', 'w-full') }}">Save</button>
       </form>
     </section>
     {% if user.role.value == 'admin' %}
-    <section class="bg-white rounded-lg shadow p-4">
+    <section class="{{ card_cls() }}">
       <h2 class="font-semibold mb-2 text-red-700">Danger zone</h2>
       <form method="post" action="/manage/clients/{{ client.id }}/delete" onsubmit="return confirm('Delete {{ client.name }} and ALL its sites/printers?')">
         <button class="w-full border border-red-300 text-red-700 rounded py-2 text-sm">Delete client</button>

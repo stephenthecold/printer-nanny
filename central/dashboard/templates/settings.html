@@ -1,4 +1,5 @@
 {% extends "base.html" %}
+{% from "_components.html" import btn, card_cls %}
 {% block title %}Settings · {{ app.name or 'Printer Nanny' }}{% endblock %}
 {% block body %}
 <h1 class="text-2xl font-semibold mb-1">Settings</h1>
@@ -26,7 +27,7 @@
 {% endif %}
 
 {% if active_group == 'branding' %}
-<section class="bg-white rounded-lg shadow max-w-3xl mb-6">
+<section class="{{ card_cls('none', 'max-w-3xl mb-6') }}">
   <div class="px-4 py-3 border-b font-semibold">Logo</div>
   <div class="p-4 grid md:grid-cols-2 gap-4 items-center">
     <div>
@@ -38,10 +39,13 @@
     </div>
     <div class="space-y-3">
       <form method="post" action="/settings/branding/logo" enctype="multipart/form-data" class="space-y-2">
-        <input type="file" name="logo" accept="image/png,image/jpeg,image/svg+xml,image/webp,image/gif" required
-               class="block w-full text-sm" />
+        <label class="block">
+          <span class="text-xs text-slate-500">Logo image</span>
+          <input type="file" name="logo" accept="image/png,image/jpeg,image/svg+xml,image/webp,image/gif" required
+                 class="block w-full text-sm rounded focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-offset-1 focus-visible:ring-sky-500" />
+        </label>
         <p class="text-xs text-slate-400">PNG, JPEG, SVG, WEBP, GIF up to 512 KB.</p>
-        <button class="bg-slate-900 text-white rounded px-3 py-2 text-sm font-medium">Upload</button>
+        <button class="{{ btn('primary') }}">Upload</button>
       </form>
       {% if has_uploaded_logo %}
       <form method="post" action="/settings/branding/logo/delete"
@@ -60,7 +64,7 @@
 <form method="post" action="/settings" class="space-y-6 max-w-3xl">
   <input type="hidden" name="_group" value="{{ active_group }}" />
   {% for section, fields in sections.items() %}
-  <section class="bg-white rounded-lg shadow">
+  <section class="{{ card_cls('none') }}">
     <div class="px-4 py-3 border-b font-semibold">{{ section }}</div>
     <div class="p-4 grid md:grid-cols-2 gap-4">
       {% for f in fields %}
@@ -88,17 +92,17 @@
   </section>
   {% endfor %}
   <div class="sticky bottom-4">
-    <button class="bg-slate-900 text-white rounded px-5 py-2.5 text-sm font-medium shadow-lg">Save settings</button>
+    <button class="{{ btn('primary', 'md', 'shadow-lg') }}">Save settings</button>
   </div>
 </form>
 
 {% if active_group == 'notifications' %}
 <form method="post" action="/settings/test-notification" class="max-w-3xl mt-4">
-  <button class="border border-slate-300 bg-white rounded px-4 py-2 text-sm">Send test notification</button>
+  <button class="{{ btn('neutral') }}">Send test notification</button>
   <span class="text-xs text-slate-400 ml-2">Fires a test alert through every enabled channel (save first).</span>
 </form>
 
-<section class="bg-white rounded-lg shadow max-w-3xl mt-6">
+<section class="{{ card_cls('none', 'max-w-3xl mt-6') }}">
   <div class="px-4 py-3 border-b font-semibold">SMTP OAuth (modern auth)</div>
   <div class="p-4 text-sm space-y-3">
     <p class="text-slate-500">
@@ -120,9 +124,9 @@
     </div>
     <div class="flex gap-2 pt-1">
       <a href="/settings/smtp-oauth/start?provider=google"
-         class="bg-slate-700 text-white rounded px-3 py-2 text-xs font-medium">Connect Gmail</a>
+         class="{{ btn('primary', 'sm') }}">Connect Gmail</a>
       <a href="/settings/smtp-oauth/start?provider=microsoft"
-         class="bg-slate-700 text-white rounded px-3 py-2 text-xs font-medium">Connect Microsoft 365</a>
+         class="{{ btn('primary', 'sm') }}">Connect Microsoft 365</a>
     </div>
   </div>
 </section>

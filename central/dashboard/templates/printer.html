@@ -1,4 +1,5 @@
 {% extends "base.html" %}
+{% from "_components.html" import btn, card_cls %}
 {% from "base.html" import status_badge, level_bar %}
 {% block title %}{{ printer_label(printer) }} · Printer Nanny{% endblock %}
 {% block body %}
@@ -20,27 +21,27 @@
   {% if can_manage %}
   <div class="ml-auto flex items-center gap-2">
     <form method="post" action="/manage/printers/{{ printer.id }}/poll" class="inline">
-      <button class="bg-sky-600 text-white rounded px-2.5 py-1 text-xs">Poll now</button>
+      <button class="{{ btn('accent', 'sm') }}">Poll now</button>
     </form>
-    <a href="/manage/printers/{{ printer.id }}/edit" class="bg-slate-700 text-white rounded px-2.5 py-1 text-xs">Edit</a>
+    <a href="/manage/printers/{{ printer.id }}/edit" class="{{ btn('primary', 'sm') }}">Edit</a>
     {% if is_pending %}
     <form method="post" action="/manage/printers/{{ printer.id }}/approve" class="inline">
-      <button class="bg-emerald-600 text-white rounded px-2.5 py-1 text-xs">Approve</button>
+      <button class="{{ btn('success', 'sm') }}">Approve</button>
     </form>
     {% elif not is_ignored %}
     <form method="post" action="/manage/printers/{{ printer.id }}/ignore" class="inline"
           onsubmit="return confirm('Stop monitoring {{ printer.ip }}? Agents will no longer poll it.')">
-      <button class="bg-amber-600 text-white rounded px-2.5 py-1 text-xs">Stop monitoring</button>
+      <button class="{{ btn('warning', 'sm') }}">Stop monitoring</button>
     </form>
     {% else %}
     <form method="post" action="/manage/printers/{{ printer.id }}/approve" class="inline">
-      <button class="bg-emerald-600 text-white rounded px-2.5 py-1 text-xs">Resume monitoring</button>
+      <button class="{{ btn('success', 'sm') }}">Resume monitoring</button>
     </form>
     {% endif %}
     {% if user.role.value == 'admin' %}
     <form method="post" action="/manage/printers/{{ printer.id }}/delete" class="inline"
           onsubmit="return confirm('Delete printer {{ printer.ip }} and all its history? This cannot be undone.')">
-      <button class="bg-red-600 text-white rounded px-2.5 py-1 text-xs">Delete</button>
+      <button class="{{ btn('danger', 'sm') }}">Delete</button>
     </form>
     {% endif %}
   </div>
@@ -48,7 +49,7 @@
 </div>
 
 <div class="grid md:grid-cols-3 gap-4 mb-6 text-sm">
-  <div class="bg-white rounded-lg shadow p-4">
+  <div class="{{ card_cls() }}">
     <div class="text-slate-500 text-xs">Identity</div>
     <div class="mt-1">{{ printer.brand or '--' }} {{ printer.model or '' }}</div>
     <div class="text-slate-500">IP {{ printer.ip }} · {{ printer.location or 'no location' }}</div>
@@ -62,7 +63,7 @@
     {% endif %}
     <div class="text-slate-500 mt-1">Last seen {{ printer.last_seen.strftime('%Y-%m-%d %H:%M') if printer.last_seen else 'never' }}</div>
   </div>
-  <div class="bg-white rounded-lg shadow p-4">
+  <div class="{{ card_cls() }}">
     <div class="text-slate-500 text-xs">Page count <span class="text-slate-400">(total impressions)</span></div>
     <div class="text-2xl font-semibold mt-1 tabular-nums">{{ '{:,}'.format(printer.page_count) if printer.page_count else '--' }}</div>
     {# Mono/color split for cost-per-page billing. Shown only when a vendor
@@ -82,7 +83,7 @@
     </svg>
     {% endif %}
   </div>
-  <div class="bg-white rounded-lg shadow p-4">
+  <div class="{{ card_cls() }}">
     {# The old "? buckets only" Brother caveat is gone: the maintenance-blob
        provider now reads exact percentages on every modern Brother, and the
        Provider diagnostics card explains the data source per poll. #}
@@ -106,14 +107,14 @@
 </div>
 
 {% if printer.notes %}
-<section class="bg-white rounded-lg shadow p-4 mb-6">
+<section class="{{ card_cls('md', 'mb-6') }}">
   <div class="text-xs text-slate-500 mb-1">Notes</div>
   <p class="text-sm whitespace-pre-wrap">{{ printer.notes }}</p>
 </section>
 {% endif %}
 
 {% if can_manage and printer.last_provider_trace %}
-<details class="bg-white rounded-lg shadow mb-6">
+<details class="{{ card_cls('none', 'mb-6') }}">
   <summary class="px-4 py-3 cursor-pointer font-semibold text-sm flex items-center gap-2">
     Provider diagnostics
     <span class="text-xs text-slate-400 font-normal">({{ printer.last_provider_trace|length }} provider(s) ran on last poll)</span>
@@ -166,7 +167,7 @@
 {% endif %}
 
 <div class="grid md:grid-cols-2 gap-6">
-  <section class="bg-white rounded-lg shadow p-4">
+  <section class="{{ card_cls() }}">
     <h2 class="font-semibold mb-3">Error history</h2>
     <ul class="space-y-2 text-sm">
       {% for e in events %}
@@ -179,7 +180,7 @@
     </ul>
   </section>
 
-  <section class="bg-white rounded-lg shadow p-4">
+  <section class="{{ card_cls() }}">
     <h2 class="font-semibold mb-3">Maintenance log</h2>
     <ul class="space-y-2 text-sm">
       {% for r in maintenance %}

@@ -1,14 +1,16 @@
 {% extends "base.html" %}
+{% from "_components.html" import badge, btn, card_cls, empty_row, note, page_title,
+        table_cls, table_wrap, td_cls, th_cls, thead_cls %}
 {% block title %}Alerts · Printer Nanny{% endblock %}
 {% block body %}
-<h1 class="text-2xl font-semibold mb-4">Alerts</h1>
+{{ page_title('Alerts') }}
 
 {# Undelivered notifications: alerts nobody was told about. `owed` means no
    channel was enabled/routed when the alert fired -- the notification is queued
    and will be sent as soon as one is; `dead` means we gave up while the
    condition is still outstanding. #}
 {% if undelivered is defined and (undelivered.owed or undelivered.dead) %}
-<div class="mb-4 rounded bg-red-50 border border-red-200 text-red-800 text-sm px-3 py-2">
+<div role="alert" class="{{ note('error', 'mb-4') }}">
   <div class="font-semibold">Notifications were not delivered</div>
   <ul class="mt-1 list-disc list-inside space-y-0.5">
     {% if undelivered.owed %}
@@ -32,56 +34,64 @@
 </div>
 {% endif %}
 
-<div class="bg-white rounded-lg shadow overflow-hidden">
-  <table class="w-full text-sm">
-    <thead class="text-left text-slate-500 bg-slate-50">
-      <tr><th class="px-4 py-2">Severity</th><th class="py-2">Alert</th><th class="py-2">State</th><th class="py-2">Opened</th><th class="py-2 text-right pr-4">Action</th></tr>
-    </thead>
-    <tbody>
-      {% for a in alerts %}
-      <tr class="border-t align-top" id="alert-{{ a.id }}">
-        <td class="px-4 py-2">
-          <span class="px-1.5 py-0.5 rounded text-xs {{ 'bg-red-100 text-red-700' if a.severity.value=='critical' else 'bg-amber-100 text-amber-700' }}">{{ a.severity.value }}</span>
-        </td>
-        <td class="py-2"><div class="font-medium">{{ a.title }}</div><div class="text-slate-500 text-xs">{{ a.detail or '' }}</div>
-          {% if a.notified_channels %}
-          <div class="mt-1 flex flex-wrap gap-1">
-            {# Three states, not two. A severity gate or an unconfigured channel
-               returns ok=True having transmitted nothing; rendering that as a
-               green tick asserted a delivery that never happened. Rows written
-               before `sent` existed omit the key, so default it to true and
-               historical alerts keep rendering as they did. #}
-            {% for ch in a.notified_channels %}
-            {% set was_sent = ch.get('sent', True) %}
-            <span title="{{ ch.detail }}" class="text-[10px] px-1.5 py-0.5 rounded
-              {%- if not ch.ok %} bg-red-100 text-red-700
-              {%- elif not was_sent %} bg-slate-100 text-slate-600
-              {%- else %} bg-green-100 text-green-700{% endif %}">{{ ch.channel }}
-              {{- ' ✕' if not ch.ok else (' ⊘' if not was_sent else ' ✓') }}</span>
-            {% endfor %}
-          </div>
-          {% endif %}
-          {% if a.flap_count %}
-          <div class="mt-1 text-[10px] text-amber-700" title="This condition has cleared and re-fired repeatedly. It was folded back into this alert instead of raising a new one each time.">
-            unstable — re-fired {{ a.flap_count }}×
-          </div>
-          {% endif %}
-        </td>
-        <td class="py-2"><span class="text-xs {{ 'text-amber-600' if a.state.value=='open' else 'text-slate-500' }}">{{ a.state.value }}</span></td>
-        <td class="py-2 text-slate-400 text-xs tabular-nums">{{ a.created_at.strftime('%m-%d %H:%M') }}</td>
-        <td class="py-2 text-right pr-4">
-          {% if a.state.value == 'open' %}
-          <button hx-post="/alerts/{{ a.id }}/ack" hx-target="#alert-{{ a.id }}" hx-swap="outerHTML"
-                  class="bg-slate-200 text-slate-700 rounded px-2 py-1 text-xs">Ack</button>
-          {% endif %}
-          <button hx-post="/alerts/{{ a.id }}/resolve" hx-target="#alert-{{ a.id }}" hx-swap="outerHTML"
-                  class="bg-green-600 text-white rounded px-2 py-1 text-xs">Resolve</button>
-        </td>
-      </tr>
-      {% else %}
-      <tr><td class="px-4 py-4 text-slate-400" colspan="5">No active alerts.</td></tr>
-      {% endfor %}
-    </tbody>
-  </table>
+<div class="{{ card_cls('none') }}">
+  <div class="{{ table_wrap() }}">
+    <table class="{{ table_cls() }}">
+      <thead class="{{ thead_cls() }}">
+        <tr>
+          <th class="{{ th_cls() }}">Severity</th>
+          <th class="{{ th_cls() }}">Alert</th>
+          <th class="{{ th_cls() }}">State</th>
+          <th class="{{ th_cls() }}">Opened</th>
+          <th class="{{ th_cls('right') }}">Action</th>
+        </tr>
+      </thead>
+      <tbody>
+        {% for a in alerts %}
+        <tr class="border-t align-top" id="alert-{{ a.id }}">
+          <td class="{{ td_cls() }}">
+            {{ badge(a.severity.value, 'error' if a.severity.value == 'critical' else 'warning') }}
+          </td>
+          <td class="{{ td_cls() }}"><div class="font-medium">{{ a.title }}</div><div class="text-slate-500 text-xs">{{ a.detail or '' }}</div>
+            {% if a.notified_channels %}
+            <div class="mt-1 flex flex-wrap gap-1">
+              {# Three states, not two. A severity gate or an unconfigured channel
+                 returns ok=True having transmitted nothing; rendering that as a
+                 green tick asserted a delivery that never happened. Rows written
+                 before `sent` existed omit the key, so default it to true and
+                 historical alerts keep rendering as they did. #}
+              {% for ch in a.notified_channels %}
+              {% set was_sent = ch.get('sent', True) %}
+              <span title="{{ ch.detail }}" class="text-[10px] px-1.5 py-0.5 rounded
+                {%- if not ch.ok %} bg-red-100 text-red-700
+                {%- elif not was_sent %} bg-slate-100 text-slate-600
+                {%- else %} bg-green-100 text-green-700{% endif %}">{{ ch.channel }}
+                {{- ' ✕' if not ch.ok else (' ⊘' if not was_sent else ' ✓') }}</span>
+              {% endfor %}
+            </div>
+            {% endif %}
+            {% if a.flap_count %}
+            <div class="mt-1 text-[10px] text-amber-700" title="This condition has cleared and re-fired repeatedly. It was folded back into this alert instead of raising a new one each time.">
+              unstable — re-fired {{ a.flap_count }}×
+            </div>
+            {% endif %}
+          </td>
+          <td class="{{ td_cls() }}"><span class="text-xs {{ 'text-amber-600' if a.state.value=='open' else 'text-slate-500' }}">{{ a.state.value }}</span></td>
+          <td class="{{ td_cls('left', 'text-slate-400 text-xs tabular-nums') }}">{{ a.created_at.strftime('%m-%d %H:%M') }}</td>
+          <td class="{{ td_cls('right', 'space-x-1 whitespace-nowrap') }}">
+            {% if a.state.value == 'open' %}
+            <button hx-post="/alerts/{{ a.id }}/ack" hx-target="#alert-{{ a.id }}" hx-swap="outerHTML"
+                    class="{{ btn('subtle', 'sm') }}">Ack</button>
+            {% endif %}
+            <button hx-post="/alerts/{{ a.id }}/resolve" hx-target="#alert-{{ a.id }}" hx-swap="outerHTML"
+                    class="{{ btn('success', 'sm') }}">Resolve</button>
+          </td>
+        </tr>
+        {% else %}
+        {{ empty_row(5, 'No active alerts.') }}
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
 </div>
 {% endblock %}

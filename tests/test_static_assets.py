@@ -39,35 +39,64 @@ EXTERNAL_REF = re.compile(
 
 CLASS_ATTR = re.compile(r'class="([^"]*)"', re.S)
 JINJA_BLOCK = re.compile(r"\{\{.*?\}\}|\{%.*?%\}", re.S)
+JINJA_COMMENT = re.compile(r"\{#.*?#\}", re.S)
+TAG = re.compile(r"<[^>]*>", re.S)
 SINGLE_QUOTED = re.compile(r"'([^']*)'")
 
-# Tokens that appear in a class="" context but are not Tailwind utilities, so
-# they are legitimately absent from the stylesheet.
-#
-# Most are Jinja *comparison operands* -- `{{ 'text-red-700' if s == 'critical'
-# else ... }}` puts 'critical' inside the attribute even though only the branch
-# results are ever emitted as classes. The extractor below deliberately
-# over-collects (taking every quoted literal) rather than trying to parse Jinja
-# expressions: over-collecting yields a false failure that a human resolves by
-# adding a line here, while under-collecting yields a missed regression that
-# ships an unstyled element. Only the first failure mode is self-announcing.
+# Tokens that survive the utility-shape filter below but are still not Tailwind
+# classes, so they are legitimately absent from the stylesheet.
 NON_UTILITY_TOKENS = frozenset(
     {
-        # JS selector hooks -- styled by nothing, queried by querySelectorAll.
+        # A JS selector hook -- styled by nothing, queried by querySelectorAll.
         "bulk-row",
-        # Enum values compared against in Jinja conditionals.
-        "bool",
-        "critical",
+        # A security-posture flag value, compared against in a Jinja conditional.
         "insecure-snmp",
-        "never_ran",
-        "offline",
-        "ok",
-        "online",
-        "open",
-        "status",
-        "warning",
+        # The placeholder host in the default agent pip source; agents.html tests
+        # for it to decide whether the install command has been configured yet.
+        "your-org",
     }
 )
+
+# Quoted literals inside Jinja are ambiguous: the same syntax carries class
+# lists (`{{ 'bg-red-100' if bad else 'bg-white' }}`), comparison operands
+# (`{% if status == 'critical' %}`) and, in _components.html, the *keys* of the
+# variant maps (`{'neutral': 'bg-slate-100 text-slate-600'}`). Only the first is
+# a class.
+#
+# Rather than parse Jinja, a literal is accepted only when EVERY one of its
+# whitespace-separated tokens is shaped like a utility. That all-or-nothing rule
+# is what separates a class list from the other things that live in quotes here:
+#
+#   'bg-red-100 text-red-700'      -> every token utility-shaped, accepted
+#   'critical'                     -> bare word, rejected
+#   'neutral'                      -> a variant-map key, rejected
+#   '/manage/users'                -> a nav href, rejected
+#   'printer-nanny-agent --version'-> '--version' is not utility-shaped, so the
+#                                     whole literal is rejected
+#
+# Tokens taken from the *static* part of a class attribute skip this filter --
+# there they are unambiguously classes, so checking all of them is stricter.
+UTILITY_SHAPED = re.compile(r"^-?[a-z][a-z0-9]*[-:]")
+KNOWN_BARE_UTILITIES = frozenset(
+    {
+        "block", "border", "capitalize", "container", "contents", "fixed",
+        "flex", "grid", "hidden", "inline", "invisible", "italic", "isolate",
+        "lowercase", "relative", "absolute", "rounded", "shadow", "static",
+        "sticky", "table", "truncate", "underline", "uppercase", "visible",
+    }
+)
+
+
+def _is_utility_shaped(token: str) -> bool:
+    return bool(UTILITY_SHAPED.match(token)) or token in KNOWN_BARE_UTILITIES
+
+
+def _class_list_literal(literal: str) -> list[str]:
+    """Return the tokens of `literal` if it is entirely a class list, else []."""
+    parts = literal.split()
+    if not parts or not all(_is_utility_shaped(p) for p in parts):
+        return []
+    return parts
 
 
 def _css_escape(token: str) -> str:
@@ -76,24 +105,49 @@ def _css_escape(token: str) -> str:
 
 
 def _class_tokens(text: str) -> set[str]:
-    """Collect candidate class tokens from one template's source."""
+    """Collect candidate class tokens from one template's source.
+
+    Static class-attribute text is taken verbatim; anything from a quoted Jinja
+    literal is filtered to utility-shaped tokens (see UTILITY_SHAPED).
+    """
     tokens: set[str] = set()
+
     for attr in CLASS_ATTR.findall(text):
         # Class names built inside Jinja: `{{ 'bg-red-100' if x else 'bg-white' }}`
         for block in JINJA_BLOCK.findall(attr):
             for literal in SINGLE_QUOTED.findall(block):
-                tokens.update(literal.split())
+                tokens.update(_class_list_literal(literal))
         # ...and the static remainder once the Jinja is stripped out.
         tokens.update(JINJA_BLOCK.sub(" ", attr).split())
 
-    # `{% set colors = {'ok': 'bg-green-100 text-green-800', ...} %}` in base.html
-    # holds classes outside any class="" attribute.
+    # Variant maps hold canonical class strings outside any class="" attribute --
+    # base.html's status colours, and every variant map in _components.html.
+    # Restricted to `{% set %}` because a general sweep of Jinja blocks also
+    # picks up macro *arguments* (autocomplete='new-password' is utility-shaped
+    # but is not a class).
     for block in JINJA_BLOCK.findall(text):
         if "set " not in block:
             continue
         for literal in SINGLE_QUOTED.findall(block):
-            if any(literal.startswith(p) for p in ("bg-", "text-", "border-")):
-                tokens.update(literal.split())
+            tokens.update(_class_list_literal(literal))
+
+    # Class strings that are raw macro-body text rather than a quoted literal:
+    #
+    #   {% macro input_cls(extra='') -%}
+    #   w-full border border-slate-300 rounded px-3 py-2 text-sm ...
+    #   {%- endmacro %}
+    #
+    # Tailwind's own extractor scans files as plain text and so generates these,
+    # but without this pass the guard would not notice them going missing -- and
+    # _components.html is precisely where one absent class renders every page
+    # that uses the component unstyled. A line counts as a class list only when
+    # it holds two or more tokens and all of them are utility-shaped, which
+    # prose and markup never satisfy.
+    stripped = TAG.sub(" ", JINJA_BLOCK.sub(" ", JINJA_COMMENT.sub(" ", text)))
+    for line in stripped.splitlines():
+        parts = line.split()
+        if len(parts) >= 2 and all(_is_utility_shaped(p) for p in parts):
+            tokens.update(parts)
 
     return {t for t in tokens if t}
 

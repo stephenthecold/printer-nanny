@@ -15,43 +15,99 @@
 </head>
 <body class="h-full text-slate-800 flex flex-col">
 {% if user %}
-<nav class="text-slate-100" style="background-color: {{ app.primary_color or '#0f172a' }};">
-  <div class="max-w-7xl mx-auto px-4 flex items-center gap-6 h-14">
-    <a href="/" class="font-semibold text-lg flex items-center gap-2">
+{#
+  Navigation.
+
+  Three things this fixes, all of which were real operator complaints rather
+  than aesthetics:
+
+  * There was no indication of the current page. Thirteen identical links, and
+    nothing said which one you were looking at. `aria-current="page"` carries it
+    for screen readers; the ring + brightened text carries it visually.
+  * The bar was a fixed-height, non-wrapping flex row, so on a laptop width the
+    admin links simply ran off the right edge with no way to reach them. It now
+    wraps.
+  * The links were one undifferentiated run. They are now grouped by what an
+    operator is actually doing -- watching the fleet, changing it, or
+    administering the system -- with a separator between groups. Grouping is
+    visual only: every destination stays one click away, because collapsing
+    them into menus would tax the frequent paths to tidy the rare ones.
+
+  Active state is longest-prefix, not equality: /manage/agents must light up
+  "Agents", not "Manage", even though both prefixes match.
+#}
+{%- set path = request.url.path if request is defined else '' -%}
+{%- set g_watch = [{'href': '/', 'label': 'Overview'}, {'href': '/alerts', 'label': 'Alerts'}] -%}
+{%- if nav_pending is defined and nav_pending -%}
+  {#- Approvals only appears when there is actually something to approve. -#}
+  {%- set _ = g_watch.append({'href': '/approvals', 'label': 'Approvals', 'badge': nav_pending}) -%}
+{%- endif -%}
+{%- set g_manage = [{'href': '/manage', 'label': 'Manage'},
+                    {'href': '/manage/agents', 'label': 'Agents'},
+                    {'href': '/manage/maintenance', 'label': 'Maintenance'}] -%}
+{%- if user.role.value != 'client_readonly' -%}
+  {%- set _ = g_manage.append({'href': '/manage/onboard', 'label': 'Onboard'}) -%}
+  {%- set _ = g_manage.append({'href': '/manage/suppression', 'label': 'Quiet hours'}) -%}
+{%- endif -%}
+{%- set g_admin = [] -%}
+{%- if user.role.value != 'client_readonly' -%}
+  {%- set _ = g_admin.append({'href': '/security/posture', 'label': 'Security'}) -%}
+{%- endif -%}
+{%- if user.role.value == 'admin' -%}
+  {%- set _ = g_admin.append({'href': '/manage/people', 'label': 'People'}) -%}
+  {%- set _ = g_admin.append({'href': '/manage/users', 'label': 'Users'}) -%}
+  {%- set _ = g_admin.append({'href': '/manage/audit', 'label': 'Audit'}) -%}
+  {%- set _ = g_admin.append({'href': '/admin/backup', 'label': 'Backup'}) -%}
+  {%- set _ = g_admin.append({'href': '/settings', 'label': 'Settings'}) -%}
+{%- endif -%}
+{%- set nav_groups = [g_watch, g_manage, g_admin] | select | list -%}
+{#- Longest matching href wins, so a nested route marks its own entry. -#}
+{%- set ns = namespace(active='') -%}
+{%- for group in nav_groups -%}{%- for item in group -%}
+  {%- if (item.href == '/' and path == '/') or (item.href != '/' and path.startswith(item.href)) -%}
+    {%- if item.href | length > ns.active | length -%}{%- set ns.active = item.href -%}{%- endif -%}
+  {%- endif -%}
+{%- endfor -%}{%- endfor -%}
+<a href="#main" class="sr-only focus:not-sr-only focus:absolute focus:z-50 focus:m-2 focus:rounded focus:bg-white focus:px-3 focus:py-2 focus:text-sm focus:text-slate-900 focus:shadow">Skip to content</a>
+<nav aria-label="Primary" class="text-slate-100" style="background-color: {{ app.primary_color or '#0f172a' }};">
+  <div class="max-w-7xl mx-auto px-4 py-2 flex items-center gap-x-4 gap-y-1 flex-wrap min-h-14">
+    <a href="/" class="font-semibold text-lg flex items-center gap-2 rounded focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-white/70">
       {% if app.logo_url %}<img src="{{ app.logo_url }}" alt="" class="h-7 w-auto" />
-      {% else %}🖨️{% endif %}
+      {% else %}<span aria-hidden="true">🖨️</span>{% endif %}
       <span>{{ app.name or 'Printer Nanny' }}</span>
     </a>
-    <a href="/" class="hover:text-white/80 text-sm">Overview</a>
-    <a href="/manage" class="hover:text-white/80 text-sm">Manage</a>
-    <a href="/manage/agents" class="hover:text-white/80 text-sm">Agents</a>
-    {# Approvals only appears when there is actually something to approve. #}
-    {% if nav_pending is defined and nav_pending %}
-    <a href="/approvals" class="hover:text-white/80 text-sm flex items-center gap-1">
-      Approvals
-      <span class="bg-amber-400 text-slate-900 rounded-full px-1.5 text-xs font-semibold">{{ nav_pending }}</span>
-    </a>
-    {% endif %}
-    <a href="/alerts" class="hover:text-white/80 text-sm">Alerts</a>
-    <a href="/manage/maintenance" class="hover:text-white/80 text-sm">Maintenance</a>
-    {% if user.role.value != 'client_readonly' %}
-    <a href="/manage/onboard" class="hover:text-white/80 text-sm">Onboard</a>
-    <a href="/manage/suppression" class="hover:text-white/80 text-sm">Quiet hours</a>
-    <a href="/security/posture" class="hover:text-white/80 text-sm">Security</a>
-    {% endif %}
-    {% if user.role.value == 'admin' %}
-    <a href="/manage/people" class="hover:text-white/80 text-sm">People</a>
-    <a href="/manage/users" class="hover:text-white/80 text-sm">Users</a>
-    <a href="/manage/audit" class="hover:text-white/80 text-sm">Audit</a>
-    <a href="/admin/backup" class="hover:text-white/80 text-sm">Backup</a>
-    <a href="/settings" class="hover:text-white/80 text-sm">Settings</a>
-    {% endif %}
-    <a href="/account" class="ml-auto text-sm text-slate-300 hover:text-white">{{ user.username }} ({{ user.role.value }})</a>
-    <a href="/logout" class="text-sm text-slate-300 hover:text-white">Logout</a>
+    {% for group in nav_groups %}
+    {% if not loop.first %}<span class="h-4 w-px bg-white/25" aria-hidden="true"></span>{% endif %}
+    <ul class="flex items-center gap-x-4 gap-y-1 flex-wrap">
+      {% for item in group %}
+      {% set is_active = item.href == ns.active %}
+      <li>
+        <a href="{{ item.href }}"
+           {% if is_active %}aria-current="page"{% endif %}
+           class="text-sm rounded px-1 py-0.5 flex items-center gap-1 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-white/70
+                  {{ 'text-white font-medium ring-1 ring-white/40 bg-white/10' if is_active else 'text-slate-100/80 hover:text-white' }}">
+          {{ item.label }}
+          {% if item.badge %}
+          <span class="bg-amber-400 text-slate-900 rounded-full px-1.5 text-xs font-semibold">{{ item.badge }}</span>
+          {% endif %}
+        </a>
+      </li>
+      {% endfor %}
+    </ul>
+    {% endfor %}
+    {#- /account sits outside the groups (it is the user menu, not a section),
+        so its active state is computed directly rather than via ns.active. -#}
+    {%- set account_active = path.startswith('/account') -%}
+    <div class="ml-auto flex items-center gap-3">
+      <a href="/account" class="text-sm rounded px-1 py-0.5 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-white/70
+                {{ 'text-white font-medium ring-1 ring-white/40 bg-white/10' if account_active else 'text-slate-300 hover:text-white' }}"
+         {% if account_active %}aria-current="page"{% endif %}>{{ user.username }} ({{ user.role.value }})</a>
+      <a href="/logout" class="text-sm text-slate-300 hover:text-white rounded px-1 py-0.5 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-white/70">Logout</a>
+    </div>
   </div>
 </nav>
 {% endif %}
-<main class="max-w-7xl mx-auto px-4 py-6 flex-1 w-full">
+<main id="main" class="max-w-7xl mx-auto px-4 py-6 flex-1 w-full">
   {# Degraded-worker banner. A dead worker stops marking agents offline, so every
      page below would otherwise render a green fleet over frozen data -- this is
      the visible half of /readyz, for the operator who never curls anything.

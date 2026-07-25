@@ -1,4 +1,5 @@
 {% extends "base.html" %}
+{% from "_components.html" import card_cls %}
 {% from "base.html" import status_badge %}
 {% block title %}Security posture · {{ app.name or 'Printer Nanny' }}{% endblock %}
 {% block body %}
@@ -8,25 +9,25 @@
 </div>
 
 <div class="grid grid-cols-2 md:grid-cols-4 gap-3 mb-6">
-  <div class="bg-white rounded-lg shadow p-4">
+  <div class="{{ card_cls() }}">
     <div class="text-3xl font-semibold">{{ summary.total }}</div>
     <div class="text-xs text-slate-500 mt-1">Approved devices</div>
   </div>
-  <div class="bg-white rounded-lg shadow p-4">
+  <div class="{{ card_cls() }}">
     <div class="text-3xl font-semibold {{ 'text-red-600' if summary.insecure_snmp else 'text-slate-300' }}">{{ summary.insecure_snmp }}</div>
     <div class="text-xs text-slate-500 mt-1">Insecure SNMP (v1/v2c)</div>
   </div>
-  <div class="bg-white rounded-lg shadow p-4">
+  <div class="{{ card_cls() }}">
     <div class="text-3xl font-semibold {{ 'text-green-600' if summary.secure_snmp else 'text-slate-300' }}">{{ summary.secure_snmp }}</div>
     <div class="text-xs text-slate-500 mt-1">SNMPv3 (authenticated)</div>
   </div>
-  <div class="bg-white rounded-lg shadow p-4">
+  <div class="{{ card_cls() }}">
     <div class="text-3xl font-semibold {{ 'text-amber-600' if summary.firmware_unknown else 'text-slate-300' }}">{{ summary.firmware_unknown }}</div>
     <div class="text-xs text-slate-500 mt-1">Firmware unknown</div>
   </div>
 </div>
 
-<section class="bg-white rounded-lg shadow p-4">
+<section class="{{ card_cls() }}">
   <h2 class="font-semibold mb-3">Devices</h2>
   <table class="w-full text-sm">
     <thead class="text-left text-xs text-slate-500">

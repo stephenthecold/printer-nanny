@@ -1,15 +1,16 @@
 {% extends "base.html" %}
+{% from "_components.html" import btn, card_cls, field, note, page_title, section_title %}
 {% block title %}My account · {{ app.name or 'Printer Nanny' }}{% endblock %}
 {% block body %}
-<h1 class="text-2xl font-semibold mb-4">My account</h1>
+{{ page_title('My account') }}
 
 {% if error %}
-<div class="mb-4 rounded bg-red-50 border border-red-200 text-red-700 text-sm px-3 py-2">{{ error }}</div>
+<div role="alert" class="{{ note('error', 'mb-4') }}">{{ error }}</div>
 {% endif %}
 
 <div class="grid md:grid-cols-2 gap-6">
-  <section class="bg-white rounded-lg shadow p-5">
-    <h2 class="font-semibold mb-3">Profile</h2>
+  <section class="{{ card_cls('lg') }}">
+    {{ section_title('Profile') }}
     <dl class="text-sm space-y-1">
       <div class="flex gap-2"><dt class="text-slate-500 w-32">Username</dt><dd>{{ user.username }}</dd></div>
       <div class="flex gap-2"><dt class="text-slate-500 w-32">Email</dt><dd>{{ user.email or '—' }}</dd></div>
@@ -18,17 +19,19 @@
     </dl>
   </section>
 
-  <section class="bg-white rounded-lg shadow p-5">
-    <h2 class="font-semibold mb-3">Change password</h2>
+  <section class="{{ card_cls('lg') }}">
+    {{ section_title('Change password') }}
     {% if user.auth_provider == 'local' and user.password_hash %}
-    <form method="post" action="/account/password" class="space-y-2">
-      <input name="current_password" type="password" placeholder="Current password" required
-             class="w-full border rounded px-3 py-2 text-sm" />
-      <input name="new_password" type="password" placeholder="New password (min 8 chars)" required
-             class="w-full border rounded px-3 py-2 text-sm" />
-      <input name="confirm_password" type="password" placeholder="Confirm new password" required
-             class="w-full border rounded px-3 py-2 text-sm" />
-      <button class="bg-slate-900 text-white rounded px-4 py-2 text-sm font-medium">Change password</button>
+    {# Previously three password boxes distinguishable only by placeholder --
+       which vanishes on the first keystroke, leaving three identical fields. #}
+    <form method="post" action="/account/password" class="space-y-3">
+      {{ field('current_password', 'Current password', type='password',
+               required=True, autocomplete='current-password') }}
+      {{ field('new_password', 'New password', type='password', required=True,
+               autocomplete='new-password', help='Minimum 8 characters.') }}
+      {{ field('confirm_password', 'Confirm new password', type='password',
+               required=True, autocomplete='new-password') }}
+      <button class="{{ btn('primary') }}">Change password</button>
     </form>
     {% else %}
     <p class="text-sm text-slate-500">

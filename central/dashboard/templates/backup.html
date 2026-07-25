@@ -1,8 +1,9 @@
 {% extends "base.html" %}
+{% from "_components.html" import btn, card_cls, field, note, page_title, section_title %}
 {% block title %}Backup &amp; restore · {{ app.name or 'Printer Nanny' }}{% endblock %}
 {% block body %}
-<h1 class="text-2xl font-semibold mb-1">Backup &amp; restore</h1>
-<p class="text-sm text-slate-500 mb-4">
+{{ page_title('Backup & restore') }}
+<p class="text-sm text-slate-500 mb-4 -mt-2">
   Admin only. Backend: <code>{{ backend }}</code>. Restoring overwrites the
   current database -- it does not append. The session you take a backup in
   stays signed in, but any other open sessions will see fresh content on
@@ -10,15 +11,15 @@
 </p>
 
 {% if error %}
-<div class="mb-4 rounded bg-red-50 border border-red-200 text-red-700 text-sm px-3 py-2">{{ error }}</div>
+<div role="alert" class="{{ note('error', 'mb-4') }}">{{ error }}</div>
 {% endif %}
 
 <div class="grid md:grid-cols-2 gap-6 max-w-4xl">
-  <section class="bg-white rounded-lg shadow p-4">
-    <h2 class="font-semibold mb-2">Download backup</h2>
+  <section class="{{ card_cls() }}">
+    {{ section_title('Download backup') }}
     {% if backend == 'sqlite' %}
     <p class="text-sm text-slate-500 mb-3">Streams the SQLite database file as-is. Suitable as a complete recovery image.</p>
-    <a href="/admin/backup/download" class="inline-block bg-slate-900 text-white rounded px-4 py-2 text-sm font-medium">Download .sqlite</a>
+    <a href="/admin/backup/download" class="{{ btn('primary') }}">Download .sqlite</a>
     {% else %}
     <p class="text-sm text-slate-500 mb-3">
       Runs <code>pg_dump --format=custom</code> against the configured database
@@ -28,11 +29,12 @@
     {% if not pg_dump_available %}
     <p class="text-sm text-amber-700 mb-3"><strong>Heads up:</strong> <code>pg_dump</code> is not on PATH in the api container. Add the <code>postgresql-client</code> package to the image, or run <code>pg_dump</code> from your host.</p>
     {% endif %}
-    <a href="/admin/backup/download" class="inline-block bg-slate-900 text-white rounded px-4 py-2 text-sm font-medium {{ 'opacity-50 pointer-events-none' if not pg_dump_available else '' }}">Download .dump</a>
+    <a href="/admin/backup/download"
+       class="{{ btn('primary', 'md', 'opacity-50 pointer-events-none' if not pg_dump_available else '') }}">Download .dump</a>
     {% endif %}
   </section>
 
-  <section class="bg-white rounded-lg shadow p-4 border border-red-200">
+  <section class="{{ card_cls('md', 'border border-red-200') }}">
     <h2 class="font-semibold mb-2 text-red-700">Restore from backup</h2>
     <p class="text-sm text-slate-500 mb-3">
       Replaces the live database with the uploaded file. <strong class="text-red-700">This is destructive.</strong>
@@ -46,19 +48,17 @@
       <label class="block">
         <span class="text-xs text-slate-500">Backup file</span>
         <input type="file" name="backup_file" required accept=".sqlite,.db,.dump,.sql,application/octet-stream"
-               class="block w-full text-sm" />
+               class="block w-full text-sm focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-offset-1 focus-visible:ring-sky-500 rounded" />
       </label>
-      <label class="block">
-        <span class="text-xs text-slate-500">Type RESTORE to confirm</span>
-        <input name="confirm" required placeholder="RESTORE" class="w-full border border-red-300 rounded px-3 py-2 text-sm" />
-      </label>
-      <button class="bg-red-700 text-white rounded px-4 py-2 text-sm font-medium">Replace database</button>
+      {{ field('confirm', 'Type RESTORE to confirm', required=True, placeholder='RESTORE',
+               extra_cls='border-red-300') }}
+      <button class="{{ btn('danger') }}">Replace database</button>
     </form>
   </section>
 </div>
 
-<details class="mt-6 max-w-4xl bg-white rounded-lg shadow p-4">
-  <summary class="text-sm font-semibold cursor-pointer">Recovery checklist</summary>
+<details class="{{ card_cls('md', 'mt-6 max-w-4xl') }}">
+  <summary class="text-sm font-semibold cursor-pointer rounded focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-offset-1 focus-visible:ring-sky-500">Recovery checklist</summary>
   <ol class="list-decimal pl-5 text-sm text-slate-600 mt-2 space-y-1">
     <li>Take a fresh backup on the source instance.</li>
     <li>Stand up the destination: same major versions of central + Postgres.</li>

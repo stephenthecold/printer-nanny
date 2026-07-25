@@ -1,0 +1,265 @@
+{#
+  Shared UI components.
+
+  WHY THIS FILE EXISTS
+  --------------------
+  Before it, the same four elements were spelled many different ways across 23
+  templates: 30 distinct button class strings (two competing "primary" colours,
+  padding ranging px-2..px-5 / py-0.5..py-2.5, hover states on some and not
+  others), 30 card variants, 9 heading variants and 20 table-header variants.
+  Nothing was wrong on any single page; the drift only showed up when operators
+  moved between pages. Centralising the class strings makes "what does a primary
+  button look like" answerable in one place instead of by grep-and-vote.
+
+  HOW TO USE IT
+  -------------
+  Import what you need at the top of a template:
+
+      {% from "_components.html" import btn, page_title, field %}
+
+  The class-string macros (btn, card_cls, th_cls, input_cls) return *classes*,
+  not elements, because nearly every control here also carries hx-* attributes,
+  name=, formaction= or a confirm handler. Returning classes keeps those
+  explicit at the call site instead of forcing every attribute through a macro
+  signature. The structural macros (field, page_title, empty_row) do emit
+  elements, because their whole point is to make a repeated *structure*
+  consistent -- particularly the label/control pairing.
+
+  ACCESSIBILITY NOTES THAT MUST NOT REGRESS
+  -----------------------------------------
+  * `field` wraps the control in its <label>. Implicit association needs no
+    id/for pair, which matters because these forms are rendered inside per-row
+    loops -- an id-based scheme would emit duplicate ids, which is invalid HTML
+    and silently mis-associates every label after the first. Help text goes
+    inside the label for the same reason: it is announced without needing an
+    aria-describedby id to point at.
+  * Every interactive macro carries a focus-visible ring. There were previously
+    zero focus styles across 718 keyboard-reachable elements, so keyboard
+    operation depended on whatever the browser drew by default -- frequently
+    invisible on the dark and coloured buttons this app uses. `focus-visible`
+    rather than `focus` so a mouse click does not leave a ring behind.
+  * After changing any class in this file, run scripts/build-assets.sh. The
+    vendored CSS is tree-shaken against the templates, so a class introduced
+    here and never regenerated is simply absent at runtime.
+#}
+
+{#- Focus ring shared by every interactive control. Offset needs a light
+    backdrop, which is the case everywhere in this app (bg-slate-50 page). -#}
+{% set _focus = 'focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-offset-1 focus-visible:ring-sky-500' -%}
+
+{#- ---------------------------------------------------------------- buttons -#}
+{#
+  Variants map to intent, not to colour, so a page picks by meaning:
+    primary   the one action the page exists for (slate-900, the dominant
+              existing spelling for form submits)
+    accent    a secondary but affirmative action (sky, the other colour already
+              in use -- kept, but no longer interchangeable with primary)
+    danger    destructive; always pair with a confirm at the call site
+    warning   disruptive but not destructive (forcing a password reset, say)
+    success   completes/approves something
+    neutral   cancel, back, dismiss
+  Sizes: sm for inline table-row actions, md for form submits.
+#}
+{% macro btn(variant='primary', size='md', extra='') -%}
+{%- set sizes = {
+  'sm': 'px-2.5 py-1 text-xs',
+  'md': 'px-4 py-2 text-sm',
+} -%}
+{%- set variants = {
+  'primary': 'bg-slate-900 hover:bg-slate-800 text-white',
+  'accent':  'bg-sky-600 hover:bg-sky-700 text-white',
+  'danger':  'bg-red-600 hover:bg-red-700 text-white',
+  'warning': 'bg-amber-600 hover:bg-amber-700 text-white',
+  'success': 'bg-emerald-600 hover:bg-emerald-700 text-white',
+  'neutral': 'bg-white hover:bg-slate-50 text-slate-700 border border-slate-300',
+  'subtle':  'bg-slate-200 hover:bg-slate-300 text-slate-700',
+} -%}
+inline-flex items-center justify-center gap-1.5 rounded font-medium
+{{ sizes.get(size, sizes['md']) }} {{ variants.get(variant, variants['primary']) }}
+disabled:opacity-50 disabled:pointer-events-none {{ _focus }} {{ extra }}
+{%- endmacro %}
+
+{#- A text link styled as an action, for cancel/back next to a real button. -#}
+{% macro btn_link(size='md', extra='') -%}
+{%- set sizes = {'sm': 'px-2 py-1 text-xs', 'md': 'px-4 py-2 text-sm'} -%}
+inline-flex items-center rounded text-slate-600 hover:text-slate-900
+{{ sizes.get(size, sizes['md']) }} {{ _focus }} {{ extra }}
+{%- endmacro %}
+
+{#- ------------------------------------------------------------------ cards -#}
+{#  pad='none' is for cards whose child is a full-bleed table. #}
+{% macro card_cls(pad='md', extra='') -%}
+{%- set pads = {'none': '', 'sm': 'p-3', 'md': 'p-4', 'lg': 'p-5'} -%}
+bg-white rounded-lg shadow {{ pads.get(pad, pads['md']) }} {{ extra }}
+{%- endmacro %}
+
+{#- ----------------------------------------------------------------- typography -#}
+{% macro page_title(text, sub=None, back_href=None, back_label=None) -%}
+<div class="mb-4">
+  <div class="flex items-center gap-3 flex-wrap">
+    {%- if back_href %}
+    <a href="{{ back_href }}" class="text-sm text-sky-700 hover:underline rounded {{ _focus }}">← {{ back_label or 'Back' }}</a>
+    {%- endif %}
+    <h1 class="text-2xl font-semibold">{{ text }}</h1>
+    {{ caller() if caller is defined and caller else '' }}
+  </div>
+  {%- if sub %}
+  <p class="text-sm text-slate-500 mt-1">{{ sub }}</p>
+  {%- endif %}
+</div>
+{%- endmacro %}
+
+{% macro section_title(text) -%}
+<h2 class="font-semibold mb-3">{{ text }}</h2>
+{%- endmacro %}
+
+{#- ----------------------------------------------------------------- tables -#}
+{#
+  Tables are the primary way this app shows fleet data, and they were the most
+  drifted element (20 header spellings). `table_wrap` also fixes the responsive
+  hole: a wide table with no overflow container pushes the whole page sideways
+  on a narrow viewport instead of scrolling within its own card.
+#}
+{% macro table_wrap(extra='') -%}
+overflow-x-auto {{ extra }}
+{%- endmacro %}
+
+{% macro table_cls(extra='') -%}
+w-full text-sm {{ extra }}
+{%- endmacro %}
+
+{% macro thead_cls(extra='') -%}
+text-left text-xs text-slate-500 bg-slate-50 {{ extra }}
+{%- endmacro %}
+
+{% macro th_cls(align='left', extra='') -%}
+px-3 py-2 font-medium {{ 'text-right' if align == 'right' else ('text-center' if align == 'center' else 'text-left') }} {{ extra }}
+{%- endmacro %}
+
+{% macro td_cls(align='left', extra='') -%}
+px-3 py-1.5 {{ 'text-right' if align == 'right' else ('text-center' if align == 'center' else '') }} {{ extra }}
+{%- endmacro %}
+
+{% macro tr_cls(extra='') -%}
+border-t hover:bg-slate-50 {{ extra }}
+{%- endmacro %}
+
+{#- An empty table body row. Every list page needs one; several lacked it. -#}
+{% macro empty_row(colspan, message) -%}
+<tr><td colspan="{{ colspan }}" class="px-3 py-4 text-slate-400 text-sm">{{ message }}</td></tr>
+{%- endmacro %}
+
+{% macro empty_note(message) -%}
+<p class="text-sm text-slate-400">{{ message }}</p>
+{%- endmacro %}
+
+{#- ------------------------------------------------------------------ forms -#}
+{% macro input_cls(extra='') -%}
+w-full border border-slate-300 rounded px-3 py-2 text-sm
+focus:border-sky-500 {{ _focus }} {{ extra }}
+{%- endmacro %}
+
+{#- Compact variant for controls sitting inside a table row. -#}
+{% macro input_sm_cls(extra='') -%}
+border border-slate-300 rounded px-2 py-1 text-xs
+focus:border-sky-500 {{ _focus }} {{ extra }}
+{%- endmacro %}
+
+{#
+  The labelled-control macro. `label` is REQUIRED and is what fixes the 85
+  controls that previously had only a placeholder to go on -- a placeholder is
+  not an accessible name, it vanishes on first keystroke, and it fails contrast
+  in most browsers' default styling.
+
+  Renders <label><span>text</span><control><span>help</span></label>: the
+  wrapping form needs no id, so it is safe inside the per-row loops this app
+  renders (duplicate ids would break association silently).
+#}
+{% macro field(name, label, type='text', value='', required=False, placeholder='',
+               help=None, autocomplete=None, step=None, min=None, max=None,
+               extra_cls='', size='md', autofocus=False, label_sr=False) -%}
+{#- label_sr hides the label visually but keeps it for assistive tech. For
+    controls whose purpose is obvious from layout (an inline search box next to
+    a "Filter" button), not as a general escape hatch from labelling. -#}
+<label class="block">
+  <span class="{{ 'sr-only' if label_sr else 'text-xs text-slate-500' }}">{{ label }}{% if required and not label_sr %} <span class="text-red-600" aria-hidden="true">*</span>{% endif %}</span>
+  <input name="{{ name }}" type="{{ type }}" value="{{ value if value is not none else '' }}"
+         {% if required %}required{% endif %}
+         {% if autofocus %}autofocus{% endif %}
+         {% if placeholder %}placeholder="{{ placeholder }}"{% endif %}
+         {% if autocomplete %}autocomplete="{{ autocomplete }}"{% endif %}
+         {% if step is not none %}step="{{ step }}"{% endif %}
+         {% if min is not none %}min="{{ min }}"{% endif %}
+         {% if max is not none %}max="{{ max }}"{% endif %}
+         class="{{ input_sm_cls(extra_cls) if size == 'sm' else input_cls(extra_cls) }}" />
+  {%- if help %}
+  <span class="block text-xs text-slate-400 mt-0.5">{{ help }}</span>
+  {%- endif %}
+</label>
+{%- endmacro %}
+
+{#- Select. Options come from the caller so callers keep full control of
+    selected state, grouping and per-option attributes. -#}
+{% macro select_field(name, label, required=False, help=None, extra_cls='', size='md') -%}
+<label class="block">
+  <span class="text-xs text-slate-500">{{ label }}{% if required %} <span class="text-red-600" aria-hidden="true">*</span>{% endif %}</span>
+  <select name="{{ name }}" {% if required %}required{% endif %}
+          class="{{ input_sm_cls(extra_cls) if size == 'sm' else input_cls(extra_cls) }}">
+    {{ caller() }}
+  </select>
+  {%- if help %}
+  <span class="block text-xs text-slate-400 mt-0.5">{{ help }}</span>
+  {%- endif %}
+</label>
+{%- endmacro %}
+
+{% macro textarea_field(name, label, value='', rows=3, required=False,
+                        placeholder='', help=None, extra_cls='') -%}
+<label class="block">
+  <span class="text-xs text-slate-500">{{ label }}{% if required %} <span class="text-red-600" aria-hidden="true">*</span>{% endif %}</span>
+  <textarea name="{{ name }}" rows="{{ rows }}"
+            {% if required %}required{% endif %}
+            {% if placeholder %}placeholder="{{ placeholder }}"{% endif %}
+            class="{{ input_cls(extra_cls) }}">{{ value if value is not none else '' }}</textarea>
+  {%- if help %}
+  <span class="block text-xs text-slate-400 mt-0.5">{{ help }}</span>
+  {%- endif %}
+</label>
+{%- endmacro %}
+
+{% macro checkbox_field(name, label, checked=False, help=None, value=None) -%}
+<label class="flex items-start gap-2 text-sm">
+  <input type="checkbox" name="{{ name }}" {% if value is not none %}value="{{ value }}"{% endif %}
+         {% if checked %}checked{% endif %}
+         class="mt-0.5 rounded border-slate-300 text-sky-600 {{ _focus }}" />
+  <span>
+    {{ label }}
+    {%- if help %}<span class="block text-xs text-slate-400">{{ help }}</span>{% endif %}
+  </span>
+</label>
+{%- endmacro %}
+
+{#- ----------------------------------------------------------------- badges -#}
+{% macro badge(text, tone='neutral', extra='') -%}
+{%- set tones = {
+  'neutral': 'bg-slate-100 text-slate-600',
+  'info':    'bg-sky-100 text-sky-700',
+  'ok':      'bg-green-100 text-green-800',
+  'warning': 'bg-amber-100 text-amber-800',
+  'error':   'bg-red-100 text-red-800',
+  'muted':   'bg-slate-200 text-slate-700',
+} -%}
+<span class="px-1.5 py-0.5 rounded text-xs font-medium {{ tones.get(tone, tones['neutral']) }} {{ extra }}">{{ text }}</span>
+{%- endmacro %}
+
+{#- ------------------------------------------------------------------ notes -#}
+{#  Inline explanatory panels. `tone` matches badge tones. #}
+{% macro note(tone='info', extra='') -%}
+{%- set tones = {
+  'info':    'bg-sky-50 border-sky-200 text-sky-900',
+  'warning': 'bg-amber-50 border-amber-200 text-amber-900',
+  'error':   'bg-red-50 border-red-200 text-red-900',
+  'muted':   'bg-slate-50 border-slate-200 text-slate-600',
+} -%}
+rounded border px-3 py-2 text-sm {{ tones.get(tone, tones['info']) }} {{ extra }}
+{%- endmacro %}
