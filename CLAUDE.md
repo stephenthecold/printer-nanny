@@ -122,6 +122,8 @@ enforced; none of them is optional.
     decrypted), `sync.py` (applies a snapshot).
   - `snmp_parse.py` — brand-agnostic SNMP supply/level parsing (shared w/ agent).
   - `snmp.md` — Printer-MIB OID reference.
+  - `static/` — **vendored** `tailwind.css` + `htmx.min.js`, served at `/static`.
+    Committed build artifacts; regenerate with `scripts/build-assets.sh`.
 - `agent/` — standalone `printer-nanny-agent` package.
   - `providers/` — vendor-specific enrichment plugins; one registered per
     enterprise prefix. **Brother is consolidated**: a single `brother`
@@ -171,6 +173,24 @@ enforced; none of them is optional.
   `DATABASE_URL`s and the healthcheck); drift there yields a stack that builds
   clean and then can't authenticate, so `tests/test_compose_deployment.py`
   asserts single-valued defaults across the whole file.
+- **The dashboard renders with no internet, so frontend assets are vendored.**
+  Tailwind and htmx load from `central/static/`, never a CDN. This is not
+  preference: installs sit on segmented MSP management VLANs with no egress, and
+  loading them from `cdn.tailwindcss.com` / `unpkg.com` gave exactly those
+  operators an unstyled dashboard in which every htmx-driven control was inert —
+  a total failure on the deployments least able to report it. It also drops
+  Tailwind's in-browser compiler (upstream documents it as development-only) for
+  a ~21KB tree-shaken stylesheet. **Tailwind is pinned to v3**; v4 renames
+  utilities this codebase uses (`shadow`→`shadow-sm`, `rounded`→`rounded-sm`) and
+  shifts the palette, so an unpinned bump silently restyles every page.
+  The catch worth internalising: the CSS is tree-shaken **against the templates**,
+  so a class no template used at build time is simply *absent* — the element
+  renders unstyled with no error, nothing in the console, nothing to grep.
+  After changing any Tailwind class, run `scripts/build-assets.sh` and commit the
+  result. `tests/test_static_assets.py` fails on both a re-added CDN reference and
+  a class missing from the vendored CSS, so a forgotten regeneration is caught by
+  the suite rather than by an operator. Node is **build-time only** — deliberately
+  absent from `deploy/Dockerfile` and the runtime path.
 - **Dev-only services stay behind a profile.** `mailhog` accepts unauthenticated
   mail and serves an unauthenticated UI of everything it caught; it published
   `:8025` on every production install until it was made opt-in. The default

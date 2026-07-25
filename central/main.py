@@ -2,8 +2,11 @@
 
 from __future__ import annotations
 
+from pathlib import Path
+
 from fastapi import Depends, FastAPI
 from fastapi.responses import JSONResponse
+from fastapi.staticfiles import StaticFiles
 from sqlalchemy.orm import Session
 from starlette.middleware.sessions import SessionMiddleware
 from uvicorn.middleware.proxy_headers import ProxyHeadersMiddleware
@@ -22,7 +25,7 @@ from central.dashboard import (
 from central.db import create_all, get_db
 from central.health import database_ok, worker_health
 
-app = FastAPI(title="Printer Nanny", version="0.16.0")
+app = FastAPI(title="Printer Nanny", version="0.16.1")
 # Honor X-Forwarded-Proto/For from the reverse proxy so request.base_url returns
 # https:// when Caddy/Nginx terminates TLS in front of us. Without this, the
 # agent install command on /manage/agents leaks http://… to operators behind
@@ -57,6 +60,46 @@ app.include_router(backup_routes.router)
 app.include_router(auth_oidc.router)
 app.include_router(auth_oauth_smtp.router)
 app.include_router(installer.router)
+
+
+class _RevalidatingStatic(StaticFiles):
+    """StaticFiles that forces a conditional request on every asset load.
+
+    Starlette sends ETag/Last-Modified but no Cache-Control, which leaves
+    browsers free to apply *heuristic* caching -- they invent a freshness
+    lifetime from Last-Modified and serve the old file without asking. Across an
+    upgrade that means a browser pairing the new HTML with the previous
+    stylesheet, i.e. a subtly broken dashboard that a reload does not fix and
+    that the operator cannot diagnose.
+
+    ``no-cache`` does not mean "do not store": the browser still caches, it just
+    has to revalidate, so the steady state is a 304 with no body. On a LAN-hosted
+    dashboard serving two small files that is the right trade -- correctness
+    after an upgrade, at the cost of one conditional request per asset.
+
+    Hooked at ``get_response`` rather than ``file_response`` so the header rides
+    on the 304 as well as the 200; a 304 updates the stored response's headers,
+    so skipping it would let a stale directive outlive the file it applies to.
+    """
+
+    async def get_response(self, path: str, scope):
+        response = await super().get_response(path, scope)
+        response.headers["Cache-Control"] = "no-cache"
+        return response
+
+
+# Vendored Tailwind + htmx. These were loaded from public CDNs until it turned
+# out that the deployment shape this project targets -- MSP management VLANs --
+# frequently has no outbound internet, which rendered the dashboard unstyled with
+# every htmx-driven control dead. Serving them from the image makes the UI a
+# function of the deployment alone. Regenerate with scripts/build-assets.sh.
+# Unauthenticated by design: login.html needs the stylesheet before a session
+# exists, and the directory holds nothing but those two build artifacts.
+app.mount(
+    "/static",
+    _RevalidatingStatic(directory=str(Path(__file__).parent / "static")),
+    name="static",
+)
 
 
 @app.get("/healthz", tags=["meta"])

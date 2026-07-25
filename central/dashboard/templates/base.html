@@ -4,8 +4,14 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>{% block title %}Printer Nanny{% endblock %}</title>
-  <script src="https://cdn.tailwindcss.com"></script>
-  <script src="https://unpkg.com/htmx.org@1.9.12"></script>
+  {# Served from the image, never a CDN. Installs on isolated management VLANs
+     have no outbound internet, and loading these remotely left them with an
+     unstyled dashboard whose every htmx-driven control was dead. Regenerate
+     with scripts/build-assets.sh after changing Tailwind classes -- the CSS is
+     tree-shaken against these templates, so an unused-at-build-time class is
+     simply absent. #}
+  <link rel="stylesheet" href="/static/tailwind.css">
+  <script src="/static/htmx.min.js"></script>
 </head>
 <body class="h-full text-slate-800 flex flex-col">
 {% if user %}
