@@ -280,13 +280,21 @@ def load_settings(db: Session) -> Dict[str, Any]:
 def save_settings(
     db: Session, form: Dict[str, Any], sections: "Optional[set]" = None
 ) -> None:
-    """Upsert settings from a settings-form submission.
+    """Upsert settings from a settings-form submission or a partial update.
 
-    ``sections`` scopes the write to specs whose Spec.section is in the set --
-    required for the grouped settings page, where an absent checkbox must mean
-    "unchecked within THIS group", never "reset every bool on the system".
-    With sections=None (programmatic callers, tests) every spec is eligible
-    and an absent checkbox means False, as before.
+    ``sections`` declares which sections the payload covers, and is what makes
+    an absent checkbox meaningful: an unchecked box is simply not submitted by
+    the browser, so "in ``sections`` but not in ``form``" is the only way to
+    record False. The grouped settings page passes the posted group's sections
+    for exactly that reason.
+
+    With ``sections=None`` the payload is a PARTIAL update (logo upload, OAuth
+    token refresh, seed, tooling, tests): keys that aren't in it were never
+    submitted, so bools are left alone just like every other type. Inferring
+    "unchecked" there used to switch off STARTTLS, every channel, SSO and SCIM
+    behind the operator's back -- credentials intact, so the UI still looked
+    configured while alerting was dark. Callers that need a checkbox cleared
+    must say which sections they are speaking for.
 
     Secret fields left as the placeholder keep their stored value. Secrets are
     encrypted at rest (central.secrets); every save also sweeps legacy
@@ -298,13 +306,15 @@ def save_settings(
     from central.security import hash_api_key
 
     existing = {row.key: row for row in db.scalars(select(m.AppSetting))}
+    partial = sections is None
     for spec in SPECS:
         if sections is not None and spec.section not in sections:
             continue
+        absent = spec.key not in form
+        if absent and (partial or spec.type != "bool"):
+            continue  # not submitted → keep whatever is stored
         if spec.type == "bool":
-            value: Any = spec.key in form  # checkbox present → checked
-        elif spec.key not in form:
-            continue
+            value: Any = not absent  # checkbox present → checked
         elif spec.key == SCIM_TOKEN_HASH_KEY:
             # The form posts the *plaintext* SCIM token. Hash it before storing;
             # the placeholder / empty string means "keep the current hash".
@@ -389,9 +399,12 @@ def set_scim_token(db: Session, token: str) -> None:
     """Persist the SHA-256 hash of a SCIM bearer token (helper for tooling/tests).
 
     Delegates to save_settings, which hashes the plaintext via the same
-    ``hash_api_key`` path the IdP-facing auth check uses.
+    ``hash_api_key`` path the IdP-facing auth check uses. Deliberately a
+    partial update (no ``sections``): rotating the token must not touch
+    ``scim.enabled``, which a scoped write would read as unchecked and switch
+    off -- silently deprovisioning the IdP integration.
     """
-    save_settings(db, {SCIM_TOKEN_HASH_KEY: token}, sections={"SCIM provisioning"})
+    save_settings(db, {SCIM_TOKEN_HASH_KEY: token})
 
 
 def scim_token_matches(db: Session, presented: str) -> bool:

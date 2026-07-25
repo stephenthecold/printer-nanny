@@ -68,8 +68,7 @@ def test_overridden_app_name_flows_into_overview(http, db):
     runtime.save_settings(db, {
         "app.name": "Acme Print Ops",
         "app.support_email": "help@acme.example",
-        # save_settings rebuilds every bool from form presence, so include any others
-        # that should stay false; defaults are preserved by the load merge.
+        # Unscoped save = partial update: only these two keys are written.
     })
     resp = http.get("/")
     assert resp.status_code == 200
