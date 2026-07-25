@@ -76,16 +76,52 @@ _TONER_SEVERITY = {
 # Match a Brother alert string in one of these forms:
 #   "Toner Low (BK)"   -> low / black     (color in parens, modern color lasers)
 #   "Toner Empty Y"    -> empty / yellow  (trailing color code)
+#   "Toner Low: BK"    -> low / black     (colon-separated variant)
 #   "Replace Toner"    -> empty / -       (no color: defaults to black for mono)
 #   "No Toner"         -> empty / -       (HL-L2370DW etc.)
 # The color group is OPTIONAL so mono-printer alerts that omit the color still
 # match; the caller defaults a missing color to "black" when there's exactly
 # one toner on the printer.
+#
+# This text is DEVICE-CONTROLLED input and a match fabricates a supply level
+# (15% / 0%) that feeds low-supply alerts, tickets and the reorder forecast, so
+# the pattern must fail CLOSED -- anything that isn't recognisably a *toner*
+# alert has to match nothing at all. Two rules enforce that:
+#   * the consumable word is REQUIRED and must sit next to the severity word,
+#     so unrelated alerts ("Replace Drum", "No Paper", "Out of Memory") no
+#     longer read as toner reports; and
+#   * every token group is anchored on BOTH sides, so a color code can never be
+#     the last letter of a word ("Memory" -> Y) and a severity word can never be
+#     the tail of one ("Timeout" -> out, "Below" -> low).
+# Both alternations are derived from the dicts above, longest-first, so the
+# vocabularies cannot drift apart and "BK" always wins over "K".
+_SEV = "|".join(re.escape(k) for k in sorted(_TONER_SEVERITY, key=len, reverse=True))
+_CODE = "|".join(re.escape(k) for k in sorted(_COLOR_CODES, key=len, reverse=True))
+# The consumable this alert is about -- required, in either word order.
+_PART = r"toners?|cartridges?"
+# Gap allowed between the severity word and the consumable word: whitespace /
+# punctuation plus at most one connector ("Out of Toner"). Deliberately tight,
+# so the two words have to belong to the same phrase -- "Toner OK, Drum Low"
+# then carries no severity for the toner and yields nothing.
+_GAP = r"[\s:;,.\-]*(?:(?:of|is|the)[\s:;,.\-]+)?"
+# One short filler word may sit between the phrase and the color code
+# ("Toner Near End (Y)").
+_COLOR_GAP = r"[\s:;,.\-]*(?:[A-Za-z]{1,6}[\s:;,.\-]+)?"
 _ALERT_RE = re.compile(
-    r"""(?P<sev>empty|out|no|replace|depleted|low|near)\b
-        (?:.*?(?:\((?P<color1>BK|K|C|M|Y)\)|(?P<color2>BK|K|C|M|Y)\s*$))?""",
+    r"""(?: \b(?P<sev1>""" + _SEV + r""")\b""" + _GAP + r"""\b(?:""" + _PART + r""")\b
+        |   \b(?:""" + _PART + r""")\b""" + _GAP + r"""\b(?P<sev2>""" + _SEV + r""")\b )
+        (?:""" + _COLOR_GAP + r"""(?:
+              \(\s*(?P<color1>""" + _CODE + r""")\s*\)
+            | (?<![A-Za-z0-9])(?P<color2>""" + _CODE + r""")[\s.:;,!]*$
+        ))?""",
     re.IGNORECASE | re.VERBOSE,
 )
+
+# Brother inkjets report ink, not toner. "Replace Ink Cartridge" must not be
+# read as an empty toner just because it says "Cartridge", so that word only
+# counts as a toner word when the alert doesn't name ink instead.
+_INK_RE = re.compile(r"\bink\b", re.IGNORECASE)
+_TONER_WORD_RE = re.compile(r"\btoners?\b", re.IGNORECASE)
 
 
 def _walk_table(rows: Dict[str, str], base_oid: str) -> Dict[str, str]:
@@ -99,13 +135,24 @@ def _walk_table(rows: Dict[str, str], base_oid: str) -> Dict[str, str]:
 
 
 def _parse_alert(text: Optional[str]) -> tuple[Optional[str], Optional[str]]:
-    """('low'|'empty'|None, color_name|None) from a Brother alert string."""
+    """('low'|'empty'|None, color_name|None) from a Brother alert string.
+
+    Fails closed on purpose: the string comes off the device, and a severity
+    here makes the caller synthesise a supply percentage. Anything that isn't
+    recognisably a toner alert returns (None, None) so no reading is invented.
+    """
     if not text:
+        return None, None
+    if _INK_RE.search(text) and not _TONER_WORD_RE.search(text):
         return None, None
     m = _ALERT_RE.search(text)
     if not m:
         return None, None
-    severity = _TONER_SEVERITY.get(m.group("sev").lower())
+    severity = _TONER_SEVERITY.get((m.group("sev1") or m.group("sev2") or "").lower())
+    if not severity:
+        # Unreachable while _SEV is derived from _TONER_SEVERITY; keeps the
+        # "no severity => no color => no reading" invariant if that changes.
+        return None, None
     code = (m.group("color1") or m.group("color2") or "").upper()
     color = _COLOR_CODES.get(code)
     return severity, color

@@ -19,23 +19,54 @@ already use to populate ``Alert.notified_channels``.
 deliveries whose ``next_attempt_at`` is due, marking them ``delivered`` on
 success and ``dead`` once the cap is reached. Idempotent and safe every cycle:
 terminal rows (delivered / dead) are never touched again.
+
+Zero routed channels are handled explicitly. Dispatching to an empty channel
+list used to write no row at all, so ``retry_due`` had nothing to find -- while
+the alert itself was open, which makes dedupe suppress every future attempt for
+that condition. Re-enabling a channel afterwards did NOT recover it: the alert
+was lost permanently, with no record anywhere that a notification was owed. That
+state is reachable in practice (a settings save with ``sections=None`` clears
+every channel's ``enabled`` flag), so a single channel-less **owed** row is now
+persisted instead, and ``retry_due`` fans it out to whatever channels exist the
+moment one comes back.
 """
 
 from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
-from typing import Iterable, List, Optional, Tuple
+from typing import Dict, Iterable, List, Optional, Set, Tuple
 
 from sqlalchemy import or_, select
 from sqlalchemy.orm import Session
 
 from central import models as m
+from central.audit import record as audit_record
 from central.channels.base import ChannelResult, Notification, NotificationChannel
 from central.channels.registry import active_channels, dispatch
 
 # Hard ceiling on a single backoff step so attempts on a long outage don't drift
 # out to days; the operator-tunable base only controls how fast we get here.
 _BACKOFF_CAP_SECONDS = 3600
+
+# Reserved ``NotificationDelivery.channel_key`` marking a notification that was
+# owed but had nowhere to go -- deliberately not a legal channel name (the
+# Settings-page channels are Email / FreeScout / Teams / Webhook / Slack).
+UNROUTED_CHANNEL_KEY = "*unrouted*"
+
+# What an owed notification is called on the alert row / in the dashboard.
+UNROUTED_CHANNEL_LABEL = "no channel routed"
+
+UNROUTED_DETAIL = (
+    "no notification channel was enabled or routed -- queued for delivery "
+    "once one is configured"
+)
+
+# How long an owed notification waits for a destination before it is
+# dead-lettered. Long enough that an operator back from a week off still
+# recovers the alert; short enough that a permanently-unconfigured system
+# terminates its owed rows instead of holding them forever. Owed rows normally
+# terminate long before this, the moment their alert resolves.
+UNROUTED_GIVE_UP = timedelta(days=7)
 
 
 def _now() -> datetime:
@@ -121,6 +152,34 @@ def _apply_result(
         delivery.next_attempt_at = now + backoff_delay(delivery.attempts, base_seconds)
 
 
+def _record_owed(
+    db: Session, alert_id: Optional[int], payload: dict
+) -> Tuple[str, ChannelResult]:
+    """Persist the channel-less ``pending`` row for a notification owed to nobody.
+
+    ``next_attempt_at`` is left NULL (== due now) so the very next ``retry_due``
+    sweep reconsiders it: the instant a channel is enabled again the owed
+    notification is fanned out and delivered. An audit row makes the loss visible
+    to an operator at ``/manage/audit`` even before that -- one row per owed
+    notification, which alert dedupe already bounds to one per condition.
+    """
+    db.add(m.NotificationDelivery(
+        alert_id=alert_id,
+        channel_key=UNROUTED_CHANNEL_KEY,
+        status=m.DeliveryStatus.pending,
+        attempts=0,
+        last_error=UNROUTED_DETAIL,
+        next_attempt_at=None,
+        payload=payload,
+    ))
+    audit_record(
+        db, None, None, "notification.unroutable",
+        target=("alert:%d" % alert_id) if alert_id is not None else "",
+        detail="%s: %s" % (payload.get("title") or "notification", UNROUTED_DETAIL),
+    )
+    return (UNROUTED_CHANNEL_LABEL, ChannelResult(ok=False, detail=UNROUTED_DETAIL))
+
+
 def record_dispatch(
     db: Session,
     alert_id: Optional[int],
@@ -137,6 +196,12 @@ def record_dispatch(
     not lost: its delivery row is left ``failed`` with a backoff
     ``next_attempt_at`` for ``retry_due`` to pick up (or ``dead`` immediately if
     the cap is 1).
+
+    ``channels`` being empty is a real state, not a no-op: every channel may be
+    disabled, or routing/severity may have excluded all of them. One channel-less
+    ``pending`` row is persisted for that case (see ``UNROUTED_CHANNEL_KEY``) so
+    the notification stays on the books, and the returned result says plainly
+    that nothing was delivered rather than leaving the alert looking un-notified.
     """
     now = now or _now()
     max_attempts = int(runtime.get("notifications.max_attempts", 5) or 5)
@@ -144,6 +209,8 @@ def record_dispatch(
 
     payload = notification_payload(note)
     results = dispatch(note, channels)
+    if not results:
+        return [_record_owed(db, alert_id, payload)]
     for name, result in results:
         delivery = m.NotificationDelivery(
             alert_id=alert_id,
@@ -181,37 +248,190 @@ def _due_deliveries(db: Session, now: datetime) -> List[m.NotificationDelivery]:
     ]
 
 
+def _close(delivery: m.NotificationDelivery, reason: str) -> None:
+    """Dead-letter a delivery without counting an attempt against it."""
+    delivery.status = m.DeliveryStatus.dead
+    delivery.last_error = reason[:2000]
+    delivery.next_attempt_at = None
+
+
+def _alert_resolved(db: Session, delivery: m.NotificationDelivery) -> bool:
+    """Has the alert this delivery is for already been resolved?"""
+    if delivery.alert_id is None:
+        return False
+    alert = db.get(m.Alert, delivery.alert_id)
+    return alert is not None and alert.state == m.AlertState.resolved
+
+
+def _delivered_after(db: Session, alert_id: Optional[int], after_id: int) -> Set[str]:
+    """Channels this alert reached in a dispatch LATER than row ``after_id``.
+
+    Stops the fan-out re-paging a channel that an escalation re-notify already
+    reached while the notification sat owed. Bounded on purpose: a delivery
+    written *before* the owed row belongs to an earlier notification and must not
+    suppress this one -- otherwise an escalation that fell into the owed state
+    would be silently swallowed by the very open-time send it was following up.
+
+    Ordered by ``id`` rather than timestamp: it is monotonic by insertion, so it
+    can't be defeated by two dispatches landing in the same clock tick.
+    """
+    if alert_id is None:
+        return set()
+    return set(db.scalars(
+        select(m.NotificationDelivery.channel_key).where(
+            m.NotificationDelivery.alert_id == alert_id,
+            m.NotificationDelivery.status == m.DeliveryStatus.delivered,
+            m.NotificationDelivery.id > after_id,
+        )
+    ))
+
+
+def _restamp_alert(
+    db: Session,
+    alert_id: Optional[int],
+    results: List[Tuple[str, ChannelResult]],
+    now: datetime,
+) -> None:
+    """Replace an alert's "nobody was told" badge with what the fan-out achieved.
+
+    Only the owed path does this. Without it the Alerts inbox would keep showing
+    a red ``no channel routed`` badge on an alert that has since been delivered
+    -- the same class of dishonest UI the owed row exists to remove.
+    ``last_notified_at`` is stamped because the alert genuinely was notified now,
+    which also stops an escalation firing a duplicate seconds later.
+    """
+    if alert_id is None or not results:
+        return
+    alert = db.get(m.Alert, alert_id)
+    if alert is None:
+        return
+    alert.notified_channels = [
+        {"channel": name, "ok": res.ok, "detail": res.detail} for name, res in results
+    ]
+    alert.last_notified_at = now
+
+
+def _fan_out_owed(
+    db: Session,
+    delivery: m.NotificationDelivery,
+    now: datetime,
+    *,
+    channels: "Dict[str, NotificationChannel]",
+    max_attempts: int,
+    base_seconds: int,
+) -> dict:
+    """Turn a channel-less owed row into real per-channel deliveries.
+
+    The owed row is REUSED as the delivery for the first channel (so one owed
+    notification never becomes two rows for one destination) and a sibling row is
+    added for each remaining channel -- exactly the set of rows ``record_dispatch``
+    would have written had a channel been enabled at open time.
+
+    With still no channel the row is left owed and **no attempt is burned**: an
+    unconfigured system must not eat the retry budget before the operator has a
+    chance to fix it. It terminates when its alert resolves (handled by the
+    caller) or when ``UNROUTED_GIVE_UP`` has elapsed, so nothing sits pending
+    forever.
+    """
+    out = {"retried": 0, "delivered": 0, "dead": 0, "owed": 0}
+    if not channels:
+        age = now - (_aware(delivery.created_at) or now)
+        if age < UNROUTED_GIVE_UP:
+            out["owed"] = 1
+            return out
+        reason = (
+            "no notification channel was enabled within %dd -- gave up"
+            % UNROUTED_GIVE_UP.days
+        )
+        _close(delivery, reason)
+        audit_record(
+            db, None, None, "notification.gave_up",
+            target=("alert:%d" % delivery.alert_id) if delivery.alert_id else "",
+            detail="%s: %s" % ((delivery.payload or {}).get("title") or "notification", reason),
+        )
+        out["dead"] = 1
+        return out
+
+    already = _delivered_after(db, delivery.alert_id, delivery.id)
+    targets = [ch for name, ch in channels.items() if name not in already]
+    if not targets:
+        _close(delivery, "superseded by a later delivery to %s" % ", ".join(sorted(already)))
+        out["dead"] = 1
+        return out
+
+    note = notification_from_payload(delivery.payload)
+    # Reuse this row for the first destination; add siblings for the rest.
+    delivery.channel_key = targets[0].name
+    rows = [delivery]
+    for channel in targets[1:]:
+        sibling = m.NotificationDelivery(
+            alert_id=delivery.alert_id,
+            channel_key=channel.name,
+            attempts=0,
+            payload=delivery.payload,
+        )
+        db.add(sibling)
+        rows.append(sibling)
+    results: List[Tuple[str, ChannelResult]] = []
+    for row, channel in zip(rows, targets):
+        out["retried"] += 1
+        result = dispatch(note, [channel])[0][1]
+        results.append((channel.name, result))
+        _apply_result(
+            row, result, now, max_attempts=max_attempts, base_seconds=base_seconds
+        )
+        if row.status == m.DeliveryStatus.delivered:
+            out["delivered"] += 1
+        elif row.status == m.DeliveryStatus.dead:
+            out["dead"] += 1
+    _restamp_alert(db, delivery.alert_id, results, now)
+    return out
+
+
 def retry_due(db: Session, runtime: dict, now: Optional[datetime] = None) -> dict:
     """Re-send every due pending/failed delivery; mark delivered/dead as warranted.
 
     Channels are rebuilt once from ``active_channels`` and matched to each
     delivery by ``channel_key``. A delivery whose channel is no longer active
     (disabled in settings) is left untouched -- nothing to send through, and it
-    becomes due again once re-enabled. Returns a small summary the worker loop
-    and tests can assert on.
+    becomes due again once re-enabled. A channel-less **owed** row (nothing was
+    routable when the alert opened) is fanned out to whatever channels exist now,
+    which is what makes re-enabling a channel actually recover the alert.
+
+    The resolved-alert check runs BEFORE the channel lookup: a row whose channel
+    is gone must still close out when its alert resolves, otherwise rows for
+    disabled channels -- owed rows included -- accumulate forever on a system
+    that never gets a channel back. Returns a small summary the worker loop and
+    tests can assert on.
     """
     now = now or _now()
     max_attempts = int(runtime.get("notifications.max_attempts", 5) or 5)
     base_seconds = int(runtime.get("notifications.retry_base_seconds", 60) or 60)
 
     channels = {ch.name: ch for ch in active_channels(runtime)}
-    retried = delivered = dead = skipped = 0
+    retried = delivered = dead = skipped = owed = 0
     for delivery in _due_deliveries(db, now):
+        # Resolved alerts no longer need notifying; close the loop quietly so a
+        # transient outage that has since cleared doesn't page on stale news.
+        if _alert_resolved(db, delivery):
+            _close(delivery, "alert resolved before delivery")
+            dead += 1
+            continue
+        if delivery.channel_key == UNROUTED_CHANNEL_KEY:
+            out = _fan_out_owed(
+                db, delivery, now, channels=channels,
+                max_attempts=max_attempts, base_seconds=base_seconds,
+            )
+            retried += out["retried"]
+            delivered += out["delivered"]
+            dead += out["dead"]
+            owed += out["owed"]
+            continue
         channel = channels.get(delivery.channel_key)
         if channel is None:
             skipped += 1
             continue
         note = notification_from_payload(delivery.payload)
-        # Resolved alerts no longer need notifying; close the loop quietly so a
-        # transient outage that has since cleared doesn't page on stale news.
-        if delivery.alert_id is not None:
-            alert = db.get(m.Alert, delivery.alert_id)
-            if alert is not None and alert.state == m.AlertState.resolved:
-                delivery.status = m.DeliveryStatus.dead
-                delivery.last_error = "alert resolved before delivery"
-                delivery.next_attempt_at = None
-                dead += 1
-                continue
         retried += 1
         result = dispatch(note, [channel])[0][1]
         _apply_result(
@@ -227,4 +447,7 @@ def retry_due(db: Session, runtime: dict, now: Optional[datetime] = None) -> dic
         "deliveries_delivered": delivered,
         "deliveries_dead": dead,
         "deliveries_skipped": skipped,
+        # Notifications still owed with nowhere to send them -- non-zero means an
+        # operator needs to enable a channel (surfaced on the Alerts page).
+        "deliveries_owed": owed,
     }

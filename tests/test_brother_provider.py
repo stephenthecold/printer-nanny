@@ -64,10 +64,198 @@ def test_parse_alert_matches_brother_formats():
     assert _parse_alert("No Toner")      == ("empty", None)
     assert _parse_alert("Replace Toner") == ("empty", None)
     assert _parse_alert("Toner Low")     == ("low",   None)
-    # Non-toner alerts shouldn't trigger toner status changes.
-    assert _parse_alert("Drum Low")      == ("low",   None)  # parser doesn't filter; augment does
+    # Non-toner alerts must not trigger toner status changes. The parser is
+    # what filters -- augment cannot, because it defaults a missing color to
+    # black, so any severity reaching it fabricates a level on the black toner.
+    assert _parse_alert("Drum Low")      == (None,   None)
     assert _parse_alert(None)            == (None,   None)
     assert _parse_alert("")              == (None,   None)
+
+
+# --------------------------------------------------------------------------- #
+# Alert-text parsing is hostile input: the string comes off the device, and a
+# match makes the provider SYNTHESISE a supply percentage (15% low / 0% empty)
+# that flows into low-supply alerts, FreeScout tickets and the reorder
+# forecast. The parser must fail closed.
+#
+# Regression: the trailing color group was unanchored ("(BK|K|C|M|Y)\s*$"), and
+# no toner context was required, so the last letter of any word became a color
+# code and any severity word became a toner report:
+#   "Replace Drum"   -> magenta toner 0.0%   ("Drum" -> M)
+#   "Out of Memory"  -> yellow  toner 0.0%   ("Memory" -> Y)
+#   "No Paper"       -> black   toner 0.0%   (no color -> defaults to black)
+# --------------------------------------------------------------------------- #
+
+# Real Brother alert strings that are NOT toner reports. Sourced from this
+# repo's own device-derived fixtures (the alert-history rows below and in
+# test_augment_does_not_use_history_as_fallback_when_live_is_idle), plus the
+# component names the maintenance blob decodes (belt / fuser / laser / PF kit).
+NON_TONER_ALERTS = [
+    "Replace Drum",        # verified misparse -> magenta 0.0%
+    "No Paper",            # verified misparse -> black 0.0%
+    "Out of Memory",       # verified misparse -> yellow 0.0%
+    "No Tray",             # "Tray" -> Y
+    "Drum Low",
+    "Drum Near End",
+    "Replace Belt",
+    "Replace Fuser",
+    "Replace Laser",
+    "Replace PF Kit MP",
+    "Replace Ink Cartridge",   # inkjets report ink, not toner
+    "Toner OK, Drum Low",      # severity belongs to the drum, not the toner
+    "Document Jam",
+    "Jam Inside",
+    "Cannot Print 3A",
+    "Paper Tray Open",
+    "Cover is Open",
+    "Sleep",
+    "Machine Error 4F",
+    # Words whose TAIL is a severity keyword ("Timeout" -> out, "Below" -> low,
+    # "Mono" -> no) -- the severity group needed a left anchor too.
+    "Network Timeout",
+    "Below Minimum",
+    "Mono Mode",
+]
+
+
+@pytest.mark.parametrize("text", NON_TONER_ALERTS)
+def test_parse_alert_fails_closed_on_non_toner_alerts(text):
+    """No toner context => no severity and no color, so no reading is invented."""
+    assert _parse_alert(text) == (None, None)
+
+
+# Genuine Brother toner alerts that MUST keep working. "Toner Low (BK)" is the
+# exact string in central/snmp.md's device dump; "No Toner" / "Replace Toner" /
+# "Toner Low" are the real mono-laser (HL-L2370DW / L2460DW) phrasings.
+GENUINE_TONER_ALERTS = [
+    ("Toner Low (BK)",     ("low",   "black")),
+    ("Toner Low (K)",      ("low",   "black")),
+    ("Toner Empty (C)",    ("empty", "cyan")),
+    ("Replace Toner (M)",  ("empty", "magenta")),
+    ("Toner Near End (Y)", ("low",   "yellow")),
+    ("Toner Empty Y",      ("empty", "yellow")),
+    ("Toner Empty BK",     ("empty", "black")),
+    ("Toner Low: BK",      ("low",   "black")),
+    ("Toner Low: C",       ("low",   "cyan")),
+    ("Replace Toner BK",   ("empty", "black")),
+    ("Toner Depleted (M)", ("empty", "magenta")),
+    # Mono phrasings: no color code, caller defaults to the single black toner.
+    ("No Toner",           ("empty", None)),
+    ("Replace Toner",      ("empty", None)),
+    ("Toner Low",          ("low",   None)),
+    ("Out of Toner",       ("empty", None)),
+    ("Replace Cartridge",  ("empty", None)),
+    # Case / spacing / punctuation variants of the same real strings.
+    ("toner empty y",      ("empty", "yellow")),
+    ("TONER LOW (C)",      ("low",   "cyan")),
+    ("ToNeR lOw (bk)",     ("low",   "black")),
+    ("Toner Empty Y.",     ("empty", "yellow")),
+    ("Toner Low(M)",       ("low",   "magenta")),
+    ("  Toner Low (Y)  ",  ("low",   "yellow")),
+    ("Toner Empty Y \t",   ("empty", "yellow")),
+]
+
+
+@pytest.mark.parametrize("text,expected", GENUINE_TONER_ALERTS)
+def test_parse_alert_still_reads_genuine_toner_alerts(text, expected):
+    """The fix must not stop real empty/low toner from being detected."""
+    assert _parse_alert(text) == expected
+
+
+def test_parse_alert_reads_every_color_code():
+    """Each Brother color code maps to its color -- in parens and bare."""
+    for code, color in (("BK", "black"), ("K", "black"), ("C", "cyan"),
+                        ("M", "magenta"), ("Y", "yellow")):
+        assert _parse_alert("Toner Empty ({})".format(code)) == ("empty", color)
+        assert _parse_alert("Toner Empty {}".format(code)) == ("empty", color)
+
+
+# One word ending in each color code, in a non-toner alert. Every one of these
+# used to hand back that color; none may now.
+@pytest.mark.parametrize("word", ["Feedback", "Jack", "Panic", "Drum", "Memory",
+                                  "Tray", "Duplex", "Deck", "Program"])
+def test_parse_alert_never_takes_a_color_from_a_word_tail(word):
+    for text in ("Replace {}".format(word), "No {}".format(word),
+                 "{} Low".format(word), "{} Empty".format(word)):
+        assert _parse_alert(text) == (None, None), text
+
+
+@pytest.mark.parametrize("text", [
+    "", "   ", "\t\n", None,
+    "0x00", "0xdeadbeef",
+    "Toner",                      # consumable with no severity
+    "Low",                        # severity with no consumable
+    "BK", "(BK)", "K", "Y",       # bare color codes, no alert at all
+    "État: Bourrage papier", # non-ASCII (accented) status text
+    "トナー交換",  # non-ASCII (Japanese) status text
+    "\udcff\udcfe",               # lone surrogates, as a decode error would give
+    "Replace" * 500,              # very long: no severity/consumable pair
+    "A" * 100000,                 # very long garbage
+    "Drum " * 5000 + "Low",       # very long non-toner alert
+])
+def test_parse_alert_yields_nothing_for_junk_and_hostile_input(text):
+    """Adversarial strings must produce no reading -- and must not raise."""
+    assert _parse_alert(text) == (None, None)
+
+
+def test_parse_alert_survives_a_very_long_genuine_alert():
+    """A real severity buried in a long device string still parses (no crash,
+    no pathological backtracking) -- the parser is tight, not brittle."""
+    assert _parse_alert("Status: " + "x" * 5000 + " Toner Empty (C)") == ("empty", "cyan")
+
+
+@pytest.mark.parametrize("text", NON_TONER_ALERTS)
+async def test_augment_invents_no_supply_level_for_non_toner_alerts(text):
+    """End-to-end fail-closed check: a non-toner alert must leave the toner
+    untouched -- no fabricated 0.0/15.0 to reach the low-supply alert rule
+    (central.worker.jobs) or the forecast history (central.queries)."""
+    reading = {
+        "supplies": [
+            {"type": "toner", "color": "black", "level_pct": None,
+             "status_note": "some remaining", "description": "Black Toner Cartridge"},
+            {"type": "toner", "color": "magenta", "level_pct": None,
+             "status_note": "some remaining", "description": "Magenta Toner Cartridge"},
+            {"type": "toner", "color": "yellow", "level_pct": None,
+             "status_note": "some remaining", "description": "Yellow Toner Cartridge"},
+        ],
+        "events": [],
+    }
+    backend = _backend_with_brother_alerts(alert_text=text)
+    out = await BrotherProvider().augment(
+        backend, "10.0.0.1", SnmpParams(), reading, SYS_OID,
+    )
+    for supply in out["supplies"]:
+        assert supply["level_pct"] is None, (text, supply)
+        assert supply["status_note"] == "some remaining", (text, supply)
+        assert "_brother_estimated" not in supply, (text, supply)
+    assert out["_brother_parsed_severity"] == "none"
+    assert out["_brother_source"] == "none"
+
+
+@pytest.mark.parametrize("code,color", [("BK", "black"), ("K", "black"), ("C", "cyan"),
+                                        ("M", "magenta"), ("Y", "yellow")])
+async def test_augment_still_flags_the_right_toner_on_a_genuine_empty(code, color):
+    """A genuine 'Toner Empty <code>' must still empty exactly that cartridge."""
+    reading = {
+        "supplies": [
+            {"type": "toner", "color": c, "level_pct": None,
+             "status_note": "some remaining", "description": "{} Toner".format(c)}
+            for c in ("black", "cyan", "magenta", "yellow")
+        ],
+        "events": [],
+    }
+    backend = _backend_with_brother_alerts(alert_text="Toner Empty ({})".format(code))
+    out = await BrotherProvider().augment(
+        backend, "10.0.0.1", SnmpParams(), reading, SYS_OID,
+    )
+    for supply in out["supplies"]:
+        if supply["color"] == color:
+            assert supply["status_note"] == "empty"
+            assert supply["level_pct"] == 0.0
+            assert supply["_brother_estimated"] is True
+        else:
+            assert supply["level_pct"] is None
+            assert supply["status_note"] == "some remaining"
 
 
 def test_detects_brother_via_enterprise_oid():
