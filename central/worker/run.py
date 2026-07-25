@@ -30,6 +30,10 @@ JOBS = (
     jobs.check_maintenance_due,
     # Re-send any failed/pending channel deliveries that are due (backoff).
     jobs.retry_deliveries,
+    # Release notifications a quiet-hours window held, once the window closes.
+    # After retry_deliveries so a digest built this cycle isn't also swept by the
+    # retry path in the same pass.
+    jobs.flush_quiet_hours,
     jobs.forecast_supplies,
     # Cheap no-op unless a weekly/monthly report is due (marker-gated).
     run_scheduled_reports,

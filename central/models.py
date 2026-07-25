@@ -106,6 +106,38 @@ class AlertScope(str, enum.Enum):
     printer = "printer"
 
 
+class SuppressionKind(str, enum.Enum):
+    """What shape of window this is.
+
+    ``quiet_hours`` -- recurring weekly, expressed in the client's LOCAL
+                       wall-clock time (a weekday mask plus start/end minutes).
+                       "Don't wake anyone between 18:00 and 07:00."
+    ``maintenance`` -- a single dated UTC range. "We're swapping the fleet
+                       Saturday 08:00-14:00."
+    """
+
+    quiet_hours = "quiet_hours"
+    maintenance = "maintenance"
+
+
+class SuppressionAction(str, enum.Enum):
+    """What happens to a notification that lands inside the window.
+
+    ``defer``    -- hold it and deliver when the window ends, batched into a
+                    digest. Nothing is lost; the operator just isn't woken.
+                    The sensible default for quiet hours.
+    ``suppress`` -- don't notify at all. The alert still opens and stays visible
+                    on the dashboard; only the notification is dropped, and the
+                    delivery row records ``suppressed`` so the drop is on the
+                    books rather than silent. The sensible default for planned
+                    maintenance, where a digest of 40 expected "printer offline"
+                    alerts is pure noise and defeats the point of the window.
+    """
+
+    defer = "defer"
+    suppress = "suppress"
+
+
 class AlertConditionType(str, enum.Enum):
     supply_below = "supply_below"          # threshold = percent
     error_severity = "error_severity"      # threshold mapped to EventSeverity rank
@@ -156,6 +188,19 @@ class DeliveryStatus(str, enum.Enum):
                     backlog. The alert stays open and visible either way, and
                     the alerts page renders the channel with a distinct
                     "not sent" badge carrying the reason.
+    ``deferred`` -- held by a quiet-hours window. NOT terminal: it carries
+                    ``next_attempt_at`` = the instant the window ends, so the
+                    existing retry sweeper is the wake mechanism and the
+                    notification is delivered (batched into a digest) the moment
+                    the window closes. Distinct from ``failed`` because nothing
+                    went wrong and no attempt was burned -- an operator reading
+                    the log must be able to tell "we chose to wait" from
+                    "the channel broke".
+    ``suppressed`` -- dropped by a suppression window (planned maintenance).
+                    Terminal, and deliberately recorded rather than simply not
+                    written: a notification an operator asked to silence is
+                    still a notification that did not arrive, and the log should
+                    say so.
 
     Stored as VARCHAR (see ``_enum``), so adding a member needs no DDL.
     """
@@ -165,6 +210,8 @@ class DeliveryStatus(str, enum.Enum):
     failed = "failed"
     dead = "dead"
     skipped = "skipped"
+    deferred = "deferred"
+    suppressed = "suppressed"
 
 
 class CommandType(str, enum.Enum):
@@ -193,6 +240,13 @@ class Client(Base):
     id: Mapped[int] = mapped_column(primary_key=True)
     name: Mapped[str] = mapped_column(String(200), unique=True)
     notes: Mapped[Optional[str]] = mapped_column(Text, default=None)
+    # IANA zone name (e.g. "America/New_York"). NULL means "use the global
+    # alerts.default_timezone". Quiet hours are wall-clock-local by nature --
+    # "don't call after 18:00" means the CLIENT's 18:00, and an MSP's clients do
+    # not all share a zone. Validated against zoneinfo.available_timezones() on
+    # save, and resolved defensively at read time (see central.suppression), so
+    # a stale or hand-edited value degrades to UTC instead of killing the worker.
+    timezone: Mapped[Optional[str]] = mapped_column(String(64), default=None)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
 
     sites: Mapped[list[Site]] = relationship(back_populates="client", cascade="all, delete-orphan")
@@ -546,6 +600,93 @@ class AlertRule(Base):
     channel_ids: Mapped[Optional[list]] = mapped_column(JSON, default=None)  # [notification_channel.id]
     enabled: Mapped[bool] = mapped_column(Boolean, default=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+
+
+class SuppressionWindow(Base):
+    """When NOT to notify -- recurring quiet hours and one-off maintenance windows.
+
+    One table for both shapes because they share everything that matters: the
+    scope they apply to, the break-through floor, and what happens to a
+    notification that lands inside them. Only the time expression differs, and
+    ``kind`` selects which pair of columns is authoritative:
+
+    - ``quiet_hours`` uses ``weekdays`` + ``start_minute``/``end_minute``, which
+      are **local wall-clock** minutes from midnight in the scoped client's
+      timezone. ``end_minute <= start_minute`` means the window wraps midnight
+      (18:00->07:00), which is the common case and therefore must not be an
+      error. Storing minutes-as-int rather than a TIME column keeps it portable
+      across SQLite/Postgres and makes the wrap comparison explicit.
+    - ``maintenance`` uses ``starts_at``/``ends_at``, absolute UTC instants. A
+      planned outage happens once at a known moment; there is no recurrence and
+      no wall-clock ambiguity to resolve.
+
+    ``scope``/``scope_id`` reuse the AlertRule and NotificationChannel
+    convention, so an operator already knows what global/client/site/printer
+    means here. Overlap is resolved most-specific-scope-first (see
+    ``central.suppression``) -- a printer-level window beats a client-level one,
+    which is what makes "silence this one flaky device" possible without
+    punching a hole in the client's policy.
+
+    ``min_severity_breakthrough`` is the safety valve: alerts at or above it
+    ignore the window entirely. It defaults to ``critical`` because silencing a
+    site-down overnight is a liability an MSP cannot carry by accident.
+
+    ``allow_breakthrough=False`` is total silence -- nothing escapes, critical
+    included. It is a separate flag rather than "leave the floor NULL" because
+    ``critical`` is the top of ``EventSeverity``, so a floor alone can only ever
+    *loosen* a window, never make it fully quiet; and because SQLAlchemy cannot
+    distinguish an unset column from one explicitly set to None once the column
+    carries a Python-side default, which would have made NULL mean "critical"
+    exactly when an operator asked for silence. Defaulting the flag to True keeps
+    the safe behaviour for any window created without thinking about it.
+    """
+
+    __tablename__ = "suppression_windows"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    name: Mapped[str] = mapped_column(String(200))
+    kind: Mapped[SuppressionKind] = mapped_column(
+        _enum(SuppressionKind), default=SuppressionKind.quiet_hours
+    )
+    action: Mapped[SuppressionAction] = mapped_column(
+        _enum(SuppressionAction), default=SuppressionAction.defer
+    )
+    scope: Mapped[AlertScope] = mapped_column(_enum(AlertScope), default=AlertScope.global_)
+    scope_id: Mapped[Optional[int]] = mapped_column(Integer, default=None)
+    # Alerts at or above this severity ignore the window...
+    min_severity_breakthrough: Mapped[EventSeverity] = mapped_column(
+        _enum(EventSeverity), default=EventSeverity.critical
+    )
+    # ...unless this is False, in which case nothing breaks through at all.
+    allow_breakthrough: Mapped[bool] = mapped_column(
+        Boolean, default=True, server_default=text("1")
+    )
+    # -- recurring (quiet_hours) --------------------------------------------- #
+    # Minutes from LOCAL midnight, 0..1439. end <= start wraps past midnight.
+    start_minute: Mapped[Optional[int]] = mapped_column(Integer, default=None)
+    end_minute: Mapped[Optional[int]] = mapped_column(Integer, default=None)
+    # ISO weekdays the window applies to, Monday=0 .. Sunday=6. NULL/empty means
+    # every day -- the overwhelmingly common "every night" case needs no setup.
+    weekdays: Mapped[Optional[list]] = mapped_column(JSON, default=None)
+    # -- one-off (maintenance) ---------------------------------------------- #
+    starts_at: Mapped[Optional[datetime]] = mapped_column(
+        DateTime(timezone=True), default=None
+    )
+    ends_at: Mapped[Optional[datetime]] = mapped_column(
+        DateTime(timezone=True), default=None
+    )
+    enabled: Mapped[bool] = mapped_column(Boolean, default=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+
+    # Declared here, not only in migration 0025: revision 0001 is a
+    # Base.metadata.create_all(), so the ORM metadata -- not the migration
+    # chain -- is what builds a fresh database. An index that exists only in the
+    # migration is silently absent on every new install, because 0025's
+    # "does the table already exist?" guard correctly short-circuits.
+    # The evaluator reads enabled+scope on every dispatch, so this is the hot path.
+    __table_args__ = (
+        Index("ix_suppression_enabled_scope", "enabled", "scope", "scope_id"),
+    )
 
 
 class Alert(Base):

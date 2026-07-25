@@ -1,0 +1,210 @@
+{% extends "base.html" %}
+{% block title %}Quiet hours · {{ app.name or 'Printer Nanny' }}{% endblock %}
+{% block body %}
+<h1 class="text-2xl font-semibold mb-1">Quiet hours &amp; maintenance windows</h1>
+<p class="text-sm text-slate-500 mb-4">
+  When <em>not</em> to notify. <strong>Quiet hours</strong> recur weekly and are read in
+  each client's local time — “after 18:00” means the client's 18:00, so one global
+  window covers a fleet across several zones. <strong>Maintenance windows</strong> are a
+  single dated range in UTC, for planned work.
+  Alerts at or above a window's <em>break-through</em> severity ignore it entirely.
+</p>
+
+{% if flash %}
+<div class="mb-4 rounded bg-amber-50 border border-amber-200 text-amber-800 text-sm px-3 py-2">{{ flash }}</div>
+{% endif %}
+
+<div class="grid lg:grid-cols-3 gap-6">
+  <section class="lg:col-span-2 bg-white rounded-lg shadow overflow-x-auto">
+    <div class="px-4 py-3 border-b font-semibold">Windows</div>
+    {% if windows %}
+    <table class="w-full text-sm">
+      <thead class="text-left text-xs text-slate-500 bg-slate-50">
+        <tr>
+          <th class="px-4 py-2">Name</th>
+          <th class="py-2">Scope</th>
+          <th class="py-2">When</th>
+          <th class="py-2">Held alerts</th>
+          <th class="py-2">Breaks through</th>
+          <th class="py-2 w-40 text-right pr-4"></th>
+        </tr>
+      </thead>
+      <tbody>
+        {% for w in windows %}
+        <tr class="border-t align-top {{ 'opacity-50' if not w.enabled }}">
+          <td class="px-4 py-2">
+            <div class="font-medium">{{ w.name }}</div>
+            <div class="text-[11px] text-slate-400">
+              {{ 'quiet hours' if w.kind.value == 'quiet_hours' else 'maintenance' }}
+              {%- if w.id in active_ids %}
+              <span class="ml-1 px-1.5 py-0.5 rounded bg-indigo-100 text-indigo-700">active now</span>
+              {%- endif %}
+              {%- if not w.enabled %}
+              <span class="ml-1 px-1.5 py-0.5 rounded bg-slate-100 text-slate-500">disabled</span>
+              {%- endif %}
+            </div>
+          </td>
+          <td class="py-2 text-xs">
+            {% if w.scope.value == 'global' %}
+            <span class="text-slate-600">all clients</span>
+            {% else %}
+            <span class="text-slate-600">{{ w.scope.value }}</span>
+            <div class="text-slate-400">
+              {%- if w.scope.value == 'client' %}
+                {%- for c in clients %}{% if c.id == w.scope_id %}{{ c.name }}{% endif %}{% endfor %}
+              {%- elif w.scope.value == 'site' %}
+                {%- for s in sites %}{% if s.id == w.scope_id %}{{ s.name }}{% endif %}{% endfor %}
+              {%- else %}
+                {%- for p in printers %}{% if p.id == w.scope_id %}{{ p.display_name or p.model or p.ip }}{% endif %}{% endfor %}
+              {%- endif %}
+            </div>
+            {% endif %}
+          </td>
+          <td class="py-2 text-xs tabular-nums">
+            {% if w.kind.value == 'quiet_hours' %}
+            {{ fmt_hhmm(w.start_minute) }}–{{ fmt_hhmm(w.end_minute) }}
+            {% if w.end_minute is not none and w.start_minute is not none and w.end_minute <= w.start_minute %}
+            <span class="text-slate-400">(overnight)</span>
+            {% endif %}
+            <div class="text-slate-400">
+              {%- if w.weekdays %}
+                {%- for i, label in weekday_labels %}{% if i in w.weekdays %}{{ label }} {% endif %}{% endfor %}
+              {%- else %}every day{% endif %}
+              · client local
+            </div>
+            {% else %}
+            {{ w.starts_at.strftime('%Y-%m-%d %H:%M') if w.starts_at else '?' }}
+            <div class="text-slate-400">to {{ w.ends_at.strftime('%Y-%m-%d %H:%M') if w.ends_at else '?' }} UTC</div>
+            {% endif %}
+          </td>
+          <td class="py-2 text-xs">
+            {% if w.action.value == 'defer' %}
+            <span class="px-1.5 py-0.5 rounded bg-sky-100 text-sky-700">held for a digest</span>
+            {% else %}
+            <span class="px-1.5 py-0.5 rounded bg-slate-200 text-slate-700">dropped</span>
+            {% endif %}
+          </td>
+          <td class="py-2 text-xs">
+            {% if w.allow_breakthrough %}{{ w.min_severity_breakthrough.value }} and above
+            {%- else %}<span class="text-amber-700">nothing — total silence</span>{% endif %}
+          </td>
+          <td class="py-2 text-right pr-4">
+            <form method="post" action="/manage/suppression/{{ w.id }}/toggle" class="inline">
+              <button class="bg-slate-200 text-slate-700 rounded px-2 py-1 text-xs">
+                {{ 'Disable' if w.enabled else 'Enable' }}
+              </button>
+            </form>
+            <form method="post" action="/manage/suppression/{{ w.id }}/delete" class="inline"
+                  onsubmit="return confirm('Delete window {{ w.name }}? Alerts will notify immediately again.');">
+              <button class="bg-red-600 text-white rounded px-2 py-1 text-xs">Delete</button>
+            </form>
+          </td>
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+    {% else %}
+    <p class="px-4 py-6 text-sm text-slate-500">
+      No windows yet — every alert notifies immediately, at any hour.
+    </p>
+    {% endif %}
+  </section>
+
+  <section class="bg-white rounded-lg shadow p-4">
+    <div class="font-semibold mb-3">Add a window</div>
+    <form method="post" action="/manage/suppression" class="space-y-3 text-sm">
+      <div>
+        <label class="block text-xs text-slate-500 mb-1">Name</label>
+        <input name="name" required placeholder="Overnight — no calls"
+               class="w-full border rounded px-2 py-1">
+      </div>
+      <div>
+        <label class="block text-xs text-slate-500 mb-1">Type</label>
+        <select name="kind" class="w-full border rounded px-2 py-1">
+          <option value="quiet_hours">Quiet hours (recurring, client-local)</option>
+          <option value="maintenance">Maintenance window (one-off, UTC)</option>
+        </select>
+      </div>
+      <div>
+        <label class="block text-xs text-slate-500 mb-1">Held alerts</label>
+        <select name="action" class="w-full border rounded px-2 py-1">
+          <option value="">Default for the type</option>
+          <option value="defer">Hold, then send one digest</option>
+          <option value="suppress">Drop them</option>
+        </select>
+        <p class="text-[11px] text-slate-400 mt-1">
+          Quiet hours default to holding; maintenance defaults to dropping, since a
+          morning digest of expected outage noise defeats the point.
+        </p>
+      </div>
+
+      <fieldset class="border rounded p-2">
+        <legend class="text-xs text-slate-500 px-1">Quiet hours</legend>
+        <div class="flex gap-2">
+          <div class="flex-1">
+            <label class="block text-xs text-slate-500 mb-1">From</label>
+            <input name="start_time" type="time" value="18:00" class="w-full border rounded px-2 py-1">
+          </div>
+          <div class="flex-1">
+            <label class="block text-xs text-slate-500 mb-1">To</label>
+            <input name="end_time" type="time" value="07:00" class="w-full border rounded px-2 py-1">
+          </div>
+        </div>
+        <p class="text-[11px] text-slate-400 mt-1">An end before the start means overnight.</p>
+        <div class="mt-2 flex flex-wrap gap-2 text-xs">
+          {% for i, label in weekday_labels %}
+          <label class="inline-flex items-center gap-1">
+            <input type="checkbox" name="weekdays" value="{{ i }}"> {{ label }}
+          </label>
+          {% endfor %}
+        </div>
+        <p class="text-[11px] text-slate-400 mt-1">None ticked = every day.</p>
+      </fieldset>
+
+      <fieldset class="border rounded p-2">
+        <legend class="text-xs text-slate-500 px-1">Maintenance window (UTC)</legend>
+        <label class="block text-xs text-slate-500 mb-1">Starts</label>
+        <input name="starts_at" type="datetime-local" class="w-full border rounded px-2 py-1 mb-2">
+        <label class="block text-xs text-slate-500 mb-1">Ends</label>
+        <input name="ends_at" type="datetime-local" class="w-full border rounded px-2 py-1">
+      </fieldset>
+
+      <div>
+        <label class="block text-xs text-slate-500 mb-1">Applies to</label>
+        <select name="scope" class="w-full border rounded px-2 py-1">
+          <option value="global">All clients</option>
+          <option value="client">One client</option>
+          <option value="site">One site</option>
+          <option value="printer">One printer</option>
+        </select>
+        <select name="scope_id" class="w-full border rounded px-2 py-1 mt-2">
+          <option value="">— target (for client/site/printer) —</option>
+          {% for c in clients %}<option value="{{ c.id }}">client: {{ c.name }}</option>{% endfor %}
+          {% for s in sites %}<option value="{{ s.id }}">site: {{ s.name }}</option>{% endfor %}
+          {% for p in printers %}<option value="{{ p.id }}">printer: {{ p.display_name or p.model or p.ip }}</option>{% endfor %}
+        </select>
+      </div>
+      <div>
+        <label class="block text-xs text-slate-500 mb-1">Break through at</label>
+        <select name="min_severity_breakthrough" class="w-full border rounded px-2 py-1">
+          <option value="critical" selected>Critical (recommended)</option>
+          <option value="warning">Warning and above</option>
+          <option value="info">Everything (window never silences)</option>
+          <option value="none">Nothing — total silence</option>
+        </select>
+        <p class="text-[11px] text-slate-400 mt-1">
+          Alerts this severe ignore the window. Leaving a site-down silent
+          overnight is rarely what you want, so <em>total silence</em> is
+          deliberately the last option.
+        </p>
+      </div>
+      <button class="w-full bg-sky-700 text-white rounded px-3 py-1.5">Add window</button>
+    </form>
+    <p class="text-[11px] text-slate-400 mt-3">
+      Client timezones are set per client under
+      <a href="/manage/clients" class="text-sky-700 hover:underline">Clients</a>.
+      Unset clients use <code>{{ default_tz }}</code>.
+    </p>
+  </section>
+</div>
+{% endblock %}

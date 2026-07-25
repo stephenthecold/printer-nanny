@@ -61,6 +61,13 @@ UNROUTED_DETAIL = (
     "once one is configured"
 )
 
+# Reserved ``channel_key`` for a notification a suppression window held (deferred)
+# or dropped (suppressed). Like UNROUTED_CHANNEL_KEY it names no real channel,
+# because at hold time we deliberately haven't chosen one yet -- the digest fans
+# out to whatever is enabled when the window closes, which is what makes a
+# channel enabled *during* quiet hours still receive the morning batch.
+WITHHELD_CHANNEL_KEY = "*withheld*"
+
 # How long an owed notification waits for a destination before it is
 # dead-lettered. Long enough that an operator back from a week off still
 # recovers the alert; short enough that a permanently-unconfigured system
@@ -513,3 +520,176 @@ def retry_due(db: Session, runtime: dict, now: Optional[datetime] = None) -> dic
         # operator needs to enable a channel (surfaced on the Alerts page).
         "deliveries_owed": owed,
     }
+
+
+# --------------------------------------------------------------------------- #
+# Deferred notifications -- the quiet-hours digest.
+#
+# A held notification is a `deferred` row whose next_attempt_at is the instant its
+# window closes, so nothing polls and no second scheduler exists: the row simply
+# becomes due. `_due_deliveries` deliberately does NOT return deferred rows --
+# retry_due would re-send them individually, which is the noise the window was
+# meant to prevent. flush_deferred owns them and batches instead.
+# --------------------------------------------------------------------------- #
+def _due_deferred(db: Session, now: datetime) -> List[m.NotificationDelivery]:
+    """Held rows whose window has now closed."""
+    rows = db.scalars(
+        select(m.NotificationDelivery).where(
+            m.NotificationDelivery.status == m.DeliveryStatus.deferred
+        )
+    )
+    return [
+        r for r in rows
+        if r.next_attempt_at is None or _aware(r.next_attempt_at) <= now
+    ]
+
+
+def _digest_note(entries: List[dict], resolved_count: int, client_name: Optional[str]) -> Notification:
+    """Render N held notifications into one message.
+
+    Severity is the highest among the entries, so a digest containing a critical
+    is not gated out by a channel whose minimum is critical. ``resolved_count`` is
+    stated rather than dropped: conditions that cleared while held are not sent
+    individually (nobody wants to be paged about a fixed problem at 07:00), but
+    silently discarding them would leave an operator unable to answer "what
+    happened overnight?".
+    """
+    rank = {"info": 0, "warning": 1, "critical": 2}
+    severity = "info"
+    for e in entries:
+        if rank.get(e.get("severity", "info"), 0) > rank.get(severity, 0):
+            severity = e.get("severity", "info")
+
+    lines = []
+    for e in entries:
+        label = e.get("printer_label") or ""
+        title = e.get("title") or "alert"
+        lines.append("- [%s] %s%s" % (
+            e.get("severity", "info"), title, (" (%s)" % label) if label else ""
+        ))
+    if resolved_count:
+        lines.append(
+            "- (%d further condition(s) opened and cleared while held; not listed)"
+            % resolved_count
+        )
+    scope = (" for %s" % client_name) if client_name else ""
+    title = "%d alert%s held during quiet hours%s" % (
+        len(entries), "" if len(entries) == 1 else "s", scope,
+    )
+    return Notification(
+        title=title,
+        body="\n".join(lines),
+        severity=severity,
+        client_name=client_name,
+    )
+
+
+def _client_of(db: Session, delivery: m.NotificationDelivery):
+    """(client_id, client_name) for a held row, via its alert's printer."""
+    if delivery.alert_id is None:
+        return (None, None)
+    alert = db.get(m.Alert, delivery.alert_id)
+    if alert is None or alert.printer_id is None:
+        return (None, None)
+    printer = db.get(m.Printer, alert.printer_id)
+    if printer is None or printer.client_id is None:
+        return (None, None)
+    client = db.get(m.Client, printer.client_id)
+    return (printer.client_id, client.name if client else None)
+
+
+def flush_deferred(
+    db: Session, runtime: dict, now: Optional[datetime] = None
+) -> dict:
+    """Deliver every held notification whose window has closed, as a digest.
+
+    Grouped per client so an MSP tech gets one message per customer rather than
+    one per alert or one mixing every customer together. Rows whose alert has
+    since resolved are closed without a send and only counted in the digest --
+    consistent with ``retry_due``, which already refuses to page on stale news.
+
+    Honest terminal states throughout: a digest that reaches nobody (no channel
+    enabled) leaves its rows ``pending`` as owed rather than claiming delivery, so
+    the existing owed-recovery path picks them up.
+    """
+    now = now or _now()
+    channels = list(active_channels(runtime))
+    due = _due_deferred(db, now)
+    if not due:
+        return {"digests_sent": 0, "deferred_delivered": 0, "deferred_resolved": 0}
+
+    groups: Dict[Optional[int], List[m.NotificationDelivery]] = {}
+    resolved: Dict[Optional[int], int] = {}
+    names: Dict[Optional[int], Optional[str]] = {}
+    for row in due:
+        client_id, client_name = _client_of(db, row)
+        names[client_id] = client_name
+        if _alert_resolved(db, row):
+            _close(row, "alert resolved while held by a suppression window")
+            resolved[client_id] = resolved.get(client_id, 0) + 1
+            continue
+        groups.setdefault(client_id, []).append(row)
+
+    digests = delivered = 0
+    for client_id, rows in groups.items():
+        entries = [r.payload or {} for r in rows]
+        note = _digest_note(entries, resolved.get(client_id, 0), names.get(client_id))
+        if not channels:
+            # Nowhere to send it. Hand the rows to the owed path rather than
+            # marking them anything that implies delivery -- re-enabling a
+            # channel must still produce the digest.
+            for row in rows:
+                row.channel_key = UNROUTED_CHANNEL_KEY
+                row.status = m.DeliveryStatus.pending
+                row.next_attempt_at = None
+                row.last_error = UNROUTED_DETAIL
+            continue
+        results = dispatch(note, channels)
+        digests += 1
+        sent_any = any(r.ok and r.sent for _, r in results)
+        detail = "; ".join("%s: %s" % (n, r.detail) for n, r in results)[:2000]
+        for row in rows:
+            row.attempts += 1
+            row.channel_key = results[0][0] if results else WITHHELD_CHANNEL_KEY
+            if sent_any:
+                row.status = m.DeliveryStatus.delivered
+                row.last_error = None
+                delivered += 1
+            else:
+                # Every channel skipped (severity gate / dry-run). Not a delivery,
+                # and not a failure worth retrying -- same call as _apply_result.
+                row.status = m.DeliveryStatus.skipped
+                row.last_error = detail
+            row.next_attempt_at = None
+        _restamp_digest(db, rows, results, now)
+
+    db.commit()
+    return {
+        "digests_sent": digests,
+        "deferred_delivered": delivered,
+        "deferred_resolved": sum(resolved.values()),
+    }
+
+
+def _restamp_digest(
+    db: Session,
+    rows: List[m.NotificationDelivery],
+    results: List[Tuple[str, ChannelResult]],
+    now: datetime,
+) -> None:
+    """Replace each alert's "held" badge with what the digest actually achieved.
+
+    Without this the Alerts page would keep showing "held by window ... until
+    07:00" on an alert that was delivered at 07:00 -- the same stale-badge
+    dishonesty ``_restamp_alert`` exists to remove on the owed path.
+    """
+    badges = channel_badges(results)
+    for row in rows:
+        if row.alert_id is None:
+            continue
+        alert = db.get(m.Alert, row.alert_id)
+        if alert is None:
+            continue
+        alert.notified_channels = badges
+        if any(r.ok and r.sent for _, r in results):
+            alert.last_notified_at = now
