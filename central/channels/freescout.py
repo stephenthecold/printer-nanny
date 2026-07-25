@@ -61,9 +61,12 @@ class FreeScoutChannel(NotificationChannel):
         api_key = self._api_key()
         payload = self.build_payload(note)
         if not base or not api_key:
-            # Dry-run so the system is demoable without a live FreeScout.
+            # Dry-run so the system is demoable without a live FreeScout. No
+            # ticket exists, so sent=False keeps it out of the delivered count.
             return ChannelResult(
-                ok=True, detail="freescout dry-run (no base_url/api_key configured)"
+                ok=True,
+                detail="freescout dry-run (no base_url/api_key configured)",
+                sent=False,
             )
         try:
             resp = httpx.post(
@@ -102,7 +105,9 @@ class FreeScoutChannel(NotificationChannel):
         api_key = self._api_key()
         if not base or not api_key:
             return ChannelResult(
-                ok=True, detail="freescout dry-run close (no base_url/api_key configured)"
+                ok=True,
+                detail="freescout dry-run close (no base_url/api_key configured)",
+                sent=False,
             )
         payload = {"type": "note", "text": note, "status": "closed"}
         try:

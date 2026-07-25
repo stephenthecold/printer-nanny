@@ -182,6 +182,7 @@ def dispatch(
                             f"skipped: severity {note.severity} below "
                             f"{channel.min_severity()}"
                         ),
+                        sent=False,
                     ),
                 ))
                 continue

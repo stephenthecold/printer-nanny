@@ -46,9 +46,24 @@
         <td class="py-2"><div class="font-medium">{{ a.title }}</div><div class="text-slate-500 text-xs">{{ a.detail or '' }}</div>
           {% if a.notified_channels %}
           <div class="mt-1 flex flex-wrap gap-1">
+            {# Three states, not two. A severity gate or an unconfigured channel
+               returns ok=True having transmitted nothing; rendering that as a
+               green tick asserted a delivery that never happened. Rows written
+               before `sent` existed omit the key, so default it to true and
+               historical alerts keep rendering as they did. #}
             {% for ch in a.notified_channels %}
-            <span title="{{ ch.detail }}" class="text-[10px] px-1.5 py-0.5 rounded {{ 'bg-green-100 text-green-700' if ch.ok else 'bg-red-100 text-red-700' }}">{{ ch.channel }} {{ '✓' if ch.ok else '✕' }}</span>
+            {% set was_sent = ch.get('sent', True) %}
+            <span title="{{ ch.detail }}" class="text-[10px] px-1.5 py-0.5 rounded
+              {%- if not ch.ok %} bg-red-100 text-red-700
+              {%- elif not was_sent %} bg-slate-100 text-slate-600
+              {%- else %} bg-green-100 text-green-700{% endif %}">{{ ch.channel }}
+              {{- ' ✕' if not ch.ok else (' ⊘' if not was_sent else ' ✓') }}</span>
             {% endfor %}
+          </div>
+          {% endif %}
+          {% if a.flap_count %}
+          <div class="mt-1 text-[10px] text-amber-700" title="This condition has cleared and re-fired repeatedly. It was folded back into this alert instead of raising a new one each time.">
+            unstable — re-fired {{ a.flap_count }}×
           </div>
           {% endif %}
         </td>

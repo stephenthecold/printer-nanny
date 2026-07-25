@@ -28,7 +28,9 @@ class TeamsChannel(NotificationChannel):
         webhook = self._webhook()
         payload = self.build_payload(note)
         if not webhook:
-            return ChannelResult(ok=True, detail="teams dry-run (no webhook configured)")
+            return ChannelResult(
+                ok=True, detail="teams dry-run (no webhook configured)", sent=False
+            )
         try:
             resp = httpx.post(webhook, json=payload, timeout=15)
         except httpx.HTTPError as exc:

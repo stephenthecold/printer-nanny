@@ -80,11 +80,14 @@ class WebhookChannel(NotificationChannel):
     def send(self, note: Notification) -> ChannelResult:
         url = self._url()
         if not url:
-            return ChannelResult(ok=True, detail="webhook dry-run (no url configured)")
+            return ChannelResult(
+                ok=True, detail="webhook dry-run (no url configured)", sent=False
+            )
         if not self._meets_threshold(note.severity):
             return ChannelResult(
                 ok=True,
                 detail=f"webhook skipped: severity {note.severity} below {self._min_severity()}",
+                sent=False,
             )
         headers = {"Content-Type": "application/json"}
         auth_header, auth_token = self._auth_pair()

@@ -18,7 +18,7 @@ from central.channels import (
     routable_channels,
     route_channels,
 )
-from central.channels.delivery import record_dispatch
+from central.channels.delivery import channel_badges, record_dispatch
 from central.channels.delivery import retry_due as _retry_due
 from central.channels.freescout import FreeScoutChannel
 from central.runtime import load_settings
@@ -172,6 +172,62 @@ def _find_open_alert(db: Session, dedupe_key: str) -> Optional[m.Alert]:
     )
 
 
+def _revive_flapping_alert(
+    db: Session,
+    dedupe_key: str,
+    detail: str,
+    now: datetime,
+    runtime: Optional[dict],
+) -> Optional[m.Alert]:
+    """Re-open a same-condition alert that resolved inside the flap window.
+
+    A condition sitting on its threshold clears and re-fires repeatedly. Each
+    re-fire used to create a brand-new alert and dispatch a brand-new
+    notification: a cartridge oscillating 9<->11% around a threshold of 10
+    produced three fresh alerts in six cycles -- 720 notifications/day at a 60s
+    poll interval, for one cartridge.
+
+    Inside ``alerts.renotify_cooldown_min`` this is treated as the SAME incident:
+    the original alert is re-opened with its flap count bumped and **no
+    notification is sent**. Deliberately quiet -- the operator was already told
+    about this condition minutes ago, and telling them again per oscillation is
+    the bug. If it is genuinely still broken, ``escalate_alerts`` re-notifies on
+    its own schedule; ``last_notified_at`` is left untouched so that clock keeps
+    running from the real notification rather than being reset by every flap.
+
+    Returns the revived alert, or None when nothing is eligible (no recent
+    resolve, or the cooldown is disabled).
+    """
+    minutes = int((runtime or {}).get("alerts.renotify_cooldown_min", 0) or 0)
+    if minutes <= 0:
+        return None
+    cutoff = now - timedelta(minutes=minutes)
+    alert = db.scalar(
+        select(m.Alert)
+        .where(
+            m.Alert.dedupe_key == dedupe_key,
+            m.Alert.state == m.AlertState.resolved,
+            m.Alert.resolved_at.is_not(None),
+        )
+        .order_by(m.Alert.resolved_at.desc())
+        .limit(1)
+    )
+    if alert is None:
+        return None
+    resolved_at = _aware(alert.resolved_at)
+    if resolved_at is None or resolved_at < cutoff:
+        return None
+    alert.state = m.AlertState.open
+    alert.resolved_at = None
+    alert.flap_count = (alert.flap_count or 0) + 1
+    alert.detail = "%s (re-opened; flapped %d× within %dm)" % (
+        detail,
+        alert.flap_count,
+        minutes,
+    )
+    return alert
+
+
 def _notify_alert(
     db: Session,
     alert: m.Alert,
@@ -213,10 +269,12 @@ def _notify_alert(
     results = record_dispatch(
         db, alert.id, note, channels, runtime=runtime or load_settings(db)
     )
-    alert.notified_channels = [
-        {"channel": name, "ok": res.ok, "detail": res.detail} for name, res in results
-    ]
-    alert.external_ref = _external_ref_from(results, channels)
+    alert.notified_channels = channel_badges(results)
+    # Never clear a ref we already hold: escalation re-dispatches through this
+    # same path, and FreeScout only returns a conversation id when it CREATES
+    # one. An unconditional assign nulled the ref on every escalation, so the
+    # closed-loop resolver lost the ticket and the next round opened a duplicate.
+    alert.external_ref = _external_ref_from(results, channels) or alert.external_ref
     alert.last_notified_at = now
 
 
@@ -232,11 +290,24 @@ def _open_alert(
     candidates: Optional[list] = None,
     now: Optional[datetime] = None,
     runtime: Optional[dict] = None,
+    stats: Optional[dict] = None,
 ) -> Optional[m.Alert]:
-    """Open an alert if one isn't already live for this dedupe_key. Returns it (or None)."""
+    """Open an alert if one isn't already live for this dedupe_key. Returns it (or None).
+
+    Returns None both when an alert is already live (dedupe) and when a recent
+    resolve was revived as a flap (see ``_revive_flapping_alert``) -- in neither
+    case did a NEW alert open, so callers must not count it as one. ``stats``, if
+    given, has its ``flapped`` key incremented so the cycle summary can report
+    damping that happened instead of a notification.
+    """
     if _find_open_alert(db, dedupe_key) is not None:
         return None
     now = now or _now()
+    revived = _revive_flapping_alert(db, dedupe_key, detail, now, runtime)
+    if revived is not None:
+        if stats is not None:
+            stats["flapped"] = stats.get("flapped", 0) + 1
+        return None
     alert = m.Alert(
         rule_id=rule.id,
         printer_id=printer.id if printer else None,
@@ -325,6 +396,7 @@ def evaluate_alerts(db: Session, now: Optional[datetime] = None) -> dict:
     runtime = load_settings(db)
     candidates = routable_channels(db, runtime)
     opened = 0
+    stats: dict = {"flapped": 0}
     active_keys: set[str] = set()
 
     for rule in rules:
@@ -341,7 +413,8 @@ def evaluate_alerts(db: Session, now: Optional[datetime] = None) -> dict:
                         f"(last: {last.isoformat() if last else 'never'})."
                     )
                     if _open_alert(db, rule, key, title, detail, agent=agent,
-                                   candidates=candidates, now=now, runtime=runtime):
+                                   candidates=candidates, now=now, runtime=runtime,
+                                   stats=stats):
                         opened += 1
             continue
 
@@ -370,37 +443,92 @@ def evaluate_alerts(db: Session, now: Optional[datetime] = None) -> dict:
                         f"(last seen: {last.isoformat()})."
                     )
                     if _open_alert(db, rule, key, title, detail, printer=printer,
-                                   candidates=candidates, now=now, runtime=runtime):
+                                   candidates=candidates, now=now, runtime=runtime,
+                                   stats=stats):
                         opened += 1
 
             elif rule.condition_type == m.AlertConditionType.supply_below:
                 threshold = rule.threshold or 0
+                # Asymmetric thresholds (a deadband): open at <= threshold but
+                # hold a live alert until the level climbs the margin ABOVE it.
+                # Without this, a cartridge reading 9/11/9/11 around a threshold
+                # of 10 resolved and re-opened every cycle, each re-open being a
+                # fresh alert and a fresh notification.
+                deadband = float(runtime.get("alerts.supply_deadband_pct", 0) or 0)
                 for supply in printer.supplies:
-                    if supply.level_pct is not None and supply.level_pct <= threshold:
-                        key = f"rule:{rule.id}:printer:{printer.id}:supply:{supply.id}"
+                    if supply.level_pct is None:
+                        continue
+                    key = f"rule:{rule.id}:printer:{printer.id}:supply:{supply.id}"
+                    label = supply.color or supply.type.value
+                    if supply.level_pct <= threshold:
                         active_keys.add(key)
-                        label = supply.color or supply.type.value
                         title = f"Low {label} on {_printer_label(printer)}"
                         detail = f"{label} at {supply.level_pct:.0f}% (threshold {threshold:.0f}%)."
                         if _open_alert(db, rule, key, title, detail, printer=printer,
-                                       candidates=candidates, now=now, runtime=runtime):
+                                       candidates=candidates, now=now, runtime=runtime,
+                                       stats=stats):
                             opened += 1
+                    elif (
+                        deadband > 0
+                        and supply.level_pct < threshold + deadband
+                        and _find_open_alert(db, key) is not None
+                    ):
+                        # In the deadband with an alert still live: keep the key
+                        # active so the resolve pass leaves it alone. Only a
+                        # genuine recovery past threshold+margin resolves it.
+                        active_keys.add(key)
 
             elif rule.condition_type == m.AlertConditionType.error_severity:
                 min_rank = _SEVERITY_RANK.get(rule.severity, 1)
-                unresolved = [
-                    e
-                    for e in printer.events
-                    if e.resolved_at is None and _SEVERITY_RANK.get(e.severity, 0) >= min_rank
+                # Queried, not read off ``printer.events``: sessions are
+                # configured expire_on_commit=False, so that relationship caches
+                # whatever it first loaded. The worker happens to build a fresh
+                # session per cycle, which is the only reason the old code saw
+                # new events at all -- correctness must not rest on that. The
+                # query also filters unresolved + severity in SQL instead of
+                # loading every event ever recorded for the printer.
+                qualifying = [
+                    sev for sev, rank in _SEVERITY_RANK.items() if rank >= min_rank
                 ]
-                if unresolved:
-                    latest = max(unresolved, key=lambda e: e.ts)
-                    key = f"rule:{rule.id}:printer:{printer.id}:error:{latest.code or 'event'}"
+                unresolved = list(db.scalars(
+                    select(m.PrinterEvent).where(
+                        m.PrinterEvent.printer_id == printer.id,
+                        m.PrinterEvent.resolved_at.is_(None),
+                        m.PrinterEvent.severity.in_(qualifying),
+                    )
+                ))
+                # One alert per distinct error CODE, not just the newest event.
+                # Keying only the newest meant a fresh DOOR_OPEN stopped
+                # refreshing the PAPER_JAM key, so the resolve pass closed the
+                # jam alert while the printer was still jammed -- the inbox said
+                # fixed, the device disagreed.
+                by_code: dict = {}
+                for event in unresolved:
+                    code = event.code or "event"
+                    prev = by_code.get(code)
+                    if prev is None or event.ts > prev.ts:
+                        by_code[code] = event
+                # Newest first, then capped: a device spewing dozens of distinct
+                # codes must not open dozens of alerts. The cap is disclosed in
+                # the detail of the ones that DO open rather than dropped
+                # silently, so nobody reads a capped list as the whole story.
+                ordered = sorted(by_code.values(), key=lambda e: e.ts, reverse=True)
+                cap = max(1, int(runtime.get("alerts.max_error_alerts_per_printer", 5) or 5))
+                hidden = max(0, len(ordered) - cap)
+                for event in ordered[:cap]:
+                    code = event.code or "event"
+                    key = f"rule:{rule.id}:printer:{printer.id}:error:{code}"
                     active_keys.add(key)
                     title = f"Error on {_printer_label(printer)}"
-                    detail = f"{latest.severity.value}: {latest.message}"
+                    detail = f"{event.severity.value}: {event.message}"
+                    if hidden:
+                        detail += (
+                            f" (+{hidden} more distinct error code(s) on this "
+                            f"printer above the {cap}-alert cap)"
+                        )
                     if _open_alert(db, rule, key, title, detail, printer=printer,
-                                   candidates=candidates, now=now, runtime=runtime):
+                                   candidates=candidates, now=now, runtime=runtime,
+                                   stats=stats):
                         opened += 1
 
     # Pass the unwrapped candidate channels so a resolved alert's FreeScout
@@ -416,6 +544,9 @@ def evaluate_alerts(db: Session, now: Optional[datetime] = None) -> dict:
         "alerts_opened": opened,
         "alerts_resolved": resolved,
         "alerts_escalated": escalated,
+        # Conditions that re-fired inside the flap cooldown and were folded back
+        # into their original alert instead of raising (and notifying) a new one.
+        "alerts_flapped": stats["flapped"],
     }
 
 
@@ -842,7 +973,12 @@ def _resolve_stale_forecasts(
     resolved = 0
     for alert in db.scalars(
         select(m.Alert).where(
-            m.Alert.state == m.AlertState.open,
+            # _LIVE_STATES, not open: an ACKNOWLEDGED reorder alert must resolve
+            # when its supply recovers too. Filtering on open alone left it
+            # acknowledged forever, and because dedupe suppresses while an alert
+            # is live, that one stuck row silently blocked every future reorder
+            # alert for the same cartridge.
+            m.Alert.state.in_(_LIVE_STATES),
             m.Alert.type == m.AlertConditionType.predicted_depletion,
         )
     ):

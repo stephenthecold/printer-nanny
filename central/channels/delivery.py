@@ -135,11 +135,20 @@ def _apply_result(
     max_attempts: int,
     base_seconds: int,
 ) -> None:
-    """Fold one send outcome into a delivery row (status, attempts, backoff)."""
+    """Fold one send outcome into a delivery row (status, attempts, backoff).
+
+    ``ok`` without ``sent`` is recorded as ``skipped``, never ``delivered``: a
+    severity gate or an unconfigured dry-run transmits nothing, and marking it
+    delivered made the durable log (and the alerts page) claim a send that never
+    happened. ``skipped`` is terminal -- ``_due_deliveries`` only looks at
+    pending/failed -- so it is never retried and never double-counted.
+    """
     delivery.attempts += 1
     if result.ok:
-        delivery.status = m.DeliveryStatus.delivered
-        delivery.last_error = None
+        delivery.status = (
+            m.DeliveryStatus.delivered if result.sent else m.DeliveryStatus.skipped
+        )
+        delivery.last_error = None if result.sent else (result.detail or "")[:2000]
         delivery.next_attempt_at = None
         return
     delivery.last_error = (result.detail or "")[:2000]
@@ -177,7 +186,10 @@ def _record_owed(
         target=("alert:%d" % alert_id) if alert_id is not None else "",
         detail="%s: %s" % (payload.get("title") or "notification", UNROUTED_DETAIL),
     )
-    return (UNROUTED_CHANNEL_LABEL, ChannelResult(ok=False, detail=UNROUTED_DETAIL))
+    return (
+        UNROUTED_CHANNEL_LABEL,
+        ChannelResult(ok=False, detail=UNROUTED_DETAIL, sent=False),
+    )
 
 
 def record_dispatch(
@@ -229,8 +241,9 @@ def _due_deliveries(db: Session, now: datetime) -> List[m.NotificationDelivery]:
     """Non-terminal deliveries that are due for a (re)send this cycle.
 
     A row is due when its status is pending/failed and ``next_attempt_at`` is
-    NULL (never scheduled) or in the past. delivered/dead rows are terminal and
-    excluded, so the job never double-sends a success or revives a dead-letter.
+    NULL (never scheduled) or in the past. delivered/dead/skipped rows are
+    terminal and excluded, so the job never double-sends a success, revives a
+    dead-letter, or retries a deterministic severity skip.
     """
     stmt = select(m.NotificationDelivery).where(
         m.NotificationDelivery.status.in_(
@@ -286,6 +299,22 @@ def _delivered_after(db: Session, alert_id: Optional[int], after_id: int) -> Set
     ))
 
 
+def channel_badges(results: List[Tuple[str, ChannelResult]]) -> List[dict]:
+    """Render dispatch results into ``Alert.notified_channels`` badge dicts.
+
+    Shared by the initial dispatch (worker.jobs._notify_alert) and the owed
+    fan-out so the two can't drift. ``sent`` is carried alongside ``ok`` because
+    the template needs three states, not two: delivered, not-sent (a severity
+    gate or unconfigured channel -- ok, but nobody was told), and failed. Older
+    rows predate the key and read as ``sent`` missing, which the template treats
+    as sent so historical alerts keep rendering unchanged.
+    """
+    return [
+        {"channel": name, "ok": res.ok, "sent": res.sent, "detail": res.detail}
+        for name, res in results
+    ]
+
+
 def _restamp_alert(
     db: Session,
     alert_id: Optional[int],
@@ -305,9 +334,7 @@ def _restamp_alert(
     alert = db.get(m.Alert, alert_id)
     if alert is None:
         return
-    alert.notified_channels = [
-        {"channel": name, "ok": res.ok, "detail": res.detail} for name, res in results
-    ]
+    alert.notified_channels = channel_badges(results)
     alert.last_notified_at = now
 
 
@@ -333,7 +360,7 @@ def _fan_out_owed(
     caller) or when ``UNROUTED_GIVE_UP`` has elapsed, so nothing sits pending
     forever.
     """
-    out = {"retried": 0, "delivered": 0, "dead": 0, "owed": 0}
+    out = {"retried": 0, "delivered": 0, "dead": 0, "owed": 0, "not_sent": 0}
     if not channels:
         age = now - (_aware(delivery.created_at) or now)
         if age < UNROUTED_GIVE_UP:
@@ -384,6 +411,31 @@ def _fan_out_owed(
             out["delivered"] += 1
         elif row.status == m.DeliveryStatus.dead:
             out["dead"] += 1
+        elif row.status == m.DeliveryStatus.skipped:
+            out["not_sent"] += 1
+    # An enabled-but-unconfigured channel is not a destination: if EVERY target
+    # merely skipped, this notification still has nowhere to go, so the owed row
+    # goes back to owed rather than terminating. Terminating here would undo the
+    # recovery property owed rows exist for -- pasting a webhook URL later must
+    # still deliver the backlog, exactly as enabling a channel does. No attempt
+    # is burned, and the row still terminates on alert-resolve or UNROUTED_GIVE_UP.
+    #
+    # Guarded on *every* result being a skip, not on "nothing delivered": a real
+    # failure (ok=False) owns a retryable failed row with backoff, and reverting
+    # that to owed would throw away its attempt count and retry schedule.
+    if results and all(r.ok and not r.sent for _, r in results):
+        delivery.channel_key = UNROUTED_CHANNEL_KEY
+        delivery.status = m.DeliveryStatus.pending
+        delivery.attempts = 0
+        delivery.last_error = UNROUTED_DETAIL
+        delivery.next_attempt_at = None
+        # Siblings created above would duplicate the owed row; drop them.
+        for sibling in rows[1:]:
+            db.delete(sibling)
+        out["retried"] = 0
+        out["not_sent"] = 0
+        out["owed"] = 1
+        return out
     _restamp_alert(db, delivery.alert_id, results, now)
     return out
 
@@ -409,7 +461,7 @@ def retry_due(db: Session, runtime: dict, now: Optional[datetime] = None) -> dic
     base_seconds = int(runtime.get("notifications.retry_base_seconds", 60) or 60)
 
     channels = {ch.name: ch for ch in active_channels(runtime)}
-    retried = delivered = dead = skipped = owed = 0
+    retried = delivered = dead = skipped = owed = not_sent = 0
     for delivery in _due_deliveries(db, now):
         # Resolved alerts no longer need notifying; close the loop quietly so a
         # transient outage that has since cleared doesn't page on stale news.
@@ -426,6 +478,7 @@ def retry_due(db: Session, runtime: dict, now: Optional[datetime] = None) -> dic
             delivered += out["delivered"]
             dead += out["dead"]
             owed += out["owed"]
+            not_sent += out["not_sent"]
             continue
         channel = channels.get(delivery.channel_key)
         if channel is None:
@@ -441,12 +494,21 @@ def retry_due(db: Session, runtime: dict, now: Optional[datetime] = None) -> dic
             delivered += 1
         elif delivery.status == m.DeliveryStatus.dead:
             dead += 1
+        elif delivery.status == m.DeliveryStatus.skipped:
+            not_sent += 1
     db.commit()
     return {
         "deliveries_retried": retried,
         "deliveries_delivered": delivered,
         "deliveries_dead": dead,
+        # Channel is no longer active, so the row was left alone for a later
+        # cycle. Distinct from deliveries_not_sent, which DID run and
+        # terminated without transmitting.
         "deliveries_skipped": skipped,
+        # Terminated as DeliveryStatus.skipped: the channel reported success but
+        # transmitted nothing (severity gate / unconfigured dry-run). Counted
+        # apart from delivered so a green cycle can't hide a silent one.
+        "deliveries_not_sent": not_sent,
         # Notifications still owed with nowhere to send them -- non-zero means an
         # operator needs to enable a channel (surfaced on the Alerts page).
         "deliveries_owed": owed,
