@@ -263,6 +263,14 @@ SPECS: List[Spec] = [
          "Creates a client-wide maintenance schedule at this interval for printers "
          "as they are approved. 0 (the default) creates none — most MSPs schedule "
          "maintenance per model rather than per customer."),
+    # Directory sync cadence. The credentials themselves are per-client and
+    # live on directory_connections, not here -- a global setting cannot hold
+    # one tenant's client secret per customer.
+    Spec("directory.sync_enabled", "bool", "Directory sync", "Run directory sync", True,
+         "Master switch. Off leaves every configured connection untouched."),
+    Spec("directory.sync_interval_min", "int", "Directory sync", "Sync every (minutes)", 60,
+         "How often the worker refreshes each enabled connection. Directories change "
+         "slowly; a short interval mostly buys API throttling."),
 ]
 
 SPEC_BY_KEY: Dict[str, Spec] = {s.key: s for s in SPECS}
@@ -279,7 +287,8 @@ SETTINGS_GROUPS: "Dict[str, tuple]" = {
     ),
     "alerts": ("Alerts & Reports", ["Alerts", "Reports", "ESG / Sustainability"]),
     "polling": ("Polling & SNMP", ["Polling", "SNMP defaults"]),
-    "auth": ("Authentication", ["Single sign-on (OIDC)", "SCIM provisioning"]),
+    "auth": ("Authentication",
+             ["Single sign-on (OIDC)", "SCIM provisioning", "Directory sync"]),
     "agents": ("Agents", ["Agent install", "Onboarding defaults"]),
 }
 DEFAULT_SETTINGS_GROUP = "branding"

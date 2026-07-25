@@ -1246,3 +1246,60 @@ class PrinterAssignment(Base):
             "printer_id", "group_id", name="uq_printer_assignments_printer_group"
         ),
     )
+
+
+class DirectoryConnection(Base):
+    """One configured directory sync for one client.
+
+    Per-client, not global: an MSP's customers each have their own tenant, and a
+    single global connection would either serve one customer or need a mapping
+    table that is this row by another name.
+
+    Secrets live in ``secret`` (Fernet-encrypted via central.secrets), never in
+    ``config``. Splitting them is not decoration -- ``config`` is rendered in the
+    UI, echoed in audit detail and dumped in diagnostics, and the only reliable
+    way to keep a client secret out of all three is for it to live somewhere
+    those paths never read. One secret column covers every provider: Entra's
+    client secret, Google's service-account JSON, AD's bind password.
+    """
+
+    __tablename__ = "directory_connections"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    client_id: Mapped[int] = mapped_column(
+        ForeignKey("clients.id", ondelete="CASCADE"), index=True
+    )
+    # Reuses DirectorySource so a synced end_user's provenance and its
+    # connection's provider are the same vocabulary. `manual` is excluded by
+    # CHECK: it is a real provenance for a person, but not a thing you can
+    # connect to.
+    provider: Mapped[DirectorySource] = mapped_column(_enum(DirectorySource))
+    enabled: Mapped[bool] = mapped_column(Boolean, default=True)
+
+    # Non-secret provider settings (tenant id, domain, base DN, server, filters).
+    config: Mapped[Optional[dict]] = mapped_column(JSON, default=None)
+    # The single credential, encrypted at rest. Nullable so a connection can be
+    # created and its secret supplied separately.
+    secret: Mapped[Optional[str]] = mapped_column(Text, default=None)
+
+    # Last-run bookkeeping. `last_error` holds a sanitised message: provider
+    # errors quote request URLs and occasionally echo credentials back, and this
+    # column is rendered on the settings page.
+    last_sync_at: Mapped[Optional[datetime]] = mapped_column(
+        DateTime(timezone=True), default=None
+    )
+    last_ok: Mapped[Optional[bool]] = mapped_column(Boolean, default=None)
+    last_error: Mapped[Optional[str]] = mapped_column(String(500), default=None)
+    last_result: Mapped[Optional[dict]] = mapped_column(JSON, default=None)
+
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+
+    client: Mapped[Client] = relationship()
+
+    __table_args__ = (
+        # One connection per provider per client. Two Entra connections for the
+        # same customer would race each other, each deactivating the users the
+        # other just created.
+        UniqueConstraint("client_id", "provider", name="uq_directory_conn_client_provider"),
+        CheckConstraint("provider <> 'manual'", name="ck_directory_conn_not_manual"),
+    )

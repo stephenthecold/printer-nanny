@@ -1,6 +1,6 @@
 [project]
 name = "printer-nanny"
-version = "0.15.0"
+version = "0.16.0"
 description = "Self-hosted fleet management for printers across MSP clients/sites"
 readme = "README.md"
 license = "Apache-2.0"
@@ -33,6 +33,10 @@ dependencies = [
 
 [project.optional-dependencies]
 postgres = ["psycopg[binary]>=3.1"]
+# On-prem AD directory sync. Optional because Entra/Google-only deployments
+# should not carry an LDAP stack; central.directory.ad raises a clear
+# DirectoryError naming this extra when it is missing.
+directory-ad = ["ldap3>=2.9"]
 # The site agent. `tomli` is only needed on Python < 3.11 (stdlib tomllib after).
 agent = ["pysnmp>=6.2", "tomli>=2.0; python_version < '3.11'"]
 # Hands-off auto-discovery via mDNS / Bonjour, layered on top of the SNMP

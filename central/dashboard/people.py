@@ -26,6 +26,9 @@ from sqlalchemy.orm import Session
 from central import models as m
 from central import services
 from central.audit import record
+from central.directory import registry
+from central.directory.sync import run_connection
+from central.secrets import encrypt_value
 from central.db import get_db
 from central.dashboard.manage import (
     _flash,
@@ -80,7 +83,7 @@ def people_home(
     if client is None:
         return _tpl(request, "people.html", db, clients=[], client=None,
                     people=[], groups=[], printers=[], resolved={},
-                    memberships={}, flash=_pop_flash(request))
+                    memberships={}, providers=[], flash=_pop_flash(request))
 
     people = list(db.scalars(
         select(m.EndUser)
@@ -120,11 +123,36 @@ def people_home(
         for g in groups
     }
 
+    connections = {
+        c.provider: c
+        for c in db.scalars(
+            select(m.DirectoryConnection).where(
+                m.DirectoryConnection.client_id == client.id
+            )
+        )
+    }
+    # Provider metadata drives the form, so adding a provider to the registry
+    # renders its fields without touching this template.
+    providers = [
+        {
+            "key": src.value,
+            "label": {"entra": "Microsoft Entra ID",
+                      "google": "Google Workspace",
+                      "ad": "On-prem Active Directory"}[src.value],
+            "fields": registry.CONFIG_FIELDS[src],
+            "secret_label": registry.SECRET_LABEL[src],
+            "conn": connections.get(src),
+        }
+        for src in (m.DirectorySource.entra, m.DirectorySource.google,
+                    m.DirectorySource.ad)
+    ]
+
     return _tpl(
         request, "people.html", db,
         clients=clients, client=client, people=people, groups=groups,
         printers=printers, resolved=resolved, memberships=memberships,
-        group_assignments=group_assignments, flash=_pop_flash(request),
+        group_assignments=group_assignments, providers=providers,
+        flash=_pop_flash(request),
     )
 
 
@@ -379,3 +407,168 @@ def group_members(
     db.commit()
     _flash(request, f"{group.name}: {added} added, {removed} removed.")
     return _redirect(f"/manage/people?client_id={group.client_id}")
+
+
+# --------------------------------------------------------------------------- #
+# Directory connections
+# --------------------------------------------------------------------------- #
+@router.post("/people/directory/save")
+def directory_save(
+    request: Request,
+    client_id: int = Form(...),
+    provider: str = Form(...),
+    secret: str = Form(""),
+    enabled: str = Form(""),
+    # Provider settings are declared explicitly and prefixed `cfg_`. The prefix
+    # is not cosmetic: Entra's own config field is called `client_id`, which
+    # would otherwise collide with this form's `client_id` (the Printer Nanny
+    # client) and silently write a tenant's app id into the wrong parameter.
+    cfg_tenant_id: str = Form(""),
+    cfg_client_id: str = Form(""),
+    cfg_admin_email: str = Form(""),
+    cfg_customer_domain: str = Form(""),
+    cfg_server: str = Form(""),
+    cfg_base_dn: str = Form(""),
+    cfg_bind_dn: str = Form(""),
+    cfg_user_filter: str = Form(""),
+    db: Session = Depends(get_db),
+):
+    """Create or update one client's connection to one directory.
+
+    The secret is **write-only**: it is encrypted on the way in and never read
+    back into the form. An empty secret field therefore means "leave the stored
+    one alone", not "clear it" -- otherwise every edit of an unrelated field
+    (a corrected base DN, a filter tweak) would silently wipe the credential
+    and the next sync would fail for a reason nobody would connect to the edit.
+    """
+    user = _manager(request, db)
+    if user is None:
+        return _redirect("/login")
+    client = db.get(m.Client, client_id)
+    if client is None:
+        _flash(request, "Client not found.")
+        return _redirect("/manage/people")
+    back = f"/manage/people?client_id={client.id}"
+
+    try:
+        source = m.DirectorySource(provider)
+    except ValueError:
+        _flash(request, "Unknown directory provider.")
+        return _redirect(back)
+    if source is m.DirectorySource.manual:
+        _flash(request, "'manual' is a provenance, not a directory you connect to.")
+        return _redirect(back)
+
+    submitted = {
+        "tenant_id": cfg_tenant_id, "client_id": cfg_client_id,
+        "admin_email": cfg_admin_email, "customer_domain": cfg_customer_domain,
+        "server": cfg_server, "base_dn": cfg_base_dn,
+        "bind_dn": cfg_bind_dn, "user_filter": cfg_user_filter,
+    }
+    # Only the selected provider's own fields are stored, so switching provider
+    # cannot leave another one's settings loitering in the config blob.
+    config = {
+        field: (submitted.get(field) or "").strip()
+        for field, _label, _help in registry.CONFIG_FIELDS.get(source, [])
+    }
+
+    conn = db.scalar(
+        select(m.DirectoryConnection).where(
+            m.DirectoryConnection.client_id == client.id,
+            m.DirectoryConnection.provider == source,
+        )
+    )
+    created = conn is None
+    if conn is None:
+        conn = m.DirectoryConnection(client_id=client.id, provider=source)
+        db.add(conn)
+
+    conn.config = config
+    conn.enabled = bool(enabled.strip())
+    secret = secret.strip()
+    if secret:
+        conn.secret = encrypt_value(secret)
+    db.flush()
+
+    # Key names only, never values -- the audit log is read by more people than
+    # the settings page is.
+    record(db, request, user,
+           "directory.create" if created else "directory.update",
+           target=f"directory:{conn.id} (client:{client.id}, {source.value})",
+           detail=f"config keys: {','.join(sorted(k for k in config if config[k]))}"
+                  f"{'; secret set' if secret else ''}")
+    db.commit()
+    _flash(request, f"Saved {source.value} connection.")
+    return _redirect(back)
+
+
+@router.post("/people/directory/{conn_id}/sync")
+def directory_sync_now(
+    conn_id: int,
+    request: Request,
+    db: Session = Depends(get_db),
+):
+    """Run one connection immediately.
+
+    Synchronous on purpose: an operator who just pasted a client secret wants to
+    know now whether it works, and a background job that reports "queued" is a
+    worse answer than a slow one.
+    """
+    user = _manager(request, db)
+    if user is None:
+        return _redirect("/login")
+    conn = db.get(m.DirectoryConnection, conn_id)
+    if conn is None:
+        _flash(request, "Connection not found.")
+        return _redirect("/manage/people")
+
+    result = run_connection(db, conn)
+    record(db, request, user, "directory.sync",
+           target=f"directory:{conn.id} (client:{conn.client_id}, "
+                  f"{conn.provider.value})",
+           detail=str(result)[:400])
+    db.commit()
+
+    if result.get("error"):
+        _flash(request, f"Sync failed: {result['error']}")
+    else:
+        _flash(request, (
+            f"Synced: {result.get('created', 0)} added, "
+            f"{result.get('updated', 0)} updated, "
+            f"{result.get('deactivated', 0)} deactivated"
+            + (f", {result['conflicts']} conflict(s)" if result.get("conflicts") else "")
+            + ("" if result.get("complete", True)
+               else " — partial fetch, no deactivations applied")
+        ))
+    return _redirect(f"/manage/people?client_id={conn.client_id}")
+
+
+@router.post("/people/directory/{conn_id}/delete")
+def directory_delete(
+    conn_id: int,
+    request: Request,
+    db: Session = Depends(get_db),
+):
+    """Remove a connection. The people it synced are left exactly as they are.
+
+    Deleting the connection is an administrative act about credentials; it is
+    not a statement that the customer's staff have left. Cascading to the
+    end_users would deprovision a whole company because somebody rotated a
+    secret badly and removed the connection to start over.
+    """
+    user = _manager(request, db)
+    if user is None:
+        return _redirect("/login")
+    conn = db.get(m.DirectoryConnection, conn_id)
+    if conn is None:
+        _flash(request, "Connection not found.")
+        return _redirect("/manage/people")
+
+    client_id, provider = conn.client_id, conn.provider.value
+    record(db, request, user, "directory.delete",
+           target=f"directory:{conn.id} (client:{client_id}, {provider})",
+           detail="synced people left in place")
+    db.delete(conn)
+    db.commit()
+    _flash(request, f"Removed the {provider} connection. Synced people kept.")
+    return _redirect(f"/manage/people?client_id={client_id}")
