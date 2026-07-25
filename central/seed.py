@@ -8,6 +8,7 @@ import random
 from datetime import datetime, timedelta, timezone
 
 from central import models as m
+from central import services
 from central.db import Base, SessionLocal, engine
 from central.security import generate_api_key, hash_api_key, hash_password
 
@@ -325,6 +326,43 @@ def seed() -> None:
     # Alert rules: low supply <10%, any error, agent offline >30 min.
     # Channels come from Settings (active_channels), so no per-rule channel_ids.
     db.add_all(_default_alert_rules())
+    db.flush()
+
+    # --- Staff + printer assignments (print management) --------------------- #
+    # Enough shape to exercise the resolver on real data: one person with a
+    # direct assignment, one who inherits from a group, and one deactivated
+    # leaver whose rows survive while their access does not.
+    staff_client = db.query(m.Client).order_by(m.Client.id).first()
+    if staff_client is not None:
+        approved = (
+            db.query(m.Printer)
+            .filter_by(client_id=staff_client.id,
+                       discovery_state=m.DiscoveryState.approved)
+            .order_by(m.Printer.id)
+            .all()
+        )
+        if approved:
+            people = [
+                m.EndUser(client_id=staff_client.id, display_name="Dana Reyes",
+                          email="dana@example.test"),
+                m.EndUser(client_id=staff_client.id, display_name="Sam Okafor",
+                          email="sam@example.test"),
+                m.EndUser(client_id=staff_client.id, display_name="Pat Lang (left)",
+                          email="pat@example.test", active=False),
+            ]
+            db.add_all(people)
+            group = m.EndUserGroup(client_id=staff_client.id, name="Accounting")
+            db.add(group)
+            db.flush()
+
+            services.assign_printer(db, printer=approved[0], end_user=people[0],
+                                    is_default=True)
+            services.assign_printer(db, printer=approved[-1], group=group)
+            services.sync_group_members(db, group=group,
+                                        end_users=[people[0], people[1]])
+            # The leaver keeps a row; effective_printers_for resolves it to
+            # nothing while they are inactive.
+            services.assign_printer(db, printer=approved[0], end_user=people[2])
 
     db.commit()
     counts = {
@@ -333,6 +371,8 @@ def seed() -> None:
         "printers": db.query(m.Printer).count(),
         "readings": db.query(m.Reading).count(),
         "pending": db.query(m.Printer).filter_by(discovery_state=m.DiscoveryState.pending).count(),
+        "people": db.query(m.EndUser).count(),
+        "assignments": db.query(m.PrinterAssignment).count(),
     }
     db.close()
     print(f"Seeded: {counts}")
