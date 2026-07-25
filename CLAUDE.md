@@ -116,6 +116,10 @@ enforced; none of them is optional.
     `ServiceInstall` (no custom action), Server 2016→2025. Surfaced as a
     "Download Windows MSI" button on the Agents page.
   - `auth_oidc.py`, `auth_oauth_smtp.py` — pluggable SSO + OAuth SMTP.
+  - `directory/` — **directory sync**: `base.py` (provider contract +
+    `DirectorySnapshot`), `entra.py` / `google.py` / `ad.py`, `registry.py`
+    (builds a provider from a connection row; the one place a secret is
+    decrypted), `sync.py` (applies a snapshot).
   - `snmp_parse.py` — brand-agnostic SNMP supply/level parsing (shared w/ agent).
   - `snmp.md` — Printer-MIB OID reference.
 - `agent/` — standalone `printer-nanny-agent` package.
@@ -256,6 +260,33 @@ enforced; none of them is optional.
   `client_id` onto the row would let the DB carry tenancy, but it would drift
   the moment a printer moves between clients — a checked invariant traded for a
   silently stale one.
+- **Directory sync providers return a snapshot; they never write.** Three
+  sources (Entra, Google, on-prem AD) with three wire protocols and one job:
+  hand back `DirectorySnapshot(users, groups, complete)`. Every sync rule then
+  lives once in `directory/sync.py` instead of three times, and the whole engine
+  is testable with a hand-built snapshot — which matters because no CI runner has
+  an Entra tenant. The rules that must not regress:
+  - **Match on `directory_id`, never email.** Emails change; object ids don't.
+    Email-matching turns a married employee into a leaver *plus* a stranger and
+    strands their assignments on the dead row.
+  - **`manual` rows are untouchable.** Operators hand-create contractors and
+    shared accounts; a sync that adopts or deactivates them makes the manual
+    path untrustworthy. An email collision is **reported, not adopted** — a bad
+    match (shared mailbox, alias) merges two people irreversibly, skipping is
+    recoverable.
+  - **Deactivate, never delete**, and `complete=False` deactivates *nobody* —
+    absence means "gone" only if the fetch finished, else a paging failure reads
+    as mass resignation. Deleted groups are **emptied, not dropped**: they may
+    carry operator-made printer assignments.
+  - Secrets live in `directory_connections.secret` (Fernet), never in `config` —
+    `config` is rendered in the UI, echoed in audit detail and dumped in
+    diagnostics; the only way to keep a credential out of all three is for it to
+    live where those paths never read. Provider errors store a **sanitised**
+    string (transport errors quote URLs and echo credentials).
+  - **On-prem AD queries the DC from central**, which needs routable reachability
+    (single-tenant, bridged-at-HQ, or VPN). A DC behind a customer firewall needs
+    the query relayed through the site agent — not built; the provider interface
+    is the seam, since a relayed variant returns the same snapshot.
 - **Effective printers resolve deterministically.** `effective_printers_for`
   merges direct and group-inherited assignments; **direct beats group** (somebody
   singled this person out — more specific than "they're in Accounting"), and
@@ -299,9 +330,12 @@ Production-ready feature surface (as of PR #46):
 
 **Print management** (in progress — this is the Printix-shaped half): end users,
 groups, and per-user / per-group printer assignment with a deterministic
-resolver, at `/manage/people`. Directory sync (Entra / Google / on-prem AD) and
-the Windows workstation client are **not built yet** — assignments are real data
-that nothing acts on until the client lands.
+resolver, at `/manage/people`; **directory sync** from Entra ID, Google
+Workspace and on-prem AD, per client, credentials encrypted at rest, worker-
+scheduled (`directory.sync_interval_min`) with a synchronous "Sync now".
+The Windows workstation client is **not built yet** — assignments are real data
+that nothing acts on until it lands. The providers are unit-tested against
+mocked transports, **not** against real tenants.
 
 **Core**: central server, multi-tenant model, push-based agents, brand-agnostic
 SNMP, alerting with dedupe + auto-resolve + flap damping, quiet hours + maintenance

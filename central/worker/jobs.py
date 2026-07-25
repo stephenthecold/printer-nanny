@@ -1094,3 +1094,51 @@ def _resolve_stale_forecasts(
             alert.resolved_at = now
             resolved += 1
     return resolved
+
+
+def sync_directories(db: Session, now: Optional[datetime] = None) -> dict:
+    """Refresh each enabled directory connection that is due.
+
+    Interval-gated off each connection's own ``last_sync_at`` rather than a
+    global marker, so adding a customer does not reset everybody else's clock
+    and one slow tenant does not starve the rest.
+
+    A failing connection is recorded on its own row and skipped; it never
+    aborts the loop. A directory being unreachable is a normal Tuesday, and it
+    must not stop the other customers syncing -- still less take down a worker
+    cycle that also has alerts to deliver.
+    """
+    from central.directory.sync import run_connection
+
+    settings = load_settings(db)
+    if not settings.get("directory.sync_enabled", True):
+        return {"directory_sync": "disabled"}
+
+    now = _aware(now) or _now()
+    try:
+        interval = max(1, int(settings.get("directory.sync_interval_min", 60)))
+    except (TypeError, ValueError):
+        interval = 60
+    cutoff = now - timedelta(minutes=interval)
+
+    conns = list(db.scalars(
+        select(m.DirectoryConnection).where(m.DirectoryConnection.enabled.is_(True))
+    ))
+    ran = ok = failed = 0
+    for conn in conns:
+        last = _aware(conn.last_sync_at)
+        if last is not None and last > cutoff:
+            continue
+        ran += 1
+        result = run_connection(db, conn)
+        if result.get("error"):
+            failed += 1
+        else:
+            ok += 1
+        # Commit per connection: a later failure must not roll back a customer
+        # whose sync already succeeded.
+        db.commit()
+
+    if not ran:
+        return {}
+    return {"directory_sync": {"ran": ran, "ok": ok, "failed": failed}}

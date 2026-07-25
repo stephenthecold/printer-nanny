@@ -35,6 +35,9 @@ JOBS = (
     # retry path in the same pass.
     jobs.flush_quiet_hours,
     jobs.forecast_supplies,
+    # Interval-gated internally (directory.sync_interval_min); a no-op on most
+    # cycles. After the alert path so a slow directory never delays alerting.
+    jobs.sync_directories,
     # Cheap no-op unless a weekly/monthly report is due (marker-gated).
     run_scheduled_reports,
 )
