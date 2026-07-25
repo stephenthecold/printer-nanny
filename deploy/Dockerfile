@@ -6,8 +6,10 @@ WORKDIR /app
 # msitools (msiinfo/msiextract) + wixl let central build a real Windows .msi for
 # the agent on demand (central/msi_builder.py). Installed in its own early layer
 # so it's cached across app-code changes.
+# curl is here for the api container's /readyz healthcheck (compose), not for
+# application code -- nothing in central shells out to it.
 RUN apt-get update \
-    && apt-get install -y --no-install-recommends wixl msitools \
+    && apt-get install -y --no-install-recommends wixl msitools curl \
     && rm -rf /var/lib/apt/lists/*
 
 # Install deps first for layer caching.

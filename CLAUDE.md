@@ -44,6 +44,16 @@ enforced; none of them is optional.
   adversarially re-verifies before integration. Don't fan out work that one
   context handles better. Treat agent output as a claim to be checked, not a
   result to be trusted.
+  - **Worktree verification is unsound by default — pass `PYTHONPATH`.** The
+    editable install resolves `printer_nanny_agent` to the **main checkout**, so
+    `pytest` inside a worktree tests the *old* agent code while appearing to pass;
+    `central` resolves to the worktree only because cwd lands on `sys.path` (run a
+    script by absolute path from elsewhere and it silently resolves to main too).
+    Verify agent-side work with `PYTHONPATH=<worktree>/agent`, out-of-tree scripts
+    with `PYTHONPATH=<worktree>`, and confirm which file you actually imported
+    (`inspect.getfile`) before trusting a green run. Corollary for integration:
+    `central/` changes are safe to land while other worktree agents run, `agent/`
+    changes are not — they retarget every running worktree's agent module.
   - **Skills**: build one when a procedure here is repeated, non-obvious, and
     worth encoding — not speculatively. Every skill must be pertinent and needed;
     prune ones that aren't. Before relying on any skill (new or existing), verify

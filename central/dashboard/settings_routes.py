@@ -17,6 +17,7 @@ from sqlalchemy.orm import Session
 from central import models as m
 from central import runtime
 from central.db import get_db
+from central.health import worker_banner
 
 router = APIRouter(tags=["settings"])
 _templates = Jinja2Templates(directory=str(Path(__file__).parent / "templates"))
@@ -83,6 +84,8 @@ def settings_page(
          "active_group": active_group,
          "placeholder": runtime.SECRET_PLACEHOLDER,
          "app": runtime.app_branding(db),
+         # Stalled-worker banner (base.html) -- see central.health.worker_banner.
+         "worker_banner": worker_banner(db, user),
          "flash": request.session.pop("flash", None),
          "logo_error": request.session.pop("logo_error", None),
          "has_uploaded_logo": has_uploaded_logo,

@@ -9,10 +9,13 @@ from __future__ import annotations
 import argparse
 import logging
 import sys
+from datetime import datetime, timezone
 from typing import Optional
 
+from central import models as m
 from central.config import settings
 from central.db import SessionLocal, create_all, try_leader_lock
+from central.health import DEFAULT_CYCLE_SECONDS
 from central.reports import run_scheduled_reports
 from central.worker import jobs
 
@@ -33,18 +36,70 @@ JOBS = (
 )
 
 
-def _run_jobs(db) -> dict:
+def _stamp(
+    db,
+    job_name: str,
+    *,
+    interval_seconds: int,
+    ok: bool,
+    error: Optional[BaseException] = None,
+) -> None:
+    """Record this job's outcome in ``worker_job_runs``. Never raises.
+
+    This is the liveness stamp ``/readyz``, the worker's container healthcheck and
+    the dashboard banner all read (central.health). It is written per job, not per
+    cycle, because the loop below deliberately swallows one job's exception to
+    keep the rest of the cycle alive -- a single cycle-level stamp would stay
+    fresh while one job failed on every pass.
+
+    ``expected_interval_seconds`` is re-stamped every time so the read side always
+    derives its threshold from the cadence the worker is *currently* running with,
+    picking up an operator's ``--interval`` change on the next cycle.
+
+    Only the exception's class name is persisted: messages routinely carry the
+    DSN, SQL text or bound parameters and this value is rendered in the dashboard.
+    ``log.exception`` above has already put the full traceback in the worker log.
+    Failing to stamp must never break the cycle, so everything here is guarded.
+    """
+    try:
+        row = db.get(m.WorkerJobRun, job_name)
+        if row is None:
+            row = m.WorkerJobRun(job=job_name)
+            db.add(row)
+        now = datetime.now(timezone.utc)
+        row.expected_interval_seconds = int(interval_seconds)
+        if ok:
+            row.last_success_at = now
+            row.consecutive_failures = 0
+            row.last_error_type = None
+        else:
+            row.last_error_at = now
+            row.last_error_type = (type(error).__name__ if error else "Exception")[:80]
+            row.consecutive_failures = (row.consecutive_failures or 0) + 1
+        db.commit()
+    except Exception:  # noqa: BLE001 - a failed stamp must not kill the cycle
+        log.exception("failed to stamp worker_job_runs for %s", job_name)
+        try:
+            db.rollback()
+        except Exception:  # noqa: BLE001
+            pass
+
+
+def _run_jobs(db, interval_seconds: int = DEFAULT_CYCLE_SECONDS) -> dict:
     summary: dict = {}
     for job in JOBS:
         try:
             summary.update(job(db))
-        except Exception:  # noqa: BLE001 - keep the cycle alive on a single job failure
+        except Exception as exc:  # noqa: BLE001 - keep the cycle alive on a single job failure
             log.exception("job %s failed", job.__name__)
             db.rollback()
+            _stamp(db, job.__name__, interval_seconds=interval_seconds, ok=False, error=exc)
+        else:
+            _stamp(db, job.__name__, interval_seconds=interval_seconds, ok=True)
     return summary
 
 
-def run_cycle() -> dict:
+def run_cycle(interval_seconds: int = DEFAULT_CYCLE_SECONDS) -> dict:
     """Run one worker cycle under the single-leader advisory lock.
 
     Only the worker that holds the lock runs the jobs; a second worker container
@@ -53,6 +108,11 @@ def run_cycle() -> dict:
     always acquires (single-process by construction). The lock is held for the
     whole cycle and released at the end -- jobs commit their own work as they go,
     so a crash mid-cycle just releases the lock and the next tick re-runs.
+
+    ``interval_seconds`` is the cadence this worker is scheduled at; it is stamped
+    onto every job row so the readiness threshold tracks real configuration. A
+    worker that skips the cycle (not the leader) stamps nothing -- the leader's
+    stamps are what every consumer reads, so a standby stays healthy.
     """
     with try_leader_lock() as acquired:
         if not acquired:
@@ -60,7 +120,7 @@ def run_cycle() -> dict:
             return {"skipped": "not_leader"}
         db = SessionLocal()
         try:
-            summary = _run_jobs(db)
+            summary = _run_jobs(db, interval_seconds)
         finally:
             db.close()
     log.info("worker cycle: %s", summary)
@@ -70,7 +130,12 @@ def run_cycle() -> dict:
 def main(argv: Optional[list] = None) -> int:
     parser = argparse.ArgumentParser(description="Printer Nanny worker")
     parser.add_argument("--once", action="store_true", help="run one cycle and exit")
-    parser.add_argument("--interval", type=int, default=60, help="seconds between cycles")
+    parser.add_argument(
+        "--interval",
+        type=int,
+        default=DEFAULT_CYCLE_SECONDS,
+        help="seconds between cycles",
+    )
     args = parser.parse_args(argv)
 
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
@@ -82,15 +147,19 @@ def main(argv: Optional[list] = None) -> int:
         create_all()
 
     if args.once:
-        print(run_cycle())
+        print(run_cycle(args.interval))
         return 0
 
     from apscheduler.schedulers.blocking import BlockingScheduler
 
     scheduler = BlockingScheduler(timezone="UTC")
-    scheduler.add_job(run_cycle, "interval", seconds=args.interval, id="cycle")
+    # args=(...) hands the cadence to run_cycle so the liveness stamps record the
+    # interval this worker is actually running at, not the module default.
+    scheduler.add_job(
+        run_cycle, "interval", seconds=args.interval, id="cycle", args=(args.interval,)
+    )
     log.info("worker started; cycle every %ss", args.interval)
-    run_cycle()  # immediate first pass
+    run_cycle(args.interval)  # immediate first pass
     try:
         scheduler.start()
     except (KeyboardInterrupt, SystemExit):
