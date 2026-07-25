@@ -133,7 +133,9 @@ enforced; none of them is optional.
   Declare indexes in the model's `__table_args__` and mirror them in the migration.
 - `deploy/` — Caddyfile, installer scripts (`install-agent.sh`/`.ps1`), sample
   systemd unit, and `WINDOWS-MSI-TESTING.md` (build + Server 2016→2025 smoke).
-- `tests/` — pytest suite (~941 tests; ~2min end-to-end on Postgres-less SQLite).
+- `tests/` — pytest suite (~1109 tests; ~3min end-to-end on Postgres-less SQLite).
+  `test_compose_deployment.py` / `test_install_update.py` cover the deployment
+  contract above; both skip cleanly where the docker CLI is absent.
 
 ## Conventions
 - Python 3.12 in Docker; code stays 3.9-compatible (`from __future__ import
@@ -153,6 +155,32 @@ enforced; none of them is optional.
   reports, branding, agent install source) lives in DB via `central/runtime.py`
   and is edited in the Settings UI **grouped into tabs**. Only `DATABASE_URL` +
   `SECRET_KEY` come from env (`central/config.py`).
+- **`docker-compose.yml` is upstream's file, and operators must never need to
+  edit it.** `install.sh --update` fast-forwards it, so an operator edit is a
+  guaranteed future conflict — which is exactly how one of them got permanently
+  locked out of updates. Deployment knobs are therefore `${VAR:-default}`
+  interpolations fed from `.env` (credentials, ports, image tags,
+  `WORKER_INTERVAL`), and anything they can't express goes in a gitignored
+  `docker-compose.override.yml` that Compose merges automatically. When adding a
+  knob, add the variable — never a new literal. A variable's default must read
+  identically everywhere it appears (`POSTGRES_USER` spans the db service, both
+  `DATABASE_URL`s and the healthcheck); drift there yields a stack that builds
+  clean and then can't authenticate, so `tests/test_compose_deployment.py`
+  asserts single-valued defaults across the whole file.
+- **Dev-only services stay behind a profile.** `mailhog` accepts unauthenticated
+  mail and serves an unauthenticated UI of everything it caught; it published
+  `:8025` on every production install until it was made opt-in. The default
+  `docker compose up` is the minimum production stack (db + api + worker) and
+  publishes exactly one host port.
+- **The updater's contract: a failed update changes nothing.** It stashes local
+  edits, fast-forwards, re-applies. If the re-apply conflicts it unwinds
+  *completely* — back to the original commit with the edits restored — because
+  a failed `git stash pop` otherwise leaves conflict markers in the tree and
+  strands the operator's work in a stash nobody mentioned, and
+  `docker compose build` would happily consume a compose file containing
+  `<<<<<<<`. Never let the update path exit having half-applied something.
+  `--pull-only` stops before Docker, which is also what makes the path testable
+  without a daemon (`tests/test_install_update.py`).
 - **Quiet hours / maintenance windows** (`central/suppression.py`,
   `suppression_windows`). One model covers both: recurring weekly quiet hours
   (weekday mask + local minutes-from-midnight, wrap-aware) and one-off dated

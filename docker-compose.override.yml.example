@@ -1,0 +1,103 @@
+# Printer Nanny — local customisation. Copy to `docker-compose.override.yml`:
+#
+#     cp docker-compose.override.yml.example docker-compose.override.yml
+#
+# Compose merges `docker-compose.override.yml` on top of `docker-compose.yml`
+# automatically — no flag, no COMPOSE_FILE, nothing to remember. The override is
+# gitignored, so `deploy/install.sh --update` fast-forwards the tracked compose
+# file underneath it and your changes survive untouched. That is the whole point
+# of this file: editing `docker-compose.yml` directly wedges the updater the next
+# time upstream touches the same lines.
+#
+# Reach for `.env` FIRST — credentials, ports, image tags and the worker interval
+# are already variables there (see .env.example). This file is for the shape
+# changes .env can't express: extra volumes, different networks, added services,
+# resource limits, replacing a command.
+#
+# Merge semantics worth knowing before you copy a block down:
+#   * scalars (image, command, restart)      — override REPLACES the base value
+#   * `ports`, `volumes`, `expose`, `dns`    — override is APPENDED to the base
+#   * `environment`, `labels`, `deploy`      — merged key-by-key
+# Because ports append rather than replace, re-publishing a port that the base
+# file already publishes is a bind conflict, not a substitution. To move the API
+# off :8000, set API_PORT in `.env` instead of listing `ports:` here.
+#
+# Check what you actually get, any time:  docker compose config
+
+services: {}
+
+# ---------------------------------------------------------------------------
+# Examples — delete `services: {}` above and uncomment what you need.
+# ---------------------------------------------------------------------------
+
+# Bind the API to loopback only, because your reverse proxy is on this host and
+# nothing else should reach :8000. (Remove API_PORT from .env if you do this —
+# the base `ports:` entry is still there and both would bind.)
+# services:
+#   api:
+#     ports: !override
+#       - "127.0.0.1:8000:8000"
+
+# Give Postgres more shared memory for a large fleet, and pin a maintenance window
+# resource ceiling.
+# services:
+#   db:
+#     shm_size: 256mb
+#     deploy:
+#       resources:
+#         limits:
+#           memory: 2g
+
+# Ship container logs somewhere other than the local json file driver.
+# services:
+#   api:
+#     logging:
+#       driver: syslog
+#       options:
+#         syslog-address: "udp://logs.internal.example.com:514"
+#         tag: "printer-nanny-api"
+#   worker:
+#     logging:
+#       driver: syslog
+#       options:
+#         syslog-address: "udp://logs.internal.example.com:514"
+#         tag: "printer-nanny-worker"
+
+# Mount a corporate CA bundle so outbound HTTPS (FreeScout, Slack, Teams,
+# webhooks, OIDC) trusts an inspecting proxy.
+# services:
+#   api:
+#     volumes:
+#       - /usr/local/share/ca-certificates/corp-root.crt:/usr/local/share/ca-certificates/corp-root.crt:ro
+#     environment:
+#       REQUESTS_CA_BUNDLE: /etc/ssl/certs/ca-certificates.crt
+#   worker:
+#     volumes:
+#       - /usr/local/share/ca-certificates/corp-root.crt:/usr/local/share/ca-certificates/corp-root.crt:ro
+#     environment:
+#       REQUESTS_CA_BUNDLE: /etc/ssl/certs/ca-certificates.crt
+
+# Put the stack on an existing external network (e.g. alongside your own proxy).
+# networks:
+#   proxy_net:
+#     external: true
+# services:
+#   api:
+#     networks: [default, proxy_net]
+
+# Use an external/managed Postgres instead of the bundled one. Point both api and
+# worker at it and stop the bundled db from starting. `replicas: 0` is the
+# supported "declared but never started" switch — the service must keep existing
+# because api/worker `depends_on` it.
+# services:
+#   db:
+#     deploy:
+#       replicas: 0
+#   api:
+#     depends_on: !override []
+#     environment:
+#       DATABASE_URL: postgresql+psycopg://user:pass@pg.internal.example.com:5432/printer_nanny
+#   worker:
+#     depends_on: !override []
+#     environment:
+#       DATABASE_URL: postgresql+psycopg://user:pass@pg.internal.example.com:5432/printer_nanny

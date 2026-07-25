@@ -103,6 +103,60 @@ base layers refresh), and recreates only the changed containers. Your `.env`
 and Postgres data volume are preserved. Migrations run automatically as part
 of the api service's startup chain.
 
+Local edits to tracked files are stashed for the pull and re-applied afterwards,
+so a hand-edited `docker-compose.yml` doesn't abort the update. If they can't be
+re-applied, the update **rolls back completely** — same commit, your edits still
+in place, nothing half-applied — and tells you how to resolve it. Customise
+through [`.env` and an override file](#customising-the-deployment) instead and
+the question never comes up.
+
+`--update --pull-only` refreshes the checkout without rebuilding or restarting,
+for when you want to apply the change inside a maintenance window.
+
+### Customising the deployment
+
+**Don't edit `docker-compose.yml`.** `--update` fast-forwards it, so local edits
+collide with every upstream change to the same lines. Two supported knobs, both
+untouched by updates:
+
+**1. `.env`** — the common ones are already variables. See
+[`.env.example`](.env.example) for the full list with notes.
+
+| Variable | Default | |
+|---|---|---|
+| `POSTGRES_USER` / `POSTGRES_PASSWORD` / `POSTGRES_DB` | `nanny` / generated / `printer_nanny` | Bundled Postgres credentials. **Only applied when the data volume is first created** — see below. |
+| `API_PORT` | `8000` | Host port for your own reverse proxy. |
+| `WORKER_INTERVAL` | `60` | Worker cycle, in seconds. The healthcheck scales its staleness threshold to match, so raising it is safe. |
+| `POSTGRES_IMAGE` / `CADDY_IMAGE` / `MAILHOG_IMAGE` | upstream tags | Pin a known-good tag or point at a private mirror. |
+| `MAILHOG_PROFILE` / `MAILHOG_UI_PORT` | off / `8025` | Mailhog is a **dev** SMTP catcher — it accepts unauthenticated mail and serves an unauthenticated UI of everything it caught, so it is opt-in rather than published on every install. |
+
+> **Changing `POSTGRES_PASSWORD` on a running install locks the stack out.** The
+> Postgres image reads it only when initialising an empty data directory, so
+> changing it in `.env` changes the password api/worker *present* while the
+> database keeps the old one. Rotate inside the database first
+> (`ALTER USER … WITH PASSWORD …`), then update `.env`. New installs get a
+> generated password automatically; existing volumes keep theirs.
+
+**2. `docker-compose.override.yml`** — for anything `.env` can't express (extra
+volumes, log drivers, resource limits, an external database, added services).
+Compose merges it automatically and it's gitignored:
+
+```bash
+cp docker-compose.override.yml.example docker-compose.override.yml
+$EDITOR docker-compose.override.yml
+docker compose config          # confirm the merged result
+bash deploy/install.sh --update
+```
+
+Already edited `docker-compose.yml`? Convert it in place:
+
+```bash
+bash deploy/install.sh --migrate-compose
+```
+
+It backs the file up, hands your changes back as a starter override to fill in,
+and restores the tracked file so updates stop conflicting.
+
 ### Demo data (destructive)
 
 ```bash
@@ -122,6 +176,8 @@ echo "SECRET_KEY=$(openssl rand -base64 48)" > .env
 docker compose up -d --build                  # API on :8000, BYO proxy
 # or, include the bundled Caddy on :80 + :443:
 docker compose --profile caddy up -d --build
+# optional: local SMTP catcher for testing email alerts (http://localhost:8025)
+docker compose --profile mailhog up -d
 # optional: drop & re-seed with demo clients/printers
 docker compose exec api python -m central.seed
 ```
