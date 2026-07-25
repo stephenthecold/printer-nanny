@@ -75,11 +75,14 @@ class SlackChannel(NotificationChannel):
     def send(self, note: Notification) -> ChannelResult:
         webhook = self._webhook()
         if not webhook:
-            return ChannelResult(ok=True, detail="slack dry-run (no webhook configured)")
+            return ChannelResult(
+                ok=True, detail="slack dry-run (no webhook configured)", sent=False
+            )
         if not self._meets_threshold(note.severity):
             return ChannelResult(
                 ok=True,
                 detail=f"slack skipped: severity {note.severity} below {self._min_severity()}",
+                sent=False,
             )
         try:
             resp = httpx.post(webhook, json=self.build_payload(note), timeout=15)

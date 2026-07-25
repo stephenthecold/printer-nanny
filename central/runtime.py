@@ -136,6 +136,21 @@ SPECS: List[Spec] = [
     Spec("alerts.escalate_after_minutes", "int", "Alerts", "Re-notify after (minutes)", 0,
          "Re-send an alert that's still unresolved after this many minutes "
          "(bumps its escalation level). 0 disables escalation re-notifies."),
+    Spec("alerts.supply_deadband_pct", "float", "Alerts", "Supply recovery margin (%)", 3.0,
+         "A low-supply alert opens at the threshold but only clears once the "
+         "level climbs this far ABOVE it. Stops a cartridge reading just either "
+         "side of the threshold from resolving and re-alerting every cycle. "
+         "0 disables the margin (clears the moment it's back over the line)."),
+    Spec("alerts.renotify_cooldown_min", "int", "Alerts", "Flap cooldown (minutes)", 30,
+         "If a condition clears and re-fires within this window, re-open the "
+         "original alert instead of raising a new one, and don't re-notify — "
+         "one incident, one notification. Covers flapping that a supply margin "
+         "can't, like an error code or a printer bouncing offline. 0 disables."),
+    Spec("alerts.max_error_alerts_per_printer", "int", "Alerts",
+         "Max error alerts per printer", 5,
+         "One alert per distinct error code, capped here so a misbehaving "
+         "device can't open dozens at once. Codes beyond the cap are counted "
+         "in the detail of the alerts that do open, never dropped silently."),
     # ESG / Sustainability — turn page-count history into estimated print
     # footprint (paper, CO2e, energy, trees). Every factor is operator-tunable
     # so a customer can plug in their own paper stock / grid figures. Defaults

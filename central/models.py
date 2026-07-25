@@ -141,16 +141,30 @@ class DeliveryStatus(str, enum.Enum):
     """Lifecycle of a single per-channel notification send attempt.
 
     ``pending``  -- queued / awaiting (re)try at ``next_attempt_at``.
-    ``delivered`` -- the channel reported success; terminal.
+    ``delivered`` -- the channel reported success AND transmitted; terminal.
     ``failed``   -- last attempt failed but more retries remain (still due at
                     ``next_attempt_at``); functionally a retryable ``pending``.
     ``dead``     -- exhausted the max-attempts cap; terminal, dead-lettered.
+    ``skipped``  -- the channel succeeded without transmitting anything: a
+                    severity gate excluded the notification, or the channel is
+                    enabled but unconfigured (dry-run). Terminal and NOT a
+                    delivery. Previously these were stored as ``delivered``,
+                    so the durable log asserted a send that never happened.
+                    Terminal because a severity skip is deterministic, and
+                    because replaying every historical skip the moment a URL
+                    is finally pasted would flood the new channel with
+                    backlog. The alert stays open and visible either way, and
+                    the alerts page renders the channel with a distinct
+                    "not sent" badge carrying the reason.
+
+    Stored as VARCHAR (see ``_enum``), so adding a member needs no DDL.
     """
 
     pending = "pending"
     delivered = "delivered"
     failed = "failed"
     dead = "dead"
+    skipped = "skipped"
 
 
 class CommandType(str, enum.Enum):
@@ -567,6 +581,12 @@ class Alert(Base):
         DateTime(timezone=True), default=None
     )
     escalation_level: Mapped[int] = mapped_column(Integer, default=0)
+    # How many times this condition has cleared and re-fired inside the flap
+    # cooldown window (alerts.renotify_cooldown_min). A flapping condition
+    # re-opens THIS alert instead of raising a fresh one, so the operator sees a
+    # single item with a flap count rather than a notification per oscillation.
+    # 0 means it has never flapped.
+    flap_count: Mapped[int] = mapped_column(Integer, default=0, server_default="0")
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
     resolved_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), default=None)
 

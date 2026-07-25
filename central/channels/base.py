@@ -30,10 +30,24 @@ class Notification:
 
 @dataclass
 class ChannelResult:
+    """Outcome of one channel send.
+
+    ``ok`` answers "did anything go wrong", ``sent`` answers "did a message
+    actually leave the building". They are deliberately separate: a severity
+    skip and an unconfigured dry-run are both ``ok=True`` (nothing failed,
+    nothing to retry) but ``sent=False`` (nobody was told). Collapsing the two
+    made the durable delivery log record a *delivered* row -- and the alerts
+    page render a green tick -- for a notification that was never transmitted.
+    Anything that reports success without transmitting must set ``sent=False``.
+    """
+
     ok: bool
     detail: str
     # External reference if the channel created something (e.g. FreeScout convo id).
     external_ref: Optional[str] = None
+    # False when the call succeeded but no message was transmitted (dry-run,
+    # severity gate). Defaults True so a real send needs no extra ceremony.
+    sent: bool = True
 
 
 class NotificationChannel(abc.ABC):

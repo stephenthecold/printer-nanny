@@ -104,10 +104,12 @@ def test_alert_owed_with_zero_channels_is_delivered_once_a_channel_returns(db, m
     # Nothing reached a channel, and the alert row says so honestly rather than
     # looking like a clean send.
     assert alert.notified_channels == [
-        {"channel": UNROUTED_CHANNEL_LABEL, "ok": False,
+        {"channel": UNROUTED_CHANNEL_LABEL, "ok": False, "sent": False,
          "detail": alert.notified_channels[0]["detail"]}
     ]
     assert not alert.notified_channels[0]["ok"]
+    # sent=False is what stops the alerts page rendering a tick for this.
+    assert not alert.notified_channels[0]["sent"]
 
     # ...and the notification is on the books as OWED, so the retry sweeper has
     # something to find. This is the row the bug never wrote.
@@ -147,7 +149,7 @@ def test_alert_owed_with_zero_channels_is_delivered_once_a_channel_returns(db, m
     # The alert no longer claims nobody was told -- the badge follows reality.
     db.refresh(alert)
     assert alert.notified_channels == [
-        {"channel": "Email", "ok": True, "detail": "sent"}
+        {"channel": "Email", "ok": True, "sent": True, "detail": "sent"}
     ]
 
     # Terminal: a further sweep does not re-send it.
