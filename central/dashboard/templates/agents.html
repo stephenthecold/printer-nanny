@@ -57,6 +57,23 @@
       <button type="button" onclick="navigator.clipboard.writeText(document.getElementById('cmd-claim-win').innerText)" class="absolute top-2 right-2 text-xs bg-white/10 hover:bg-white/20 text-white rounded px-2 py-1">Copy</button>
     </div>
   </div>
+  <div class="mt-3 border-t border-emerald-200 pt-3">
+    <div class="text-xs font-medium text-emerald-900 mb-1">Windows Server — prebuilt MSI (no Python, no internet on the target)</div>
+    {% if msi_available %}
+    <form method="post" action="/manage/agents/claim-msi">
+      <input type="hidden" name="claim_code" value="{{ new_claim.code }}" />
+      <input type="hidden" name="site_label" value="{{ new_claim.site }}" />
+      <button class="rounded bg-emerald-700 hover:bg-emerald-800 text-white text-sm px-3 py-1.5">Download Windows MSI</button>
+    </form>
+    <p class="text-xs text-emerald-800 mt-1">
+      Carries this claim code instead of a permanent key, so a copy left on a share
+      stops working once it's used. <strong>Enrolls one machine</strong> — the code is
+      single use, so don't image a fleet from it.
+    </p>
+    {% else %}
+    <p class="text-xs text-emerald-800">MSI builder unavailable in this central image: {{ msi_reason }}</p>
+    {% endif %}
+  </div>
 </div>
 {% endif %}
 

@@ -798,6 +798,98 @@ def agent_build_msi(
     )
 
 
+@router.post("/agents/claim-msi")
+def agent_build_claim_msi(
+    request: Request,
+    claim_code: str = Form(...),
+    site_label: str = Form(""),
+    db: Session = Depends(get_db),
+):
+    """Build a Windows MSI that carries a single-use claim code instead of a key.
+
+    Same installer, better credential. The pre-minted variant bakes an API key
+    that stays valid for the life of the agent, so every copy of that .msi --
+    the file share it was staged on, the ticket it was attached to -- remains a
+    working credential. A claim code is spent by the first machine that installs
+    it, which makes a stale MSI inert.
+
+    That single-use property is also the operational catch, and it is stated on
+    the page: this artifact enrolls exactly ONE machine. Imaging a fleet from it
+    gets you one agent and a queue of 401s, which is the correct outcome for a
+    credential that must not be shared but is worth saying out loud.
+
+    The code is never audited or logged -- it is live until redeemed.
+    """
+    user = _manager(request, db)
+    if user is None:
+        return _redirect("/login")
+
+    from central.msi_builder import build_msi, msi_build_available
+
+    # Validate the credential BEFORE probing the toolchain or doing any build
+    # work. Checking capability first would let an unknown or spent code still
+    # produce build-related audit rows, which is both misleading in the trail
+    # and work done on behalf of something that was never valid.
+    from central.security import hash_claim_code
+
+    token = db.scalar(
+        select(m.AgentClaimToken).where(
+            m.AgentClaimToken.token_hash == hash_claim_code(claim_code.strip())
+        )
+    )
+    if token is None or token.used_at is not None:
+        # Already redeemed, or never existed. Same message either way, matching
+        # the redemption endpoint -- no oracle here either.
+        _flash(request, "That claim code is no longer valid. Mint a fresh one.")
+        return _redirect("/manage/agents")
+
+    cap = msi_build_available()
+    if not cap.available:
+        record(db, request, user, "agent.msi_build",
+               target=f"claim_token:{token.id} site:{token.site_id}",
+               detail=f"unavailable: {cap.reason}")
+        db.commit()
+        _flash(request, cap.reason)
+        return _redirect("/manage/agents")
+
+    from central.runtime import load_settings
+    rt = load_settings(db)
+    central_url = (rt.get("app.public_url") or str(request.base_url)).rstrip("/")
+    embed_url = str(rt.get("agent.python_embed_url") or "").strip() or None
+
+    out_dir = Path(tempfile.mkdtemp(prefix="pn-msi-"))
+    try:
+        result = build_msi(
+            agent_name=token.agent_name or "Printer Nanny agent",
+            central_url=central_url, claim_code=claim_code.strip(),
+            slug=f"claim-{token.id}", verify_tls=True,
+            out_dir=out_dir, embed_url=embed_url,
+        )
+    except Exception as exc:  # noqa: BLE001 - any build failure -> flash, not a 500
+        shutil.rmtree(out_dir, ignore_errors=True)
+        record(db, request, user, "agent.msi_build",
+               target=f"claim_token:{token.id} site:{token.site_id}",
+               detail=f"failed: {exc}")
+        db.commit()
+        _flash(request, f"MSI build failed: {exc}")
+        return _redirect("/manage/agents")
+
+    record(db, request, user, "agent.msi_build",
+           target=f"claim_token:{token.id} site:{token.site_id}",
+           detail=f"ok claim-code build size={result.size} "
+                  f"agent_version={result.agent_version} product={result.product_version}")
+    db.commit()
+    safe_label = "".join(
+        ch for ch in (site_label or "site") if ch.isalnum() or ch in "-_"
+    )[:40] or "site"
+    return FileResponse(
+        path=str(result.path),
+        media_type="application/x-msi",
+        filename=f"printer-nanny-agent-{safe_label}.msi",
+        background=BackgroundTask(shutil.rmtree, out_dir, ignore_errors=True),
+    )
+
+
 @router.post("/agents/{agent_id}/update")
 def agent_update_command(agent_id: int, request: Request, db: Session = Depends(get_db)):
     """Queue an update_agent command. The agent picks it up on its next
