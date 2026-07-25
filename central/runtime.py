@@ -236,6 +236,33 @@ SPECS: List[Spec] = [
     Spec("agent.python_embed_url", "str", "Agent install", "Windows MSI: Python embeddable URL", "",
          "Where the MSI builder fetches the Python embeddable runtime. Blank = "
          "pinned python.org default. Use an internal mirror or file:// path for air-gapped sites."),
+    # Onboarding defaults — what a newly onboarded client starts with, so a
+    # fleet that appears is already monitored instead of merely visible.
+    # Applied once at creation and then owned by the client: editing these
+    # never reaches back and rewrites customers who were already set up, which
+    # would silently overwrite whatever an operator tuned by hand.
+    Spec("onboarding.apply_defaults", "bool", "Onboarding defaults",
+         "Apply defaults to new clients", True,
+         "When a client is created through Onboard, give it the starting alert "
+         "rule, quiet hours and maintenance interval below. Off means a new "
+         "client starts with nothing client-specific and inherits only global rules."),
+    Spec("onboarding.low_supply_pct", "int", "Onboarding defaults",
+         "Low-supply alert threshold (%)", 15,
+         "Creates a client-scoped low-supply rule at this level. 0 skips the rule "
+         "entirely and leaves the client on whatever global rules exist."),
+    Spec("onboarding.quiet_hours", "str", "Onboarding defaults",
+         "Quiet hours (HH:MM-HH:MM)", "18:00-07:00",
+         "Creates a client-scoped recurring quiet-hours window in the client's own "
+         "timezone. Wrapping midnight is normal and expected. Blank creates none."),
+    Spec("onboarding.quiet_hours_weekdays", "str", "Onboarding defaults",
+         "Quiet hours weekdays", "0,1,2,3,4,5,6",
+         "Comma-separated, Monday=0. The mask gates the day a window STARTS, so a "
+         "Fri-night window still covers Saturday morning."),
+    Spec("onboarding.maintenance_interval_days", "int", "Onboarding defaults",
+         "Maintenance interval (days)", 0,
+         "Creates a client-wide maintenance schedule at this interval for printers "
+         "as they are approved. 0 (the default) creates none — most MSPs schedule "
+         "maintenance per model rather than per customer."),
 ]
 
 SPEC_BY_KEY: Dict[str, Spec] = {s.key: s for s in SPECS}
@@ -253,7 +280,7 @@ SETTINGS_GROUPS: "Dict[str, tuple]" = {
     "alerts": ("Alerts & Reports", ["Alerts", "Reports", "ESG / Sustainability"]),
     "polling": ("Polling & SNMP", ["Polling", "SNMP defaults"]),
     "auth": ("Authentication", ["Single sign-on (OIDC)", "SCIM provisioning"]),
-    "agents": ("Agents", ["Agent install"]),
+    "agents": ("Agents", ["Agent install", "Onboarding defaults"]),
 }
 DEFAULT_SETTINGS_GROUP = "branding"
 

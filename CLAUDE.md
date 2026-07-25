@@ -211,6 +211,36 @@ enforced; none of them is optional.
   Postgres: `pg_dump --format=custom` / `pg_restore --clean`. SQLite: streamed
   file copy + atomic replace. Restore is gated behind typed `RESTORE`
   confirmation.
+- **Onboarding** (`/manage/onboard`) creates client → site → subnet → claim code
+  in one transaction. Four mechanisms, each with a rule worth keeping:
+  - **`subnets.trusted`** is the *only* path that puts a device in a tenant's
+    fleet with no human. It's per-subnet, not global, because the subnet row is
+    an existing deliberate act (somebody typed that CIDR and its creds).
+    Unknown provenance — an unenrolled CIDR, or a legacy agent reporting none —
+    always queues, and every auto-approval writes a `printer.auto_approve`
+    audit row. Marking a subnet trusted **never** sweeps the existing backlog:
+    those rows may carry a decision a human already made.
+  - **Claim codes** (`agent_claim_tokens`) replace carrying a long-lived API key
+    to site. Single use enforced as a *conditional UPDATE* on `used_at` (not
+    read-then-write, so two boxes from one image can't both win), short TTL,
+    SHA-256 at rest, and `site_id` fixed at mint time — a bearer credential must
+    never let its holder pick a tenant. Failures are deliberately
+    indistinguishable (unknown / expired / spent all 401) so it isn't an oracle.
+    The agent persists its issued credentials **atomically before first use**:
+    the code is single-use, so an agent that redeems and forgets is bricked.
+  - **Subnet adoption** on redemption: an agent claims its site's `agent_id IS
+    NULL` subnets only. Never an assigned one (no stealing), never another
+    site's. This is what makes declaring the subnet before the agent exists work.
+  - **Onboarding defaults** (`onboarding.*` settings) apply once at client
+    creation and are then owned by the client — re-applying would overwrite
+    thresholds an operator tuned, which is how people learn to distrust
+    defaults. What was created is audited (`client.defaults_applied`).
+- **Checkbox booleans need a presence marker.** An unchecked box posts nothing,
+  so a handler that ignores empty fields (`subnet_update`) cannot tell "unchecked"
+  from "this form didn't carry the field" — reading it directly makes an inline
+  rename silently clear the flag. `trusted` pairs with a hidden `trusted_present`;
+  `runtime.save_settings` solves the same problem with its `sections` argument.
+  Same failure class as the `save_settings(sections=None)` wipe.
 
 ## Dev
 - `pip install -e ".[dev]"` (add `postgres` / `agent` / `agent-mdns` extras as needed).
@@ -243,7 +273,9 @@ Production-ready feature surface (as of PR #46):
 SNMP, alerting with dedupe + auto-resolve + flap damping, quiet hours + maintenance
 windows, scheduled reports, friendly names,
 days-until-order supply forecasts, per-client / per-site rollups, recent
-activity, maintenance schedules, audit log, DB backup/restore.
+activity, maintenance schedules, audit log, DB backup/restore, one-screen
+onboarding (claim-code self-enrollment, trusted-subnet auto-approve, bulk
+approvals, per-client defaults).
 
 **Channels**: email (incl. OAuth SMTP / XOAUTH2), Slack, Teams, FreeScout,
 generic webhook. Attachments supported on email for reports.
