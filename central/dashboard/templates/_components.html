@@ -87,10 +87,24 @@ inline-flex items-center rounded text-slate-600 hover:text-slate-900
 {%- endmacro %}
 
 {#- ------------------------------------------------------------------ cards -#}
-{#  pad='none' is for cards whose child is a full-bleed table. #}
+{#
+  pad='none' is for cards whose child is a full-bleed table.
+
+  min-w-0 is load-bearing, not decoration. Grid and flex items default to
+  `min-width: auto`, which means they refuse to shrink below their content's
+  intrinsic width. A card sitting in a grid and containing a wide table
+  therefore grows to the table's full width and pushes the whole page sideways
+  -- and crucially, an `overflow-x-auto` wrapper *inside* it does nothing,
+  because the wrapper is handed all the width it asked for and never has to
+  scroll. That is exactly how /manage/users and /manage/agents overflowed by
+  72px and 401px at phone width despite both having scroll containers.
+
+  min-w-0 has no effect on a block box outside a grid/flex container (its
+  min-width is already 0 there), so this is safe to apply to every card.
+#}
 {% macro card_cls(pad='md', extra='') -%}
 {%- set pads = {'none': '', 'sm': 'p-3', 'md': 'p-4', 'lg': 'p-5'} -%}
-bg-white rounded-lg shadow {{ pads.get(pad, pads['md']) }} {{ extra }}
+bg-white rounded-lg shadow min-w-0 {{ pads.get(pad, pads['md']) }} {{ extra }}
 {%- endmacro %}
 
 {#- ----------------------------------------------------------------- typography -#}
@@ -120,8 +134,19 @@ bg-white rounded-lg shadow {{ pads.get(pad, pads['md']) }} {{ extra }}
   hole: a wide table with no overflow container pushes the whole page sideways
   on a narrow viewport instead of scrolling within its own card.
 #}
+{#
+  `relative` is not cosmetic. Tailwind's `sr-only` is `position: absolute`, and
+  an absolutely-positioned element is laid out against its nearest *positioned*
+  ancestor -- with none, that is the viewport, so it is NOT clipped by this
+  scroller and contributes its offset to page width instead.
+
+  A 1px visually-hidden <span> in the last <th> therefore pushed /manage/users
+  60px wide at phone width: the table itself was correctly contained, and the
+  one thing escaping was the accessibility affordance. Making the wrapper a
+  containing block keeps such descendants inside the scroll area.
+#}
 {% macro table_wrap(extra='') -%}
-overflow-x-auto {{ extra }}
+relative overflow-x-auto {{ extra }}
 {%- endmacro %}
 
 {% macro table_cls(extra='') -%}
