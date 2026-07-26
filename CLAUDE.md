@@ -122,6 +122,11 @@ enforced; none of them is optional.
     decrypted), `sync.py` (applies a snapshot).
   - `snmp_parse.py` — brand-agnostic SNMP supply/level parsing (shared w/ agent).
   - `snmp.md` — Printer-MIB OID reference.
+  - `static/` — **vendored** `tailwind.css` + `htmx.min.js`, served at `/static`.
+    Committed build artifacts; regenerate with `scripts/build-assets.sh`.
+  - `dashboard/templates/_components.html` — the UI component layer: button /
+    card / table / heading / form-field macros. **Use these rather than writing
+    Tailwind strings inline**; that drift is what the layer exists to stop.
 - `agent/` — standalone `printer-nanny-agent` package.
   - `providers/` — vendor-specific enrichment plugins; one registered per
     enterprise prefix. **Brother is consolidated**: a single `brother`
@@ -171,6 +176,55 @@ enforced; none of them is optional.
   `DATABASE_URL`s and the healthcheck); drift there yields a stack that builds
   clean and then can't authenticate, so `tests/test_compose_deployment.py`
   asserts single-valued defaults across the whole file.
+- **UI consistency is enforced by a component layer, not by discipline.**
+  `_components.html` owns the class strings for buttons, cards, tables, headings
+  and form fields. Before it, the same element was spelled many ways — 30
+  distinct button strings across two competing "primary" colours (`slate-900`
+  *and* `sky-600`), 30 card variants, 20 table-header variants. No page was
+  wrong on its own; the drift only showed when an operator moved between pages.
+  Button variants are named for **intent** (`primary` / `accent` / `danger` /
+  `warning` / `success` / `neutral` / `subtle`), so a page picks by meaning and
+  the palette stays a single decision.
+- **A placeholder is not a label, and a sibling `<label>` is not an
+  association.** Both mistakes render identically to a sighted mouse user and
+  are invisible to grep, which is how 85 controls ended up with no accessible
+  name. Two associations are valid: a label that **wraps** its control (what the
+  `field` macro emits — it needs no `id`, so it is safe inside the per-row loops
+  this app renders, where duplicate ids would silently mis-associate every row
+  after the first), or `label[for]` pointing at a unique `id`. For controls in a
+  table row, where a visible label would just repeat the column header, use
+  `aria-label` **including the row's identity** ("SNMP community for
+  10.0.0.0/24") — the field name alone identifies nothing when six rows are on
+  screen. `tests/test_dashboard_a11y.py` asserts this against the rendered DOM,
+  because only the rendered tree can tell a wrapping label from an adjacent one.
+- **Every interactive control carries a visible focus ring.** There were
+  previously zero focus styles across 734 keyboard-reachable elements, leaving
+  keyboard operation dependent on whatever the browser drew by default —
+  routinely invisible on this app's dark and coloured buttons. The macros use
+  `focus-visible`, not `focus`, so a mouse click does not leave a ring behind.
+- **The nav says where you are.** Thirteen identical links with no current-page
+  indicator was the most-reported UI complaint. Active state is **longest-prefix**
+  (`/manage/agents` marks *Agents*, not *Manage*), carried both visually and as
+  `aria-current="page"`, and the bar wraps instead of running its admin links off
+  the right edge at laptop widths.
+- **The dashboard renders with no internet, so frontend assets are vendored.**
+  Tailwind and htmx load from `central/static/`, never a CDN. This is not
+  preference: installs sit on segmented MSP management VLANs with no egress, and
+  loading them from `cdn.tailwindcss.com` / `unpkg.com` gave exactly those
+  operators an unstyled dashboard in which every htmx-driven control was inert —
+  a total failure on the deployments least able to report it. It also drops
+  Tailwind's in-browser compiler (upstream documents it as development-only) for
+  a ~21KB tree-shaken stylesheet. **Tailwind is pinned to v3**; v4 renames
+  utilities this codebase uses (`shadow`→`shadow-sm`, `rounded`→`rounded-sm`) and
+  shifts the palette, so an unpinned bump silently restyles every page.
+  The catch worth internalising: the CSS is tree-shaken **against the templates**,
+  so a class no template used at build time is simply *absent* — the element
+  renders unstyled with no error, nothing in the console, nothing to grep.
+  After changing any Tailwind class, run `scripts/build-assets.sh` and commit the
+  result. `tests/test_static_assets.py` fails on both a re-added CDN reference and
+  a class missing from the vendored CSS, so a forgotten regeneration is caught by
+  the suite rather than by an operator. Node is **build-time only** — deliberately
+  absent from `deploy/Dockerfile` and the runtime path.
 - **Dev-only services stay behind a profile.** `mailhog` accepts unauthenticated
   mail and serves an unauthenticated UI of everything it caught; it published
   `:8025` on every production install until it was made opt-in. The default

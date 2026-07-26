@@ -1,75 +1,81 @@
 {% extends "base.html" %}
+{% from "_components.html" import btn, card_cls, empty_row, note, page_title,
+        table_cls, table_wrap, td_cls, th_cls, thead_cls %}
 {% block title %}Approvals · {{ app.name or 'Printer Nanny' }}{% endblock %}
 {% block body %}
-<h1 class="text-2xl font-semibold mb-1">Pending discovery</h1>
-<p class="text-sm text-slate-500 mb-4">
+{{ page_title('Pending discovery') }}
+<p class="text-sm text-slate-500 mb-4 -mt-2">
   Devices agents found on their subnets. Quick-approve to start monitoring with the
   defaults, <em>Review</em> to set location / SNMP / asset tag first, or Ignore.
   To skip this queue entirely for a network you control, mark its subnet
-  <a href="/manage/agents" class="text-sky-700 hover:underline">trusted</a>.
+  <a href="/manage/agents" class="text-sky-700 hover:underline rounded">trusted</a>.
 </p>
 
 {% if approvals_flash %}
-<div class="mb-3 rounded border border-sky-200 bg-sky-50 text-sky-900 px-3 py-2 text-sm">{{ approvals_flash }}</div>
+<div role="status" class="{{ note('info', 'mb-3') }}">{{ approvals_flash }}</div>
 {% endif %}
 
 <form method="post" action="/approvals/bulk" id="bulk-form">
-<div class="bg-white rounded-lg shadow overflow-x-auto">
+<div class="{{ card_cls('none') }}">
   {% if pending %}
   <div class="flex flex-wrap items-center gap-2 px-4 py-2 border-b bg-slate-50 text-sm">
-    <span class="text-slate-500" id="bulk-count">0 selected</span>
+    {# aria-live so the running total is announced as boxes are ticked, not just
+       silently repainted. #}
+    <span class="text-slate-500" id="bulk-count" aria-live="polite">0 selected</span>
     <span class="flex-1"></span>
-    <button type="submit" name="action" value="approve"
-            class="bg-green-600 hover:bg-green-700 text-white rounded px-3 py-1.5 text-xs">Approve selected</button>
-    <button type="submit" name="action" value="ignore"
-            class="bg-slate-300 hover:bg-slate-400 text-slate-700 rounded px-3 py-1.5 text-xs">Ignore selected</button>
+    <button type="submit" name="action" value="approve" class="{{ btn('success', 'sm') }}">Approve selected</button>
+    <button type="submit" name="action" value="ignore" class="{{ btn('subtle', 'sm') }}">Ignore selected</button>
   </div>
   {% endif %}
-  <table class="w-full text-sm">
-    <thead class="text-left text-slate-500 bg-slate-50">
-      <tr>
-        <th class="px-4 py-2 w-8">
-          <input type="checkbox" id="bulk-all" title="Select all"
-                 onclick="document.querySelectorAll('.bulk-row').forEach(c => c.checked = this.checked); bulkCount();" />
-        </th>
-        <th class="py-2">IP</th>
-        <th class="py-2">Host / model</th>
-        <th class="py-2">MAC</th>
-        <th class="py-2">Discovered by</th>
-        <th class="py-2">When</th>
-        <th class="py-2 text-right pr-4">Action</th>
-      </tr>
-    </thead>
-    <tbody>
-      {% for p in pending %}
-      {% set found_by = agents_by_id.get(p.discovered_by_agent_id) if p.discovered_by_agent_id else None %}
-      <tr class="border-t" id="pending-{{ p.id }}">
-        <td class="px-4 py-2">
-          <input type="checkbox" class="bulk-row" form="bulk-form" name="printer_ids"
-                 value="{{ p.id }}" onclick="bulkCount()" aria-label="Select {{ p.ip }}" />
-        </td>
-        <td class="py-2 tabular-nums">{{ p.ip }}</td>
-        <td class="py-2">{{ p.hostname or '—' }} <span class="text-slate-400">{{ p.brand or '' }} {{ p.model or '' }}</span></td>
-        <td class="py-2 text-slate-400">{{ p.mac or '—' }}</td>
-        <td class="py-2 text-slate-500">{{ found_by.name if found_by else '—' }}</td>
-        <td class="py-2 text-slate-500">{{ p.created_at.strftime('%m-%d %H:%M') if p.created_at else '—' }}</td>
-        <td class="py-2 text-right pr-4 space-x-1">
-          <a href="/manage/printers/{{ p.id }}/edit?from_approvals=1"
-             class="bg-sky-600 text-white rounded px-2 py-1 text-xs">Review</a>
-          {# type="button" is load-bearing: these live inside the bulk form now, and a
-             button with no type defaults to submit -- clicking one row's Approve would
-             post the whole batch. #}
-          <button type="button" hx-post="/approvals/{{ p.id }}/approve" hx-target="#pending-{{ p.id }}" hx-swap="outerHTML"
-                  class="bg-green-600 text-white rounded px-2 py-1 text-xs">Quick approve</button>
-          <button type="button" hx-post="/approvals/{{ p.id }}/ignore" hx-target="#pending-{{ p.id }}" hx-swap="outerHTML"
-                  class="bg-slate-300 text-slate-700 rounded px-2 py-1 text-xs">Ignore</button>
-        </td>
-      </tr>
-      {% else %}
-      <tr><td class="px-4 py-4 text-slate-400" colspan="7">Nothing pending. 🎉</td></tr>
-      {% endfor %}
-    </tbody>
-  </table>
+  <div class="{{ table_wrap() }}">
+    <table class="{{ table_cls() }}">
+      <thead class="{{ thead_cls() }}">
+        <tr>
+          <th class="{{ th_cls('left', 'w-8') }}">
+            {# title= alone is an unreliable accessible name; aria-label is not. #}
+            <input type="checkbox" id="bulk-all" title="Select all" aria-label="Select all pending devices"
+                   class="rounded border-slate-300 text-sky-600 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-offset-1 focus-visible:ring-sky-500"
+                   onclick="document.querySelectorAll('.bulk-row').forEach(c => c.checked = this.checked); bulkCount();" />
+          </th>
+          <th class="{{ th_cls() }}">IP</th>
+          <th class="{{ th_cls() }}">Host / model</th>
+          <th class="{{ th_cls() }}">MAC</th>
+          <th class="{{ th_cls() }}">Discovered by</th>
+          <th class="{{ th_cls() }}">When</th>
+          <th class="{{ th_cls('right') }}">Action</th>
+        </tr>
+      </thead>
+      <tbody>
+        {% for p in pending %}
+        {% set found_by = agents_by_id.get(p.discovered_by_agent_id) if p.discovered_by_agent_id else None %}
+        <tr class="border-t" id="pending-{{ p.id }}">
+          <td class="{{ td_cls() }}">
+            <input type="checkbox" class="bulk-row rounded border-slate-300 text-sky-600 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-offset-1 focus-visible:ring-sky-500"
+                   form="bulk-form" name="printer_ids"
+                   value="{{ p.id }}" onclick="bulkCount()" aria-label="Select {{ p.ip }}" />
+          </td>
+          <td class="{{ td_cls('left', 'tabular-nums') }}">{{ p.ip }}</td>
+          <td class="{{ td_cls() }}">{{ p.hostname or '—' }} <span class="text-slate-400">{{ p.brand or '' }} {{ p.model or '' }}</span></td>
+          <td class="{{ td_cls('left', 'text-slate-400') }}">{{ p.mac or '—' }}</td>
+          <td class="{{ td_cls('left', 'text-slate-500') }}">{{ found_by.name if found_by else '—' }}</td>
+          <td class="{{ td_cls('left', 'text-slate-500') }}">{{ p.created_at.strftime('%m-%d %H:%M') if p.created_at else '—' }}</td>
+          <td class="{{ td_cls('right', 'space-x-1 whitespace-nowrap') }}">
+            <a href="/manage/printers/{{ p.id }}/edit?from_approvals=1" class="{{ btn('accent', 'sm') }}">Review</a>
+            {# type="button" is load-bearing: these live inside the bulk form now, and a
+               button with no type defaults to submit -- clicking one row's Approve would
+               post the whole batch. #}
+            <button type="button" hx-post="/approvals/{{ p.id }}/approve" hx-target="#pending-{{ p.id }}" hx-swap="outerHTML"
+                    class="{{ btn('success', 'sm') }}">Quick approve</button>
+            <button type="button" hx-post="/approvals/{{ p.id }}/ignore" hx-target="#pending-{{ p.id }}" hx-swap="outerHTML"
+                    class="{{ btn('subtle', 'sm') }}">Ignore</button>
+          </td>
+        </tr>
+        {% else %}
+        {{ empty_row(7, 'Nothing pending. 🎉') }}
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
 </div>
 </form>
 

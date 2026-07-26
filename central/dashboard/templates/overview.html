@@ -1,94 +1,102 @@
 {% extends "base.html" %}
 {% from "base.html" import status_badge, level_bar %}
+{% from "_components.html" import badge, card_cls, empty_row, page_title, section_title,
+        table_cls, table_wrap, td_cls, th_cls, thead_cls, tr_cls %}
 {% block title %}Overview · {{ app.name or 'Printer Nanny' }}{% endblock %}
 {% block body %}
-<h1 class="text-2xl font-semibold mb-4">Fleet overview</h1>
+{{ page_title('Fleet overview') }}
 
-<div class="grid grid-cols-2 md:grid-cols-5 gap-3 mb-6">
+{# Stat tiles. grid-cols-2 on phones so they stay readable rather than
+   shrinking to five unreadable columns. #}
+<div class="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-5 gap-3 mb-6">
   {% set s = summary %}
-  <div class="bg-white rounded-lg shadow p-4">
-    <div class="text-3xl font-semibold">{{ s.total_printers }}</div>
+  <div class="{{ card_cls() }}">
+    <div class="text-3xl font-semibold tabular-nums">{{ s.total_printers }}</div>
     <div class="text-xs text-slate-500 mt-1">Printers</div>
   </div>
-  <div class="bg-white rounded-lg shadow p-4">
-    <div class="text-3xl font-semibold text-green-600">{{ s.by_status.ok }}</div>
+  <div class="{{ card_cls() }}">
+    <div class="text-3xl font-semibold text-green-600 tabular-nums">{{ s.by_status.ok }}</div>
     <div class="text-xs text-slate-500 mt-1">OK</div>
   </div>
-  <div class="bg-white rounded-lg shadow p-4">
-    <div class="text-3xl font-semibold text-red-600">{{ s.by_status.error + s.by_status.offline }}</div>
+  <div class="{{ card_cls() }}">
+    <div class="text-3xl font-semibold text-red-600 tabular-nums">{{ s.by_status.error + s.by_status.offline }}</div>
     <div class="text-xs text-slate-500 mt-1">Error / Offline</div>
   </div>
   {% if s.pending_discovery %}
-  <a href="/approvals" class="bg-white rounded-lg shadow p-4 hover:ring-2 hover:ring-sky-300 block">
-    <div class="text-3xl font-semibold text-sky-600">{{ s.pending_discovery }}</div>
+  <a href="/approvals" class="{{ card_cls('md', 'hover:ring-2 hover:ring-sky-300 block focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-sky-500') }}">
+    <div class="text-3xl font-semibold text-sky-600 tabular-nums">{{ s.pending_discovery }}</div>
     <div class="text-xs text-slate-500 mt-1">Pending discovery</div>
   </a>
   {% else %}
-  <div class="bg-white rounded-lg shadow p-4">
-    <div class="text-3xl font-semibold text-slate-300">0</div>
+  <div class="{{ card_cls() }}">
+    <div class="text-3xl font-semibold text-slate-300 tabular-nums">0</div>
     <div class="text-xs text-slate-500 mt-1">Pending discovery</div>
   </div>
   {% endif %}
-  <a href="/alerts" class="bg-white rounded-lg shadow p-4 hover:ring-2 hover:ring-amber-300 block">
-    <div class="text-3xl font-semibold text-amber-600">{{ s.open_alerts }}</div>
+  <a href="/alerts" class="{{ card_cls('md', 'hover:ring-2 hover:ring-amber-300 block focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-sky-500') }}">
+    <div class="text-3xl font-semibold text-amber-600 tabular-nums">{{ s.open_alerts }}</div>
     <div class="text-xs text-slate-500 mt-1">Open alerts</div>
   </a>
 </div>
 
 {% if rollup %}
-<section class="bg-white rounded-lg shadow p-4 mb-6">
-  <h2 class="font-semibold mb-3">Clients</h2>
-  <table class="w-full text-sm">
-    <thead class="text-left text-xs text-slate-500">
-      <tr>
-        <th class="py-1">Client</th>
-        <th class="py-1 text-right">Sites</th>
-        <th class="py-1 text-right">Printers</th>
-        <th class="py-1 text-right">Down</th>
-        <th class="py-1 text-right">Low supplies</th>
-        <th class="py-1 text-right">Open alerts</th>
-      </tr>
-    </thead>
-    <tbody>
-      {% for row in rollup %}
-      <tr class="border-t hover:bg-slate-50">
-        <td class="py-1.5"><a href="/clients/{{ row.client.id }}" class="text-sky-700 hover:underline font-medium">{{ row.client.name }}</a></td>
-        <td class="py-1.5 text-right text-slate-500">{{ row.sites_count }}</td>
-        <td class="py-1.5 text-right tabular-nums">{{ row.printer_count }}</td>
-        <td class="py-1.5 text-right tabular-nums {{ 'text-red-600 font-semibold' if row.offline_count else 'text-slate-400' }}">{{ row.offline_count }}</td>
-        <td class="py-1.5 text-right tabular-nums {{ 'text-amber-600 font-semibold' if row.low_supplies else 'text-slate-400' }}">{{ row.low_supplies }}</td>
-        <td class="py-1.5 text-right tabular-nums {{ 'text-amber-700 font-semibold' if row.open_alerts else 'text-slate-400' }}">{{ row.open_alerts }}</td>
-      </tr>
-      {% endfor %}
-    </tbody>
-  </table>
+<section class="{{ card_cls('none', 'mb-6') }}">
+  <h2 class="font-semibold px-3 pt-4 pb-2">Clients</h2>
+  <div class="{{ table_wrap() }}">
+    <table class="{{ table_cls() }}">
+      <thead class="{{ thead_cls() }}">
+        <tr>
+          <th class="{{ th_cls() }}">Client</th>
+          <th class="{{ th_cls('right') }}">Sites</th>
+          <th class="{{ th_cls('right') }}">Printers</th>
+          <th class="{{ th_cls('right') }}">Down</th>
+          <th class="{{ th_cls('right') }}">Low supplies</th>
+          <th class="{{ th_cls('right') }}">Open alerts</th>
+        </tr>
+      </thead>
+      <tbody>
+        {% for row in rollup %}
+        <tr class="{{ tr_cls() }}">
+          <td class="{{ td_cls() }}"><a href="/clients/{{ row.client.id }}" class="text-sky-700 hover:underline font-medium rounded">{{ row.client.name }}</a></td>
+          <td class="{{ td_cls('right', 'text-slate-500 tabular-nums') }}">{{ row.sites_count }}</td>
+          <td class="{{ td_cls('right', 'tabular-nums') }}">{{ row.printer_count }}</td>
+          <td class="{{ td_cls('right', 'tabular-nums') }} {{ 'text-red-600 font-semibold' if row.offline_count else 'text-slate-400' }}">{{ row.offline_count }}</td>
+          <td class="{{ td_cls('right', 'tabular-nums') }} {{ 'text-amber-600 font-semibold' if row.low_supplies else 'text-slate-400' }}">{{ row.low_supplies }}</td>
+          <td class="{{ td_cls('right', 'tabular-nums') }} {{ 'text-amber-700 font-semibold' if row.open_alerts else 'text-slate-400' }}">{{ row.open_alerts }}</td>
+        </tr>
+        {% else %}
+        {{ empty_row(6, 'No clients yet.') }}
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
 </section>
 {% endif %}
 
 <div class="grid md:grid-cols-2 gap-6">
-  <section class="bg-white rounded-lg shadow p-4">
-    <h2 class="font-semibold mb-3">Recent activity</h2>
+  <section class="{{ card_cls() }}">
+    {{ section_title('Recent activity') }}
     <ul class="space-y-2 text-sm">
       {% for r in recent_activity %}
-      {% set sev_color = 'bg-red-100 text-red-700' if r.severity=='critical' else ('bg-amber-100 text-amber-700' if r.severity=='warning' else ('bg-sky-100 text-sky-700' if r.kind=='discovery' else 'bg-slate-100 text-slate-600')) %}
+      {% set tone = 'error' if r.severity=='critical' else ('warning' if r.severity=='warning' else ('info' if r.kind=='discovery' else 'neutral')) %}
       {% set kind_label = {'event':'event','alert':'alert','discovery':'new'}[r.kind] %}
       <li class="flex gap-2 items-start">
         <span class="text-slate-400 tabular-nums text-xs whitespace-nowrap pt-0.5">{{ r.ts.strftime('%m-%d %H:%M') if r.ts else '' }}</span>
-        <span class="px-1.5 py-0.5 rounded text-xs h-fit {{ sev_color }}">{{ kind_label }}</span>
-        <a href="{{ r.link }}" class="hover:underline">{{ r.message }}</a>
+        {{ badge(kind_label, tone, 'h-fit') }}
+        <a href="{{ r.link }}" class="hover:underline rounded">{{ r.message }}</a>
       </li>
       {% else %}<li class="text-slate-400">Nothing recent.</li>{% endfor %}
     </ul>
   </section>
 
-  <section class="bg-white rounded-lg shadow p-4">
-    <h2 class="font-semibold mb-3">Low supplies</h2>
-    <table class="w-full text-sm">
+  <section class="{{ card_cls() }}">
+    {{ section_title('Low supplies') }}
+    <table class="{{ table_cls() }}">
       <tbody>
       {% for sup in low %}
       <tr class="border-t">
         <td class="py-1.5">
-          <a href="/printers/{{ sup.printer_id }}" class="text-sky-700 hover:underline">{{ sup.description or sup.color or sup.type.value }}</a>
+          <a href="/printers/{{ sup.printer_id }}" class="text-sky-700 hover:underline rounded">{{ sup.description or sup.color or sup.type.value }}</a>
           {% if sup.printer %}
           <div class="text-xs text-slate-400">{{ sup.printer.model or sup.printer.hostname or 'printer' }} @ {{ sup.printer.ip }}</div>
           {% endif %}
@@ -100,23 +108,23 @@
     </table>
   </section>
 
-  <section class="bg-white rounded-lg shadow p-4">
-    <h2 class="font-semibold mb-3">Recent errors</h2>
+  <section class="{{ card_cls() }}">
+    {{ section_title('Recent errors') }}
     <ul class="space-y-2 text-sm">
       {% for e in errors %}
       <li class="flex gap-2">
-        <span class="px-1.5 py-0.5 rounded text-xs {{ 'bg-red-100 text-red-700' if e.severity.value=='critical' else 'bg-amber-100 text-amber-700' }}">{{ e.severity.value }}</span>
-        <a href="/printers/{{ e.printer_id }}" class="hover:underline">{{ e.message }}</a>
+        {{ badge(e.severity.value, 'error' if e.severity.value == 'critical' else 'warning') }}
+        <a href="/printers/{{ e.printer_id }}" class="hover:underline rounded">{{ e.message }}</a>
       </li>
       {% else %}<li class="text-slate-400">No recent errors.</li>{% endfor %}
     </ul>
   </section>
 
-  <section class="bg-white rounded-lg shadow p-4">
-    <h2 class="font-semibold mb-3">Open alerts</h2>
+  <section class="{{ card_cls() }}">
+    {{ section_title('Open alerts') }}
     <ul class="space-y-2 text-sm">
       {% for a in alerts %}
-      <li><a href="/alerts" class="hover:underline">{{ a.title }}</a></li>
+      <li><a href="/alerts" class="hover:underline rounded">{{ a.title }}</a></li>
       {% else %}<li class="text-slate-400">No open alerts.</li>{% endfor %}
     </ul>
   </section>

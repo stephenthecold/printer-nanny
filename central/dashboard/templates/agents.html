@@ -1,4 +1,5 @@
 {% extends "base.html" %}
+{% from "_components.html" import btn, card_cls, field, input_sm_cls %}
 {% block title %}Agents · {{ app.name or 'Printer Nanny' }}{% endblock %}
 {% block body %}
 <div class="flex items-baseline gap-3 mb-1">
@@ -108,7 +109,7 @@
     <form method="post" action="/manage/agents/msi">
       <input type="hidden" name="agent_id" value="{{ new_key.id }}">
       <input type="hidden" name="api_key" value="{{ new_key.key }}">
-      <button class="rounded bg-sky-700 hover:bg-sky-800 text-white text-sm px-3 py-1.5">Download Windows MSI</button>
+      <button class="{{ btn('accent') }}">Download Windows MSI</button>
     </form>
     <p class="text-xs text-amber-800 mt-1">
       Bundles the Python runtime, the agent, and the service wrapper with
@@ -138,7 +139,7 @@
 <div class="grid md:grid-cols-3 gap-6">
   <section class="md:col-span-2 space-y-4">
     {% for a in agents %}
-    <div class="bg-white rounded-lg shadow">
+    <div class="{{ card_cls('none') }}">
       {# --- Agent header: one tidy line of identity + one of actions --- #}
       <div class="px-4 py-3 border-b">
         <div class="flex items-center justify-between flex-wrap gap-2">
@@ -237,16 +238,22 @@
                       title="Collected by this agent for {{ s.site.client.name }}/{{ s.site.name }}">→ {{ s.site.client.name }}</span></div>
                 {% endif %}
               </td>
-              <td class="py-1.5 pr-2"><input form="subnet-{{ s.id }}" name="label" value="{{ s.label or '' }}" placeholder="VLAN 10" class="border rounded px-2 py-1 w-full" /></td>
-              <td class="py-1.5 pr-2"><input form="subnet-{{ s.id }}" name="snmp_community" value="{{ s.snmp_community }}" class="border rounded px-2 py-1 w-full" /></td>
+              {# Row controls take aria-label rather than a visible <label>: the
+                 column header already names the field for sighted users, but a
+                 screen reader reading cell-by-cell gets "edit text, blank"
+                 without it. The CIDR is included so the announcement says which
+                 subnet is being edited -- with several rows on screen, "SNMP
+                 community" alone does not identify anything. #}
+              <td class="py-1.5 pr-2"><input form="subnet-{{ s.id }}" name="label" value="{{ s.label or '' }}" placeholder="VLAN 10" aria-label="Label for {{ s.cidr }}" class="{{ input_sm_cls('w-full') }}" /></td>
+              <td class="py-1.5 pr-2"><input form="subnet-{{ s.id }}" name="snmp_community" value="{{ s.snmp_community }}" aria-label="SNMP community for {{ s.cidr }}" class="{{ input_sm_cls('w-full') }}" /></td>
               <td class="py-1.5 pr-2">
-                <select form="subnet-{{ s.id }}" name="snmp_version" class="border rounded px-1 py-1">
+                <select form="subnet-{{ s.id }}" name="snmp_version" aria-label="SNMP version for {{ s.cidr }}" class="{{ input_sm_cls() }}">
                   <option value="2c" {% if s.snmp_version == '2c' %}selected{% endif %}>2c</option>
                   <option value="1" {% if s.snmp_version == '1' %}selected{% endif %}>1</option>
                   <option value="3" {% if s.snmp_version == '3' %}selected{% endif %}>3</option>
                 </select>
               </td>
-              <td class="py-1.5 pr-2"><input form="subnet-{{ s.id }}" name="bind_interface" value="{{ s.bind_interface or '' }}" placeholder="—" title="Source IP to bind when scanning (multi-client overlap). Empty = OS default route." class="border rounded px-2 py-1 w-full" /></td>
+              <td class="py-1.5 pr-2"><input form="subnet-{{ s.id }}" name="bind_interface" value="{{ s.bind_interface or '' }}" placeholder="—" aria-label="Bind interface for {{ s.cidr }}" title="Source IP to bind when scanning (multi-client overlap). Empty = OS default route." class="{{ input_sm_cls('w-full') }}" /></td>
               {# The hidden marker says "this form carries the checkbox". Without it an
                  unchecked box (which posts nothing) is indistinguishable from a form that
                  never had the field, and every inline edit would silently untrust the subnet. #}
@@ -272,7 +279,7 @@
                 {% endif %}
               </td>
               <td class="py-1.5 text-right align-top">
-                <button form="subnet-{{ s.id }}" class="bg-slate-700 text-white rounded px-2 py-1 w-full">Save</button>
+                <button form="subnet-{{ s.id }}" class="{{ btn('primary', 'sm', 'w-full') }}">Save</button>
                 <button form="subnet-del-{{ s.id }}" class="block w-full text-red-600 hover:underline mt-0.5 text-center"
                         onclick="return confirm('Remove subnet {{ s.cidr }}?')">remove</button>
               </td>
@@ -356,17 +363,17 @@
           <summary class="text-xs text-sky-700 cursor-pointer font-medium">+ Assign subnet</summary>
           <form method="post" action="/manage/agents/{{ a.id }}/subnets" class="mt-2 space-y-2">
             <div class="grid grid-cols-4 gap-2">
-              <input name="cidr" placeholder="10.10.0.0/24" required class="col-span-2 border rounded px-2 py-1 text-sm tabular-nums" />
-              <input name="snmp_community" value="public" class="border rounded px-2 py-1 text-sm" />
-              <select name="snmp_version" class="border rounded px-2 py-1 text-sm">
+              <input name="cidr" placeholder="10.10.0.0/24" required aria-label="Subnet CIDR" class="{{ input_sm_cls('col-span-2 tabular-nums') }}" />
+              <input name="snmp_community" value="public" aria-label="SNMP community" class="{{ input_sm_cls() }}" />
+              <select name="snmp_version" aria-label="SNMP version" class="{{ input_sm_cls() }}">
                 <option value="2c">v2c</option>
                 <option value="1">v1</option>
                 <option value="3">v3</option>
               </select>
-              <input name="bind_interface" placeholder="Bind IP (optional)"
+              <input name="bind_interface" placeholder="Bind IP (optional)" aria-label="Bind IP"
                      title="For multi-client agents: which local IP to bind to when scanning this subnet"
-                     class="col-span-2 border rounded px-2 py-1 text-sm" />
-              <select name="site_id" class="col-span-2 border rounded px-2 py-1 text-sm"
+                     class="{{ input_sm_cls('col-span-2') }}" />
+              <select name="site_id" aria-label="Site this subnet belongs to" class="{{ input_sm_cls('col-span-2') }}"
                       title="Where this subnet lives. Defaults to the agent's home site; pick a different client/site for the multi-client pattern.">
                 <option value="">— Same site as agent ({{ a.site.client.name ~ ' / ' ~ a.site.name if a.site and a.site.client else '?' }}) —</option>
                 {% for client in clients %}
@@ -436,18 +443,18 @@
                 </label>
               </div>
             </details>
-            <button class="bg-slate-700 text-white rounded px-4 py-1.5 text-xs">Assign subnet</button>
+            <button class="{{ btn('primary', 'sm') }}">Assign subnet</button>
           </form>
         </details>
       </div>
     </div>
     {% else %}
-    <div class="bg-white rounded-lg shadow p-4 text-slate-400 text-sm">No agents enrolled yet.</div>
+    <div class="{{ card_cls('md', 'text-slate-400 text-sm') }}">No agents enrolled yet.</div>
     {% endfor %}
   </section>
 
   <div class="space-y-6">
-    <section class="bg-white rounded-lg shadow p-4 h-fit">
+    <section class="{{ card_cls('md', 'h-fit') }}">
       <h2 class="font-semibold mb-3">Enroll agent</h2>
       <form method="post" action="/manage/agents" class="space-y-2">
         <label class="block">
@@ -460,13 +467,13 @@
             {% endfor %}
           </select>
         </label>
-        <input name="name" placeholder="Agent name" required class="w-full border rounded px-3 py-2 text-sm" />
-        <button class="w-full bg-slate-900 text-white rounded py-2 text-sm font-medium">Create &amp; show key</button>
+        {{ field('name', 'Agent name', required=True) }}
+        <button class="{{ btn('primary', 'md', 'w-full') }}">Create &amp; show key</button>
         <p class="text-xs text-slate-400">After creating, assign subnets -- you can mix subnets from any client/site (multi-client pattern).</p>
       </form>
     </section>
 
-    <section class="bg-white rounded-lg shadow p-4 h-fit">
+    <section class="{{ card_cls('md', 'h-fit') }}">
       <h2 class="font-semibold mb-1">Claim code</h2>
       <p class="text-xs text-slate-500 mb-3">
         Hand the site a code instead of a key. The agent redeems it once on first
@@ -484,7 +491,7 @@
             {% endfor %}
           </select>
         </label>
-        <input name="name" placeholder="Agent name (optional)" class="w-full border rounded px-3 py-2 text-sm" />
+        {{ field('name', 'Agent name', help='Optional.') }}
         <label class="block">
           <span class="text-xs text-slate-500">Valid for</span>
           <select name="ttl_minutes" class="w-full border rounded px-3 py-2 text-sm">
@@ -499,7 +506,7 @@
     </section>
 
     {% if user.role.value == 'admin' and agents %}
-    <section class="bg-white rounded-lg shadow p-4 h-fit">
+    <section class="{{ card_cls('md', 'h-fit') }}">
       <h2 class="font-semibold mb-2">Update outdated agents</h2>
       <p class="text-xs text-slate-500 mb-3">
         Pushes agent v{{ target_agent_version }} to each agent reporting an older

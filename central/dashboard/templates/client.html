@@ -1,4 +1,5 @@
 {% extends "base.html" %}
+{% from "_components.html" import card_cls %}
 {% from "base.html" import status_badge, level_bar %}
 {% block title %}{{ client.name }} · {{ app.name or 'Printer Nanny' }}{% endblock %}
 
@@ -30,23 +31,23 @@
 
 {# --- Client-level summary: the per-client overview at a glance. --- #}
 <div class="grid grid-cols-2 md:grid-cols-5 gap-3 mb-6">
-  <div class="bg-white rounded-lg shadow p-4">
+  <div class="{{ card_cls() }}">
     <div class="text-3xl font-semibold">{{ client_stats.printers }}</div>
     <div class="text-xs text-slate-500 mt-1">Printers</div>
   </div>
-  <div class="bg-white rounded-lg shadow p-4">
+  <div class="{{ card_cls() }}">
     <div class="text-3xl font-semibold {{ 'text-red-600' if client_stats.down else 'text-slate-300' }}">{{ client_stats.down }}</div>
     <div class="text-xs text-slate-500 mt-1">Down</div>
   </div>
-  <div class="bg-white rounded-lg shadow p-4">
+  <div class="{{ card_cls() }}">
     <div class="text-3xl font-semibold {{ 'text-amber-600' if client_stats.warnings else 'text-slate-300' }}">{{ client_stats.warnings }}</div>
     <div class="text-xs text-slate-500 mt-1">Warnings</div>
   </div>
-  <div class="bg-white rounded-lg shadow p-4">
+  <div class="{{ card_cls() }}">
     <div class="text-3xl font-semibold {{ 'text-amber-600' if client_stats.low_supplies else 'text-slate-300' }}">{{ client_stats.low_supplies }}</div>
     <div class="text-xs text-slate-500 mt-1">Low supplies</div>
   </div>
-  <div class="bg-white rounded-lg shadow p-4">
+  <div class="{{ card_cls() }}">
     {% if client_stats.soonest_days is not none %}
     <div class="text-3xl font-semibold {{ 'text-red-600' if client_stats.soonest_days <= 7 else ('text-amber-600' if client_stats.soonest_days <= 21 else 'text-slate-700') }}">~{{ '%.0f'|format(client_stats.soonest_days) }}d</div>
     <div class="text-xs text-slate-500 mt-1">Next supply order due</div>
@@ -59,7 +60,7 @@
 
 {% for site in sites %}
 {% set stats = site_stats.get(site.id) %}
-<section class="bg-white rounded-lg shadow mb-4">
+<section class="{{ card_cls('none', 'mb-4') }}">
   <div class="px-4 py-3 border-b flex items-center justify-between flex-wrap gap-2">
     <div class="flex items-center gap-3 flex-wrap">
       <h2 class="font-semibold">{{ site.name }}</h2>

@@ -1,4 +1,5 @@
 {% extends "base.html" %}
+{% from "_components.html" import btn, card_cls, field, input_sm_cls %}
 {% block title %}People · {{ app.name or 'Printer Nanny' }}{% endblock %}
 {% block body %}
 <h1 class="text-2xl font-semibold mb-1">People</h1>
@@ -14,7 +15,7 @@
 {% endif %}
 
 {% if not clients %}
-<div class="bg-white rounded-lg shadow p-6 text-sm text-slate-600">
+<div class="{{ card_cls('none', 'p-6 text-sm text-slate-600') }}">
   No clients yet. <a href="/manage/onboard" class="text-sky-700 hover:underline">Onboard one</a> first.
 </div>
 {% else %}
@@ -29,12 +30,12 @@
       {% endfor %}
     </select>
   </label>
-  <noscript><button class="rounded bg-slate-700 text-white text-sm px-3 py-1.5">Show</button></noscript>
+  <noscript><button class="{{ btn('primary') }}">Show</button></noscript>
 </form>
 
 <div class="grid lg:grid-cols-3 gap-6">
   <!-- ------------------------------- people ------------------------------ -->
-  <section class="lg:col-span-2 bg-white rounded-lg shadow overflow-x-auto">
+  <section class="{{ card_cls('none', 'lg:col-span-2 overflow-x-auto') }}">
     <div class="px-4 py-3 border-b font-semibold flex items-center justify-between">
       <span>Staff at {{ client.name }}</span>
       <span class="text-xs font-normal text-slate-500">{{ people | length }} total</span>
@@ -99,14 +100,14 @@
 
   <!-- ------------------------------- add + assign ------------------------ -->
   <aside class="space-y-6">
-    <section class="bg-white rounded-lg shadow p-4">
+    <section class="{{ card_cls() }}">
       <div class="font-semibold mb-2 text-sm">Add a person</div>
       <form method="post" action="/manage/people/create" class="space-y-2">
         <input type="hidden" name="client_id" value="{{ client.id }}" />
-        <input name="display_name" placeholder="Full name" class="w-full border rounded px-2 py-1.5 text-sm" />
-        <input name="email" type="email" placeholder="Email" class="w-full border rounded px-2 py-1.5 text-sm" />
-        <input name="upn" placeholder="Username / UPN (optional)" class="w-full border rounded px-2 py-1.5 text-sm" />
-        <button class="w-full rounded bg-sky-700 hover:bg-sky-800 text-white text-sm px-3 py-1.5">Add</button>
+        {{ field('display_name', 'Full name', size='sm', extra_cls='w-full') }}
+        {{ field('email', 'Email', type='email', size='sm', extra_cls='w-full') }}
+        {{ field('upn', 'Username / UPN', size='sm', extra_cls='w-full', help='Optional.') }}
+        <button class="{{ btn('accent', 'md', 'w-full') }}">Add</button>
       </form>
       <p class="text-xs text-slate-400 mt-2">
         Any one field is enough. People added here are marked <em>manual</em> and
@@ -114,7 +115,7 @@
       </p>
     </section>
 
-    <section class="bg-white rounded-lg shadow p-4">
+    <section class="{{ card_cls() }}">
       <div class="font-semibold mb-2 text-sm">Assign a printer</div>
       {% if printers and (people or groups) %}
       <form method="post" action="/manage/people/assign" class="space-y-2">
@@ -140,7 +141,7 @@
           <input type="checkbox" name="is_default" value="1" class="rounded" />
           Make it their default printer
         </label>
-        <button class="w-full rounded bg-sky-700 hover:bg-sky-800 text-white text-sm px-3 py-1.5">Assign</button>
+        <button class="{{ btn('accent', 'md', 'w-full') }}">Assign</button>
       </form>
       <p class="text-xs text-slate-400 mt-2">
         Pick exactly one of person or group. Only approved printers appear here.
@@ -152,12 +153,13 @@
       {% endif %}
     </section>
 
-    <section class="bg-white rounded-lg shadow p-4">
+    <section class="{{ card_cls() }}">
       <div class="font-semibold mb-2 text-sm">New group</div>
       <form method="post" action="/manage/people/groups/create" class="flex gap-2">
         <input type="hidden" name="client_id" value="{{ client.id }}" />
-        <input name="name" placeholder="e.g. Accounting" class="flex-1 border rounded px-2 py-1.5 text-sm" required />
-        <button class="rounded bg-slate-700 hover:bg-slate-800 text-white text-sm px-3 py-1.5">Create</button>
+        <input name="name" placeholder="e.g. Accounting" aria-label="New group name"
+               class="{{ input_sm_cls('flex-1') }}" required />
+        <button class="{{ btn('primary', 'md') }}">Create</button>
       </form>
     </section>
   </aside>
@@ -165,7 +167,7 @@
 
 <!-- --------------------------------- groups ------------------------------ -->
 {% if groups %}
-<section class="mt-6 bg-white rounded-lg shadow">
+<section class="{{ card_cls('none', 'mt-6') }}">
   <div class="px-4 py-3 border-b font-semibold">Groups</div>
   <div class="divide-y">
     {% for g in groups %}
@@ -218,7 +220,7 @@
 {% set any_direct = [] %}
 {% for p in people %}{% for printer, is_default, via in (resolved.get(p.id) or []) %}{% if via is none %}{% set _ = any_direct.append(1) %}{% endif %}{% endfor %}{% endfor %}
 {% if any_direct %}
-<section class="mt-6 bg-white rounded-lg shadow overflow-x-auto">
+<section class="{{ card_cls('none', 'mt-6 overflow-x-auto') }}">
   <div class="px-4 py-3 border-b font-semibold">Direct assignments</div>
   <table class="w-full text-sm">
     <thead class="text-left text-xs text-slate-500 bg-slate-50">
@@ -249,7 +251,7 @@
 
 <!-- --------------------------- directory sync ---------------------------- -->
 {% if providers %}
-<section class="mt-6 bg-white rounded-lg shadow">
+<section class="{{ card_cls('none', 'mt-6') }}">
   <div class="px-4 py-3 border-b font-semibold flex items-center justify-between">
     <span>Directory sync</span>
     <span class="text-xs font-normal text-slate-500">people and groups for {{ client.name }}</span>
@@ -334,7 +336,7 @@
                    {% if not conn or conn.enabled %}checked{% endif %} />
             Enabled
           </label>
-          <button class="rounded bg-sky-700 hover:bg-sky-800 text-white text-sm px-3 py-1.5">Save</button>
+          <button class="{{ btn('accent') }}">Save</button>
         </div>
       </form>
 

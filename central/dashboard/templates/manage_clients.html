@@ -1,79 +1,84 @@
 {% extends "base.html" %}
+{% from "_components.html" import btn, card_cls, empty_row, field, page_title, section_title,
+        select_field, table_cls, table_wrap, td_cls, textarea_field, th_cls, thead_cls, tr_cls %}
 {% block title %}Manage · {{ app.name or 'Printer Nanny' }}{% endblock %}
 {% block body %}
-<h1 class="text-2xl font-semibold mb-4">Clients &amp; sites</h1>
+{{ page_title('Clients & sites') }}
 
 <div class="grid md:grid-cols-3 gap-6">
-  <section class="md:col-span-2 bg-white rounded-lg shadow">
-    <table class="w-full text-sm">
-      <thead class="text-left text-slate-500 bg-slate-50">
-        <tr>
-          <th class="px-4 py-2">Client</th>
-          <th class="py-2">Sites</th>
-          <th class="py-2 text-right pr-4"></th>
-        </tr>
-      </thead>
-      <tbody>
-      {% for c in clients %}
-        <tr class="border-t">
-          <td class="px-4 py-2">
-            <a href="/manage/clients/{{ c.id }}" class="text-sky-700 font-medium hover:underline">{{ c.name }}</a>
-          </td>
-          <td class="py-2 text-slate-500">{{ c.sites|length }}</td>
-          <td class="py-2 text-right pr-4 space-x-2">
-            <a href="/manage/clients/{{ c.id }}#sites"
-               class="inline-block bg-sky-600 text-white rounded px-2 py-1 text-xs">+ Add site</a>
-            <a href="/manage/clients/{{ c.id }}" class="text-xs text-sky-700 hover:underline">Manage →</a>
-          </td>
-        </tr>
-      {% else %}
-        <tr><td class="px-4 py-3 text-slate-400" colspan="3">No clients yet — add one to get started.</td></tr>
-      {% endfor %}
-      </tbody>
-    </table>
+  <section class="{{ card_cls('none', 'md:col-span-2') }}">
+    <div class="{{ table_wrap() }}">
+      <table class="{{ table_cls() }}">
+        <thead class="{{ thead_cls() }}">
+          <tr>
+            <th class="{{ th_cls() }}">Client</th>
+            <th class="{{ th_cls() }}">Sites</th>
+            <th class="{{ th_cls('right') }}"><span class="sr-only">Actions</span></th>
+          </tr>
+        </thead>
+        <tbody>
+        {% for c in clients %}
+          <tr class="{{ tr_cls() }}">
+            <td class="{{ td_cls() }}">
+              <a href="/manage/clients/{{ c.id }}" class="text-sky-700 font-medium hover:underline rounded">{{ c.name }}</a>
+            </td>
+            <td class="{{ td_cls('left', 'text-slate-500 tabular-nums') }}">{{ c.sites|length }}</td>
+            <td class="{{ td_cls('right', 'space-x-2 whitespace-nowrap') }}">
+              <a href="/manage/clients/{{ c.id }}#sites" class="{{ btn('accent', 'sm') }}">+ Add site</a>
+              <a href="/manage/clients/{{ c.id }}" class="text-xs text-sky-700 hover:underline rounded">Manage →</a>
+            </td>
+          </tr>
+        {% else %}
+          {{ empty_row(3, 'No clients yet — add one to get started.') }}
+        {% endfor %}
+        </tbody>
+      </table>
+    </div>
   </section>
 
   <div class="space-y-6">
-    <section class="bg-white rounded-lg shadow p-4 h-fit">
-      <h2 class="font-semibold mb-3">Add client</h2>
-      <form method="post" action="/manage/clients" class="space-y-2">
-        <input name="name" placeholder="Client name" required class="w-full border rounded px-3 py-2 text-sm" />
-        <textarea name="notes" placeholder="Notes (optional)" class="w-full border rounded px-3 py-2 text-sm" rows="2"></textarea>
-        <button class="w-full bg-slate-900 text-white rounded py-2 text-sm font-medium">Add client</button>
+    <section class="{{ card_cls('md', 'h-fit') }}">
+      {{ section_title('Add client') }}
+      <form method="post" action="/manage/clients" class="space-y-3">
+        {{ field('name', 'Client name', required=True) }}
+        {{ textarea_field('notes', 'Notes', rows=2) }}
+        <button class="{{ btn('primary', 'md', 'w-full') }}">Add client</button>
       </form>
     </section>
 
-    <section class="bg-white rounded-lg shadow p-4 h-fit">
-      <h2 class="font-semibold mb-3">Add site</h2>
+    <section class="{{ card_cls('md', 'h-fit') }}">
+      {{ section_title('Add site') }}
       {% if clients %}
-      <form method="post" action="/manage/sites" class="space-y-2">
-        <select name="client_id" required class="w-full border rounded px-3 py-2 text-sm">
+      <form method="post" action="/manage/sites" class="space-y-3">
+        {% call select_field('client_id', 'Client', required=True) %}
           <option value="">— Pick a client —</option>
           {% for c in clients %}<option value="{{ c.id }}">{{ c.name }}</option>{% endfor %}
-        </select>
-        <input name="name" placeholder="Site name" required class="w-full border rounded px-3 py-2 text-sm" />
-        <input name="address" placeholder="Address (optional)" class="w-full border rounded px-3 py-2 text-sm" />
-        <input name="contact" placeholder="Contact (optional)" class="w-full border rounded px-3 py-2 text-sm" />
-        <button class="w-full bg-slate-900 text-white rounded py-2 text-sm font-medium">Add site</button>
+        {% endcall %}
+        {{ field('name', 'Site name', required=True) }}
+        {{ field('address', 'Address') }}
+        {{ field('contact', 'Contact') }}
+        <button class="{{ btn('primary', 'md', 'w-full') }}">Add site</button>
       </form>
       {% else %}
       <p class="text-xs text-slate-500">Add a client first.</p>
       {% endif %}
     </section>
 
-    <section class="bg-white rounded-lg shadow p-4 h-fit">
-      <h2 class="font-semibold mb-3">Download CSV</h2>
+    <section class="{{ card_cls('md', 'h-fit') }}">
+      {{ section_title('Download CSV') }}
       <p class="text-xs text-slate-500 mb-3">Pull current fleet data for billing, supply ordering, or PSA import.</p>
       <div class="space-y-1.5 text-sm">
-        <a class="flex items-center justify-between bg-slate-100 hover:bg-slate-200 rounded px-3 py-2" href="/api/v1/reports/export/inventory.csv">
-          <span>Inventory</span><span class="text-xs text-slate-500">printers</span>
+        {% set exports = [
+          ('inventory', 'Inventory', 'printers'),
+          ('supplies', 'Supplies', 'toner / drum levels'),
+          ('alerts', 'Open alerts', 'current issues'),
+        ] %}
+        {% for slug, label, hint in exports %}
+        <a class="flex items-center justify-between bg-slate-100 hover:bg-slate-200 rounded px-3 py-2 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-offset-1 focus-visible:ring-sky-500"
+           href="/api/v1/reports/export/{{ slug }}.csv">
+          <span>{{ label }}</span><span class="text-xs text-slate-500">{{ hint }}</span>
         </a>
-        <a class="flex items-center justify-between bg-slate-100 hover:bg-slate-200 rounded px-3 py-2" href="/api/v1/reports/export/supplies.csv">
-          <span>Supplies</span><span class="text-xs text-slate-500">toner / drum levels</span>
-        </a>
-        <a class="flex items-center justify-between bg-slate-100 hover:bg-slate-200 rounded px-3 py-2" href="/api/v1/reports/export/alerts.csv">
-          <span>Open alerts</span><span class="text-xs text-slate-500">current issues</span>
-        </a>
+        {% endfor %}
       </div>
       <p class="text-xs text-slate-400 mt-3">client_readonly users get their client's data only. Add <code>?client_id=N</code> to scope to a specific client.</p>
     </section>

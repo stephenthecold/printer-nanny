@@ -1,4 +1,5 @@
 {% extends "base.html" %}
+{% from "_components.html" import btn, card_cls %}
 {% block title %}Quiet hours · {{ app.name or 'Printer Nanny' }}{% endblock %}
 {% block body %}
 <h1 class="text-2xl font-semibold mb-1">Quiet hours &amp; maintenance windows</h1>
@@ -15,7 +16,7 @@
 {% endif %}
 
 <div class="grid lg:grid-cols-3 gap-6">
-  <section class="lg:col-span-2 bg-white rounded-lg shadow overflow-x-auto">
+  <section class="{{ card_cls('none', 'lg:col-span-2 overflow-x-auto') }}">
     <div class="px-4 py-3 border-b font-semibold">Windows</div>
     {% if windows %}
     <table class="w-full text-sm">
@@ -96,7 +97,7 @@
             </form>
             <form method="post" action="/manage/suppression/{{ w.id }}/delete" class="inline"
                   onsubmit="return confirm('Delete window {{ w.name }}? Alerts will notify immediately again.');">
-              <button class="bg-red-600 text-white rounded px-2 py-1 text-xs">Delete</button>
+              <button class="{{ btn('danger', 'sm') }}">Delete</button>
             </form>
           </td>
         </tr>
@@ -110,24 +111,24 @@
     {% endif %}
   </section>
 
-  <section class="bg-white rounded-lg shadow p-4">
+  <section class="{{ card_cls() }}">
     <div class="font-semibold mb-3">Add a window</div>
     <form method="post" action="/manage/suppression" class="space-y-3 text-sm">
       <div>
-        <label class="block text-xs text-slate-500 mb-1">Name</label>
+        <label for="sw-name" class="block text-xs text-slate-500 mb-1">Name</label>
         <input name="name" required placeholder="Overnight — no calls"
-               class="w-full border rounded px-2 py-1">
+               class="w-full border rounded px-2 py-1" id="sw-name">
       </div>
       <div>
-        <label class="block text-xs text-slate-500 mb-1">Type</label>
-        <select name="kind" class="w-full border rounded px-2 py-1">
+        <label for="sw-kind" class="block text-xs text-slate-500 mb-1">Type</label>
+        <select name="kind" class="w-full border rounded px-2 py-1" id="sw-kind">
           <option value="quiet_hours">Quiet hours (recurring, client-local)</option>
           <option value="maintenance">Maintenance window (one-off, UTC)</option>
         </select>
       </div>
       <div>
-        <label class="block text-xs text-slate-500 mb-1">Held alerts</label>
-        <select name="action" class="w-full border rounded px-2 py-1">
+        <label for="sw-action" class="block text-xs text-slate-500 mb-1">Held alerts</label>
+        <select name="action" class="w-full border rounded px-2 py-1" id="sw-action">
           <option value="">Default for the type</option>
           <option value="defer">Hold, then send one digest</option>
           <option value="suppress">Drop them</option>
@@ -142,12 +143,12 @@
         <legend class="text-xs text-slate-500 px-1">Quiet hours</legend>
         <div class="flex gap-2">
           <div class="flex-1">
-            <label class="block text-xs text-slate-500 mb-1">From</label>
-            <input name="start_time" type="time" value="18:00" class="w-full border rounded px-2 py-1">
+            <label for="sw-start_time" class="block text-xs text-slate-500 mb-1">From</label>
+            <input name="start_time" type="time" value="18:00" class="w-full border rounded px-2 py-1" id="sw-start_time">
           </div>
           <div class="flex-1">
-            <label class="block text-xs text-slate-500 mb-1">To</label>
-            <input name="end_time" type="time" value="07:00" class="w-full border rounded px-2 py-1">
+            <label for="sw-end_time" class="block text-xs text-slate-500 mb-1">To</label>
+            <input name="end_time" type="time" value="07:00" class="w-full border rounded px-2 py-1" id="sw-end_time">
           </div>
         </div>
         <p class="text-[11px] text-slate-400 mt-1">An end before the start means overnight.</p>
@@ -163,21 +164,21 @@
 
       <fieldset class="border rounded p-2">
         <legend class="text-xs text-slate-500 px-1">Maintenance window (UTC)</legend>
-        <label class="block text-xs text-slate-500 mb-1">Starts</label>
-        <input name="starts_at" type="datetime-local" class="w-full border rounded px-2 py-1 mb-2">
-        <label class="block text-xs text-slate-500 mb-1">Ends</label>
-        <input name="ends_at" type="datetime-local" class="w-full border rounded px-2 py-1">
+        <label for="sw-starts_at" class="block text-xs text-slate-500 mb-1">Starts</label>
+        <input name="starts_at" type="datetime-local" class="w-full border rounded px-2 py-1 mb-2" id="sw-starts_at">
+        <label for="sw-ends_at" class="block text-xs text-slate-500 mb-1">Ends</label>
+        <input name="ends_at" type="datetime-local" class="w-full border rounded px-2 py-1" id="sw-ends_at">
       </fieldset>
 
       <div>
-        <label class="block text-xs text-slate-500 mb-1">Applies to</label>
-        <select name="scope" class="w-full border rounded px-2 py-1">
+        <label for="sw-scope" class="block text-xs text-slate-500 mb-1">Applies to</label>
+        <select name="scope" class="w-full border rounded px-2 py-1" id="sw-scope">
           <option value="global">All clients</option>
           <option value="client">One client</option>
           <option value="site">One site</option>
           <option value="printer">One printer</option>
         </select>
-        <select name="scope_id" class="w-full border rounded px-2 py-1 mt-2">
+        <select name="scope_id" aria-label="Scope target" class="w-full border rounded px-2 py-1 mt-2">
           <option value="">— target (for client/site/printer) —</option>
           {% for c in clients %}<option value="{{ c.id }}">client: {{ c.name }}</option>{% endfor %}
           {% for s in sites %}<option value="{{ s.id }}">site: {{ s.name }}</option>{% endfor %}
@@ -185,8 +186,8 @@
         </select>
       </div>
       <div>
-        <label class="block text-xs text-slate-500 mb-1">Break through at</label>
-        <select name="min_severity_breakthrough" class="w-full border rounded px-2 py-1">
+        <label for="sw-min_severity_breakthrough" class="block text-xs text-slate-500 mb-1">Break through at</label>
+        <select name="min_severity_breakthrough" class="w-full border rounded px-2 py-1" id="sw-min_severity_breakthrough">
           <option value="critical" selected>Critical (recommended)</option>
           <option value="warning">Warning and above</option>
           <option value="info">Everything (window never silences)</option>
@@ -198,7 +199,7 @@
           deliberately the last option.
         </p>
       </div>
-      <button class="w-full bg-sky-700 text-white rounded px-3 py-1.5">Add window</button>
+      <button class="{{ btn('accent', 'md', 'w-full') }}">Add window</button>
     </form>
     <p class="text-[11px] text-slate-400 mt-3">
       Client timezones are set per client under

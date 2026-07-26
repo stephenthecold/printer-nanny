@@ -42,3 +42,8 @@ htmlcov/
 
 # Agent worktrees (scratch checkouts, never part of the tree)
 .claude/worktrees/
+
+# Frontend build scratch. scripts/build-assets.sh builds in a temp dir precisely
+# so this never appears, but a developer running npm by hand in the repo would
+# otherwise have it swept into the image by deploy/Dockerfile's `COPY . .`.
+node_modules/

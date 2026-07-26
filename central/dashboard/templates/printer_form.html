@@ -1,4 +1,5 @@
 {% extends "base.html" %}
+{% from "_components.html" import btn, card_cls %}
 {% block title %}{{ 'Edit' if printer else 'Add' }} printer · Printer Nanny{% endblock %}
 {% block body %}
 {% set action = '/manage/printers/' ~ printer.id if printer else '/manage/printers' %}
@@ -30,7 +31,7 @@
 </p>
 {% endif %}
 
-<form method="post" action="{{ action }}" class="bg-white rounded-lg shadow p-5 max-w-2xl space-y-4">
+<form method="post" action="{{ action }}" class="{{ card_cls('lg', 'max-w-2xl space-y-4') }}">
   <input type="hidden" name="client_id" value="{{ client.id }}" />
   <div class="grid grid-cols-2 gap-4">
     <label class="block">
@@ -100,10 +101,10 @@
   </div>
   <div class="flex gap-2 items-center">
     {% if is_pending %}
-    <button name="approve" value="1" class="bg-emerald-600 text-white rounded px-4 py-2 text-sm font-medium">Save &amp; approve</button>
-    <button class="bg-slate-700 text-white rounded px-4 py-2 text-sm font-medium">Save without approving</button>
+    <button name="approve" value="1" class="{{ btn('success') }}">Save &amp; approve</button>
+    <button class="{{ btn('primary') }}">Save without approving</button>
     {% else %}
-    <button class="bg-slate-900 text-white rounded px-4 py-2 text-sm font-medium">{{ 'Save changes' if printer else 'Add printer' }}</button>
+    <button class="{{ btn('primary') }}">{{ 'Save changes' if printer else 'Add printer' }}</button>
     {% endif %}
     <a href="{{ '/approvals' if from_approvals else '/manage/clients/' ~ client.id }}" class="px-4 py-2 text-sm text-slate-600">Cancel</a>
   </div>
