@@ -418,6 +418,26 @@ enforced; none of them is optional.
   subtrees + decoded Brother maintenance blob percentages. Use this against
   any printer that needs a new/extended provider — paste the output as the
   starting point.
+- **Stop hook** (`scripts/stop-hook-git-check.sh`, registered in
+  `.claude/settings.json`): refuses to end a Claude Code turn with uncommitted,
+  untracked, or unpushed work — this container is ephemeral, so unpushed work is
+  lost work. It exists in the repo because the cloud environment provisions its
+  own copy at `~/.claude/stop-hook-git-check.sh` and **regenerates it every
+  session**, so fixing that copy in place never survives.
+  The bug worth not reintroducing: both checks originally scoped to
+  `"$upstream..HEAD"` — commits not on *this branch's* remote ref — when they
+  mean commits not on *any* remote. `origin/<branch>` does not move when a PR
+  merges, so a branch restarted from the merged `main` (the documented way to
+  start follow-up work) enumerated the merge commit as "unpushed", then advised
+  rebasing a commit authored by `noreply@github.com` — rewriting merged public
+  history to silence a false positive. The range is `HEAD --not
+  --remotes=origin`. The signature check is additionally gated on the checkout
+  already using Anthropic's committer identity, since this hook is checked in
+  and would otherwise block every turn for a human contributor committing as
+  themselves. `scripts/patch-launcher-hook.sh` runs at SessionStart and
+  reconciles the provisioned copy; it touches only that one path, only when it
+  matches the known-buggy shape, and is idempotent. Delete both the script and
+  its settings entry if you'd rather the provisioned hook were left alone.
 - `pytest` — full suite. ruff via `ruff check central agent tests scripts migrations`
   — the same paths CI lints. Omitting `scripts/` here (as this line used to) means
   a local run can pass while CI fails on a file you never checked.
