@@ -335,6 +335,26 @@ enforced; none of them is optional.
     creation and are then owned by the client — re-applying would overwrite
     thresholds an operator tuned, which is how people learn to distrust
     defaults. What was created is audited (`client.defaults_applied`).
+- **The driver tier answers "does this printer need a driver at all", and the
+  answer has five values, not two.** Driver installation is what strands most
+  workstation setups, and since KB5005652 (Aug 2021) the reason is *privilege*,
+  not packaging: `RestrictDriverInstallationToAdministrators` defaults to 1, so
+  Point and Print demands local admin — the user hits a UAC prompt they cannot
+  satisfy, and the usual escape (setting it to 0) reopens PrintNightmare. The
+  workstation client therefore never uses Point and Print; it runs as
+  **LocalSystem** and installs on the user's behalf. Driverless is not a
+  compromise: as of **2026-07-01** Windows ranks its inbox IPP class driver
+  ahead of third-party drivers by default. `ipp_disabled` is deliberately not
+  folded into `driver_required` — a refused port 631 is a checkbox in the
+  device's web UI, and reporting it as "needs a driver" sends a technician to
+  entirely the wrong place. **`driver_tier` (observed) and
+  `driver_tier_override` (operator's decision) are separate columns** so a
+  re-probe refreshes what we saw without discarding what a human decided, and
+  the UI can show both. A reading *without* driver fields means "no new
+  information", never "unknown" — probing is throttled to roughly daily while
+  SNMP polls run every few minutes, so treating absent as unknown would blank a
+  correctly-probed printer on the next routine poll. Only the two actionable
+  tiers are pinnable; the rest describe a failure to reach the device.
 - **End users are not operators, and the two tables must stay apart.** `users`
   are dashboard operators: globally-unique usernames, password hashes, roles,
   session auth. `end_users` are the customer's staff — tenant-scoped (two

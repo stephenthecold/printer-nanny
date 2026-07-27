@@ -211,6 +211,29 @@ def apply_reading(db: Session, site_id, reading: s.ReadingIn) -> Optional[m.Prin
         # most recent poll" -- a stale 6-hour-old trace is misleading.
         printer.last_provider_trace = reading.provider_trace
 
+    # Workstation driver tier. Only written when the agent actually probed:
+    # probing is throttled and older agents never send it, so a reading without
+    # these fields carries no information about the tier. Treating absent as
+    # "unknown" would blank a printer that probed cleanly last week every time a
+    # routine SNMP poll came in.
+    #
+    # driver_tier_override is deliberately untouched here. It is the operator's
+    # decision, and the whole point of keeping it in its own column is that a
+    # re-probe can refresh what we *observed* without discarding what a human
+    # *decided* -- so the UI can still show both and explain the difference.
+    if reading.driver_tier is not None:
+        printer.driver_tier = reading.driver_tier
+        printer.driver_tier_reason = reading.driver_tier_reason
+        printer.driver_probed_at = ts
+        # Endpoint and capabilities are only meaningful when something answered;
+        # a device that has gone unreachable keeps its last known good endpoint
+        # rather than having it blanked, which is what an operator needs to see
+        # when diagnosing why it stopped answering.
+        if reading.ipp_endpoint:
+            printer.ipp_endpoint = reading.ipp_endpoint
+        if reading.ipp_capabilities is not None:
+            printer.ipp_capabilities = reading.ipp_capabilities
+
     snapshot = []
     seen_keys: set = set()
     seen_types: set = set()

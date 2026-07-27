@@ -420,6 +420,68 @@ def printer_approve(printer_id: int, request: Request, db: Session = Depends(get
     return _redirect("/manage")
 
 
+@router.post("/printers/{printer_id}/driver-tier")
+def printer_driver_tier_override(
+    printer_id: int,
+    request: Request,
+    driver_tier_override: str = Form(""),
+    db: Session = Depends(get_db),
+):
+    """Pin (or clear) the workstation driver tier for one printer.
+
+    The probe is right about most devices and wrong about some -- a printer that
+    advertises IPP/2.0 and PWG Raster but whose firmware lies, or a model an
+    operator knows needs its vendor driver for a feature the standard cannot
+    express. This is the escape hatch, kept in its own column so a later re-probe
+    refreshes what we *observed* without discarding what a human *decided*.
+
+    Only the two actionable tiers are settable. ``ipp_disabled`` / ``unreachable``
+    / ``error`` describe a failure to reach or decode the device -- states you fix
+    on the device or the network, not opinions to pin -- so accepting them would
+    let an operator record a diagnosis the client cannot act on.
+    """
+    user = _manager(request, db)
+    if user is None:
+        return _redirect("/login")
+    printer = db.get(m.Printer, printer_id)
+    if printer is None:
+        return _redirect("/manage")
+
+    raw = (driver_tier_override or "").strip()
+    if not raw:
+        new_value = None
+    else:
+        try:
+            candidate = m.DriverTier(raw)
+        except ValueError:
+            _flash(request, f"Unknown driver tier {raw!r}.")
+            return _redirect(f"/printers/{printer.id}")
+        if candidate not in m.OVERRIDABLE_DRIVER_TIERS:
+            _flash(request, f"{candidate.value} describes a probe failure and cannot be pinned.")
+            return _redirect(f"/printers/{printer.id}")
+        new_value = candidate
+
+    printer.driver_tier_override = new_value
+    # Audit both sides: "who decided this device needs a vendor driver, and what
+    # were we detecting at the time" is the question asked when a queue misbehaves.
+    observed = printer.driver_tier.value if printer.driver_tier else "unprobed"
+    record(
+        db,
+        request,
+        user,
+        "printer.driver_tier_override",
+        target=f"printer:{printer.id} {printer.ip}",
+        detail=f"set={new_value.value if new_value else 'cleared'} observed={observed}",
+    )
+    db.commit()
+    _flash(
+        request,
+        f"Driver tier pinned to {new_value.value}." if new_value
+        else "Driver tier override cleared; using the probe result.",
+    )
+    return _redirect(f"/printers/{printer.id}")
+
+
 @router.post("/printers/{printer_id}/poll")
 def printer_poll_now(printer_id: int, request: Request, db: Session = Depends(get_db)):
     """Enqueue an immediate poll for one printer on its owning agent.
