@@ -1,5 +1,5 @@
 {% extends "base.html" %}
-{% from "_components.html" import card_cls %}
+{% from "_components.html" import card_cls, table_wrap %}
 {% from "base.html" import status_badge %}
 {% block title %}Security posture · {{ app.name or 'Printer Nanny' }}{% endblock %}
 {% block body %}
@@ -29,6 +29,9 @@
 
 <section class="{{ card_cls() }}">
   <h2 class="font-semibold mb-3">Devices</h2>
+  {# The one table on this page had no scroll container, so a narrow
+     viewport scrolled the whole page instead of just the table. #}
+  <div class="{{ table_wrap() }}">
   <table class="w-full text-sm">
     <thead class="text-left text-xs text-slate-500">
       <tr>
@@ -79,5 +82,6 @@
       {% endfor %}
     </tbody>
   </table>
+  </div>
 </section>
 {% endblock %}

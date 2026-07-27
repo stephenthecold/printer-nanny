@@ -19,6 +19,7 @@ The two invariants:
 
 from __future__ import annotations
 
+import re
 from html.parser import HTMLParser
 
 import pytest
@@ -176,3 +177,60 @@ def test_skip_link_and_landmarks_present(http):
     assert 'href="#main"' in html, "skip-to-content link missing"
     assert 'id="main"' in html, "main landmark missing"
     assert '<nav aria-label="Primary"' in html, "nav landmark is unnamed"
+
+
+# --------------------------------------------------------------------------
+# Layout containment.
+#
+# Two class names carry load-bearing behaviour that is invisible in review and
+# only shows up as a sideways-scrolling page on a narrow viewport. Both were
+# real defects found by driving Chromium at 375px, and both are one token away
+# from silently coming back.
+# --------------------------------------------------------------------------
+
+
+# /manage/agents is deliberately absent: with no agents enrolled it renders no
+# subnet table, so there is nothing to assert. These three always render one.
+@pytest.mark.parametrize("page", ["/manage/users", "/manage/audit", "/alerts"])
+def test_table_scrollers_are_positioned(http, page):
+    """Every table scroll container must also be a containing block.
+
+    Tailwind's `sr-only` is `position: absolute`. Absolutely-positioned elements
+    resolve against the nearest *positioned* ancestor -- with none, that is the
+    viewport, so they are not clipped by an `overflow-x-auto` wrapper and their
+    offset lands in the page's scroll width. A 1px hidden <span> naming an
+    actions column pushed /manage/users 60px wide at phone width while the table
+    itself was correctly contained.
+    """
+    resp = http.get(page)
+    assert resp.status_code == 200
+    html = resp.text
+    wrappers = re.findall(r'class="([^"]*overflow-x-auto[^"]*)"', html)
+    assert wrappers, f"{page} rendered no table scroller; the selector needs updating"
+    for wrapper in wrappers:
+        assert "relative" in wrapper, (
+            f"{page}: table wrapper '{wrapper.strip()}' is not a containing block. "
+            "Absolutely-positioned descendants (sr-only text) will escape it and "
+            "widen the page. Use the table_wrap() macro."
+        )
+
+
+@pytest.mark.parametrize("page", ["/manage/users", "/", "/manage/people"])
+def test_cards_can_shrink_below_their_content(http, page):
+    """Cards must carry min-w-0 so a grid can shrink them.
+
+    Grid and flex items default to `min-width: auto` and refuse to shrink below
+    their content's intrinsic width. A card holding a wide table therefore grows
+    to the table's full width and takes the page with it -- and any
+    `overflow-x-auto` inside it never scrolls, because it is handed all the
+    width it asked for. /manage/agents overflowed 401px this way.
+    """
+    html = http.get(page).text
+    cards = re.findall(r'class="([^"]*bg-white rounded-lg shadow[^"]*)"', html)
+    assert cards, f"{page} rendered no cards; the selector needs updating"
+    for card in cards:
+        assert "min-w-0" in card, (
+            f"{page}: card '{card.strip()}' lacks min-w-0 and cannot shrink "
+            "inside a grid. Use the card_cls() macro."
+        )
+

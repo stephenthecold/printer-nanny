@@ -197,6 +197,19 @@ enforced; none of them is optional.
   10.0.0.0/24") — the field name alone identifies nothing when six rows are on
   screen. `tests/test_dashboard_a11y.py` asserts this against the rendered DOM,
   because only the rendered tree can tell a wrapping label from an adjacent one.
+- **Two class names in `_components.html` are load-bearing layout, not styling,
+  and both failures are invisible until a narrow viewport.** `card_cls` emits
+  `min-w-0` because grid/flex items default to `min-width: auto` and refuse to
+  shrink below their content — a card holding a wide table grows to the table's
+  width and takes the page with it, and the `overflow-x-auto` inside it *never
+  scrolls* because it was handed all the width it asked for. `table_wrap` emits
+  `relative` because Tailwind's `sr-only` is `position: absolute`: with no
+  positioned ancestor it resolves against the viewport, escapes the scroller,
+  and contributes its offset to page width — a 1px hidden `<span>` naming an
+  actions column widened `/manage/users` by 60px. `tests/test_dashboard_a11y.py`
+  asserts both. Verify responsive changes by driving Chromium at 375px and
+  checking the *viewport* actually scrolls (`window.scrollTo(9999,0)` then read
+  `scrollX`); `documentElement.scrollWidth` alone reports contained overflow too.
 - **Every interactive control carries a visible focus ring.** There were
   previously zero focus styles across 734 keyboard-reachable elements, leaving
   keyboard operation dependent on whatever the browser drew by default —
@@ -405,7 +418,9 @@ enforced; none of them is optional.
   subtrees + decoded Brother maintenance blob percentages. Use this against
   any printer that needs a new/extended provider — paste the output as the
   starting point.
-- `pytest` — full suite. ruff via `ruff check central agent tests migrations`.
+- `pytest` — full suite. ruff via `ruff check central agent tests scripts migrations`
+  — the same paths CI lints. Omitting `scripts/` here (as this line used to) means
+  a local run can pass while CI fails on a file you never checked.
 
 ## Status
 Production-ready feature surface (as of PR #46):

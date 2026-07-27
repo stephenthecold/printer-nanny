@@ -137,7 +137,11 @@
 {% endif %}
 
 <div class="grid md:grid-cols-3 gap-6">
-  <section class="md:col-span-2 space-y-4">
+  {# min-w-0: this is a grid item holding the per-agent cards, one of which
+     contains the min-w-[640px] subnet table. Without it the item takes its
+     content's intrinsic width and the page scrolls sideways instead of the
+     table scrolling inside its own container. #}
+  <section class="md:col-span-2 min-w-0 space-y-4">
     {% for a in agents %}
     <div class="{{ card_cls('none') }}">
       {# --- Agent header: one tidy line of identity + one of actions --- #}
