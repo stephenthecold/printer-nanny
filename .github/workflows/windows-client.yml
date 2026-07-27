@@ -1,0 +1,83 @@
+name: Windows workstation client
+
+# The workstation client provisions print queues by driving the Windows spooler,
+# which no Linux runner can exercise. Everything above the PowerShell seam is
+# covered by the normal CI job with a fake; this job covers the seam itself
+# against a real spooler.
+#
+# Path-filtered on purpose: Windows runner minutes bill at 2x the Linux rate on
+# private repositories, so this runs only when the code it covers changes.
+# workflow_dispatch is there so it can be run by hand against any branch.
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "agent/printer_nanny_agent/workstation.py"
+      - "tests/windows/**"
+      - ".github/workflows/windows-client.yml"
+  pull_request:
+    paths:
+      - "agent/printer_nanny_agent/workstation.py"
+      - "tests/windows/**"
+      - ".github/workflows/windows-client.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  spooler:
+    runs-on: windows-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install the agent package
+        # Only the package itself -- these tests need no central, no database
+        # and no SNMP stack, and installing less keeps the job fast.
+        run: python -m pip install --upgrade pip pytest ./agent
+
+      - name: Report the spooler environment
+        # Printed unconditionally: when a future image changes which drivers
+        # ship, this output is what turns "mystery failure" into "the driver we
+        # picked is gone".
+        shell: pwsh
+        run: |
+          Write-Host "OS: $([System.Environment]::OSVersion.VersionString)"
+          Write-Host "PowerShell: $($PSVersionTable.PSVersion)"
+          $spooler = Get-Service -Name Spooler -ErrorAction SilentlyContinue
+          Write-Host "Spooler service: $($spooler.Status)"
+          Write-Host "--- installed printer drivers ---"
+          Get-PrinterDriver | Select-Object -ExpandProperty Name | Sort-Object
+          Write-Host "--- existing queues ---"
+          Get-Printer | Select-Object -ExpandProperty Name | Sort-Object
+
+      - name: Ensure the spooler is running
+        # A stopped spooler makes every Add-Printer fail with an error that
+        # looks like our bug rather than the environment's.
+        shell: pwsh
+        run: |
+          $s = Get-Service -Name Spooler
+          if ($s.Status -ne 'Running') { Start-Service Spooler; Start-Sleep -Seconds 3 }
+          (Get-Service -Name Spooler).Status
+
+      - name: Spooler integration tests
+        run: python -m pytest tests/windows -v
+
+      - name: Leave no queues behind
+        # Belt and braces over the per-test fixtures: a crashed test must not
+        # leave a PNTest- queue on a reused image.
+        if: always()
+        shell: pwsh
+        run: |
+          Get-Printer | Where-Object { $_.Name -like 'PNTest-*' } | ForEach-Object {
+            Write-Host "removing leftover queue: $($_.Name)"
+            Remove-Printer -Name $_.Name -ErrorAction SilentlyContinue
+          }
+          Get-PrinterPort | Where-Object { $_.Name -like 'PN_127.0.0.*' } | ForEach-Object {
+            Remove-PrinterPort -Name $_.Name -ErrorAction SilentlyContinue
+          }
