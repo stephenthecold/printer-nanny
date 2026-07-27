@@ -485,6 +485,30 @@ transports, **not** against real tenants.
   injection question moot rather than merely handled — there is no quoting to
   get wrong. A test asserts the script bodies contain no format placeholders,
   and the Windows job proves a hostile value comes back as literal text.
+- **Scripts reach PowerShell as `-EncodedCommand`, and stdin is not an
+  alternative.** `powershell -Command -` parses stdin **line by line**, so any
+  construct spanning lines (`if (…) {`, `try {`) is incomplete on its first line
+  and the remainder is discarded — silently, with **exit 0** and empty output.
+  This cost two Windows CI rounds. First `_SCRIPT_ADD_TCP_PORT` lost its `if`
+  body, so the port was never created and the `Add-Printer` that followed had no
+  port to bind; then the try/catch wrapper added to catch *that* was itself
+  multi-line and made every call return `''` — a deliberate `throw` stopped
+  raising. So the script is base64 UTF-16LE in a single argv element, which
+  removes the command-line parser from the path entirely; newlines, quotes and
+  braces survive exactly. Only our own constants are encoded — caller values
+  still travel by environment, so this narrows the injection surface rather than
+  widening it. `tests/test_workstation_queue.py` round-trips every `_SCRIPT_*`
+  byte for byte and asserts some of them still span lines, so stdin cannot come
+  back as a "simplification".
+- **PowerShell exits 0 when a cmdlet throws**, including under
+  `$ErrorActionPreference = 'Stop'`. Trusting `returncode` meant a failed
+  `Add-Printer` was reported as success and the caller recorded "created" for a
+  queue that does not exist — on a workstation, central showing printers as
+  provisioned while the user has nothing to print to, with no error anywhere. So
+  the wrapper carries an explicit `exit 1` **and** a stdout failure marker, plus
+  a `$LASTEXITCODE` check because a native command (`pnputil`) that fails does
+  not throw. A fake runner returns what it is told, so no amount of unit testing
+  above the seam can find this class of defect — only the Windows job can.
 - **Queue provisioning converges; it never blindly creates.** The client re-runs
   on every assignment change, service start and poll, so `Add-Printer` on an
   existing queue would mean a crash loop or a swallowed exception hiding real
