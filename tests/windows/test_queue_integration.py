@@ -88,22 +88,26 @@ def test_nonzero_exit_raises_with_stderr(runner):
 @pytest.mark.parametrize(
     "hostile",
     [
-        'x"; Write-Host PWNED; #',
-        "'; Write-Host PWNED; '",
-        "$(Write-Host PWNED)",
-        "a`nWrite-Host PWNED",
+        'x"; Write-Host SENTINEL; #',
+        "'; Write-Host SENTINEL; '",
+        "$(Write-Host SENTINEL)",
+        "a`nWrite-Host SENTINEL",
         "& calc.exe",
+        "; Remove-Item -Recurse C:\\ ;",
     ],
 )
 def test_hostile_values_are_inert_on_a_real_shell(runner, hostile):
-    """The claim the unit tests can only assert structurally, proven for real.
+    """A value carrying PowerShell syntax must come back literal, not evaluated.
 
-    A value carrying PowerShell syntax must come back as literal text, not be
-    evaluated. If environment delivery were unsound this is where it shows.
+    Asserted as **exact equality**, not as "the sentinel is absent". An earlier
+    version checked absence and failed on correct behaviour: the value is echoed
+    verbatim, so the sentinel word appears in the output as part of the literal.
+    Absence cannot distinguish "echoed as text" from "executed" -- equality can,
+    because an evaluated ``$(Write-Host ...)`` would substitute or vanish rather
+    than round-trip byte for byte.
     """
     out = runner.run("$env:PN_VALUE", {"value": hostile})
-    assert "PWNED" not in out, "a hostile value executed"
-    assert hostile.strip().splitlines()[0][:12] in out or hostile in out
+    assert out.strip("\r\n") == hostile, "value did not round-trip literally"
 
 
 # --- the inbox driver -------------------------------------------------------

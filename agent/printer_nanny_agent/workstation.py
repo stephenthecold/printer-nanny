@@ -97,6 +97,18 @@ class PowerShellRunner:
 
         The script is fed on **stdin**, never as an argv element, so its text is
         fixed at import time and no caller-supplied string can extend it.
+
+        Failures are detected from the *script*, not from the process exit code.
+        ``powershell -Command -`` exits 0 even when a cmdlet throws, including
+        under ``$ErrorActionPreference = 'Stop'`` -- so trusting returncode meant
+        a failed Add-Printer was reported as success and the caller happily
+        recorded "created" for a queue that does not exist. The Windows CI job
+        caught exactly that; a fake runner never could.
+
+        So the script is wrapped in try/catch with an explicit ``exit 1``, and
+        native executables (pnputil) are checked via $LASTEXITCODE. The wrapper
+        composes our own constant scripts -- never caller data, which still
+        travels only by environment.
         """
         env = os.environ.copy()
         env.update(build_env(variables or {}))
@@ -112,21 +124,55 @@ class PowerShellRunner:
         ]
         proc = subprocess.run(  # noqa: S603 - fixed argv, no shell, no interpolation
             argv,
-            input=script,
+            input=wrap_script(script),
             capture_output=True,
             text=True,
             timeout=self.timeout_s,
             env=env,
             shell=False,
         )
-        if proc.returncode != 0:
+        stdout = proc.stdout or ""
+        if proc.returncode != 0 or _FAILURE_MARKER in stdout:
             raise PowerShellError(
-                "powershell exited {}".format(proc.returncode),
+                "powershell failed (exit {})".format(proc.returncode),
                 proc.returncode,
-                proc.stdout,
-                proc.stderr.strip()[:2000],
+                stdout.replace(_FAILURE_MARKER, "").strip(),
+                (proc.stderr or "").strip()[:2000],
             )
-        return proc.stdout
+        return stdout
+
+
+#: Emitted by the wrapper when the script threw. Belt-and-braces alongside the
+#: exit code, because some PowerShell hosts have historically been unreliable
+#: about propagating `exit` from a stdin-fed script -- and a runner that reports
+#: success on failure is worse than no runner at all.
+_FAILURE_MARKER = "__PN_SCRIPT_FAILED__"
+
+_WRAP_HEAD = "$ErrorActionPreference = 'Stop'\n$ProgressPreference = 'SilentlyContinue'\ntry {\n"
+_WRAP_TAIL = (
+    "\n}\ncatch {\n"
+    "  [Console]::Error.WriteLine($_.Exception.Message)\n"
+    "  Write-Output '" + _FAILURE_MARKER + "'\n"
+    "  exit 1\n"
+    "}\n"
+    # A native executable (pnputil) that fails does not throw, so its exit code
+    # has to be inspected separately or a failed driver stage looks like success.
+    "if ($null -ne $LASTEXITCODE -and $LASTEXITCODE -ne 0) {\n"
+    "  [Console]::Error.WriteLine('native command exited ' + $LASTEXITCODE)\n"
+    "  Write-Output '" + _FAILURE_MARKER + "'\n"
+    "  exit $LASTEXITCODE\n"
+    "}\n"
+)
+
+
+def wrap_script(script: str) -> str:
+    """Wrap one of our constant scripts so a thrown error becomes a failure.
+
+    Only ever applied to module-level script constants. Caller data never
+    appears here -- it travels by environment, which is what keeps the
+    composition safe.
+    """
+    return _WRAP_HEAD + script + _WRAP_TAIL
 
 
 def build_env(variables: Dict[str, str]) -> Dict[str, str]:

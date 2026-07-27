@@ -74,6 +74,47 @@ jobs:
           if ($s.Status -ne 'Running') { Start-Service Spooler; Start-Sleep -Seconds 3 }
           (Get-Service -Name Spooler).Status
 
+      - name: Which driver/port combinations does this image accept?
+        # Diagnostic, never fatal. The first real run failed with every spooler
+        # error swallowed, so this reports -- in one run -- exactly which
+        # combinations a bare runner supports. "Microsoft Print To PDF" is built
+        # for the PORTPROMPT: local port and may well refuse a TCP/IP port; this
+        # says so out loud instead of leaving it to be guessed at.
+        continue-on-error: true
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Continue'
+          $port = 'PNDiag_127.0.0.1'
+          try { Add-PrinterPort -Name $port -PrinterHostAddress '127.0.0.1' -ErrorAction Stop; Write-Host "TCP port created: OK" }
+          catch { Write-Host "TCP port create FAILED: $($_.Exception.Message)" }
+
+          foreach ($drv in @(
+            'Microsoft Print To PDF',
+            'Microsoft enhanced Point and Print compatibility driver',
+            'Universal Print Class Driver',
+            'Microsoft IPP Class Driver'
+          )) {
+            $q = 'PNDiag-' + [guid]::NewGuid().ToString('N').Substring(0,6)
+            try {
+              Add-Printer -Name $q -DriverName $drv -PortName $port -ErrorAction Stop
+              Write-Host "TCP + '$drv' -> OK"
+              Remove-Printer -Name $q -ErrorAction SilentlyContinue
+            } catch {
+              Write-Host "TCP + '$drv' -> FAILED: $($_.Exception.Message)"
+            }
+          }
+
+          $q = 'PNDiag-portprompt'
+          try {
+            Add-Printer -Name $q -DriverName 'Microsoft Print To PDF' -PortName 'PORTPROMPT:' -ErrorAction Stop
+            Write-Host "PORTPROMPT: + 'Microsoft Print To PDF' -> OK"
+            Remove-Printer -Name $q -ErrorAction SilentlyContinue
+          } catch {
+            Write-Host "PORTPROMPT: -> FAILED: $($_.Exception.Message)"
+          }
+
+          Remove-PrinterPort -Name $port -ErrorAction SilentlyContinue
+
       - name: Spooler integration tests
         run: python -m pytest tests/windows -v
 

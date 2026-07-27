@@ -122,6 +122,31 @@ def test_scripts_contain_no_format_placeholders():
         assert "$(" not in script or "Invoke" not in script, name
 
 
+def test_wrapper_turns_a_thrown_error_into_a_failure():
+    """`powershell -Command -` exits 0 even when a cmdlet throws.
+
+    Trusting the process exit code meant a failed Add-Printer was reported as
+    success and the caller recorded "created" for a queue that did not exist.
+    The Windows CI job caught it; a fake runner never could. The wrapper is what
+    closes it, so its shape is pinned here.
+    """
+    wrapped = ws.wrap_script("Add-Printer -Name $env:PN_NAME")
+    assert "try {" in wrapped and "catch {" in wrapped
+    assert "exit 1" in wrapped
+    assert ws._FAILURE_MARKER in wrapped
+    # A native command that fails does not throw, so it needs its own check.
+    assert "$LASTEXITCODE" in wrapped
+    assert "Add-Printer -Name $env:PN_NAME" in wrapped
+
+
+def test_wrapper_does_not_interpolate_caller_data():
+    """The wrapper composes our constants only; values still travel by env."""
+    for name in dir(ws):
+        if name.startswith("_SCRIPT_"):
+            wrapped = ws.wrap_script(getattr(ws, name))
+            assert "{}" not in wrapped and "%s" not in wrapped
+
+
 def test_build_env_namespaces_and_stringifies():
     env = ws.build_env({"name": "Lobby", "port": 631})
     assert env == {"PN_NAME": "Lobby", "PN_PORT": "631"}
