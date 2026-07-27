@@ -71,6 +71,46 @@ class PrinterStatus(str, enum.Enum):
     unknown = "unknown"
 
 
+class DriverTier(str, enum.Enum):
+    """How a workstation queue for this printer has to be created.
+
+    Driver installation is what strands most workstation setups, and since
+    KB5005652 (Aug 2021) the reason is privilege rather than packaging:
+    ``RestrictDriverInstallationToAdministrators`` defaults to 1, so Point and
+    Print demands local admin. The workstation client sidesteps that entirely by
+    running as LocalSystem -- but it still has to know, per device, whether a
+    driver is needed at all.
+
+    Five values rather than two, because they call for different remediation and
+    the difference is invisible in a single "failed" state:
+
+    ``driverless``       the Windows inbox IPP class driver drives it; nothing
+                         to install. Preferred -- as of 2026-07-01 Windows ranks
+                         that driver ahead of third-party ones by default.
+    ``driver_required``  answers IPP but below the class driver's bar, so the
+                         privileged service must stage a vendor driver.
+    ``ipp_disabled``     the device refused port 631. Many ship with IPP off;
+                         that is a checkbox in the printer's web UI, NOT a
+                         driver problem. Conflating the two sends a technician
+                         to entirely the wrong place, which is why it is its own
+                         value and not folded into ``driver_required``.
+    ``unreachable``      nothing answered (offline, firewalled, wrong address).
+    ``error``            answered, but with nothing we could decode.
+    """
+
+    driverless = "driverless"
+    driver_required = "driver_required"
+    ipp_disabled = "ipp_disabled"
+    unreachable = "unreachable"
+    error = "error"
+
+
+#: The only tiers an operator may pin. The other three describe a failure to
+#: reach or decode the device -- states you fix on the device or the network,
+#: not opinions to override.
+OVERRIDABLE_DRIVER_TIERS = (DriverTier.driverless, DriverTier.driver_required)
+
+
 class SupplyType(str, enum.Enum):
     toner = "toner"
     ink = "ink"
@@ -489,7 +529,49 @@ class Printer(Base):
     #   {"name": "brother_pjl", "ok": false, "error": "connect refused",
     #    "fields": [], "summary": "PJL port 9100 unreachable"}
     last_provider_trace: Mapped[Optional[list]] = mapped_column(JSON, default=None)
+
+    # --- workstation driver tier -------------------------------------------
+    # What the agent's IPP probe observed, and what an operator decided if they
+    # disagreed. Kept in two columns on purpose: a re-probe must be free to
+    # update what it saw without silently discarding a human's decision, and an
+    # operator must be able to see both ("we detect driver_required, you pinned
+    # driverless") rather than a single value with no provenance.
+    driver_tier: Mapped[Optional[DriverTier]] = mapped_column(
+        _enum(DriverTier), default=None, index=True
+    )
+    # Why the probe reached that conclusion, in words an operator can act on
+    # ("advertises only IPP 1.1 -- the inbox class driver needs 2.0 or later").
+    # Rendered verbatim; the probe writes no value it would not want read aloud
+    # to a technician.
+    driver_tier_reason: Mapped[Optional[str]] = mapped_column(String(400), default=None)
+    driver_tier_override: Mapped[Optional[DriverTier]] = mapped_column(
+        _enum(DriverTier), default=None
+    )
+    driver_probed_at: Mapped[Optional[datetime]] = mapped_column(
+        DateTime(timezone=True), default=None
+    )
+    # The IPP URI that actually answered. Devices vary on path (/ipp/print,
+    # /ipp/printer, ...), so the working one is recorded rather than re-derived.
+    ipp_endpoint: Mapped[Optional[str]] = mapped_column(String(300), default=None)
+    # Free-shape capability detail from the probe (versions, document formats,
+    # finishings). Diagnostics only -- nothing keys off its contents, so the
+    # probe can add fields without a migration.
+    ipp_capabilities: Mapped[Optional[dict]] = mapped_column(JSON, default=None)
+
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+
+    @property
+    def effective_driver_tier(self) -> Optional[DriverTier]:
+        """The tier the workstation client should act on: override beats probe."""
+        return self.driver_tier_override or self.driver_tier
+
+    @property
+    def driver_tier_is_overridden(self) -> bool:
+        """True when an operator pinned a tier that differs from what we saw."""
+        return (
+            self.driver_tier_override is not None
+            and self.driver_tier_override != self.driver_tier
+        )
 
     client: Mapped[Client] = relationship(back_populates="printers")
     site: Mapped[Site] = relationship(back_populates="printers")

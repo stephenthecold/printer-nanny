@@ -17,6 +17,7 @@ from printer_nanny_agent import __version__
 from printer_nanny_agent.client import CentralClient
 from printer_nanny_agent.config import AgentConfig, SubnetConfig, merge_remote
 from printer_nanny_agent.discovery import discover_subnet
+from printer_nanny_agent.driver_probe import DriverProbeCache, attach as attach_driver_probe
 from printer_nanny_agent.mdns import assign_subnet_cidr, discover_mdns, mdns_available
 from printer_nanny_agent.poller import poll_printer
 from printer_nanny_agent.snmp import PysnmpBackend, SnmpBackend, SnmpError, SnmpParams
@@ -25,6 +26,10 @@ from printer_nanny_agent.spool import ReadingSpool
 log = logging.getLogger("printer_nanny_agent.runner")
 
 _POLL_CONCURRENCY = 16
+
+# Process-lifetime IPP probe throttle. Shared across cycles so a device is
+# probed roughly daily rather than on every poll -- see driver_probe.
+_DRIVER_PROBE_CACHE = DriverProbeCache()
 
 
 def _spool_for(config: AgentConfig) -> ReadingSpool:
@@ -191,7 +196,15 @@ async def poll_targets(
         nonlocal unreachable
         async with sem:
             try:
-                return await poll_printer(backend, target["ip"], _params_for_target(target, config))
+                reading = await poll_printer(
+                    backend, target["ip"], _params_for_target(target, config)
+                )
+                # Ride the IPP capability probe along with the SNMP poll, at
+                # most once per device per interval. Never raises: a probe
+                # failure must not cost the reading it travels with.
+                return await asyncio.to_thread(
+                    attach_driver_probe, reading, _DRIVER_PROBE_CACHE, target["ip"]
+                )
             except SnmpError as exc:
                 unreachable += 1
                 log.warning("poll failed for %s: %s", target["ip"], exc)

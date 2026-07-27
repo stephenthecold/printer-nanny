@@ -79,6 +79,16 @@ class ReadingIn(BaseModel):
     # that ran) -- the dashboard renders them as-is so providers can evolve
     # their summary without a schema migration.
     provider_trace: Optional[list[dict]] = None
+    # Workstation driver tier, from the agent's IPP capability probe. Absent on
+    # most readings: probing is throttled to a slow cadence (it is several HTTP
+    # round-trips per device, and the answer changes only when firmware or the
+    # device's IPP setting does), and legacy agents never send it. Absent means
+    # "no new information" -- it must never be read as "no longer driverless"
+    # and reset a printer that was probed successfully last week.
+    driver_tier: Optional[m.DriverTier] = None
+    driver_tier_reason: Optional[str] = None
+    ipp_endpoint: Optional[str] = None
+    ipp_capabilities: Optional[dict] = None
 
     @field_validator("page_count", "mono_count", "color_count")
     @classmethod
