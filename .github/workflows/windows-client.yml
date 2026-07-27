@@ -75,11 +75,16 @@ jobs:
           (Get-Service -Name Spooler).Status
 
       - name: Which driver/port combinations does this image accept?
-        # Diagnostic, never fatal. The first real run failed with every spooler
-        # error swallowed, so this reports -- in one run -- exactly which
-        # combinations a bare runner supports. "Microsoft Print To PDF" is built
-        # for the PORTPROMPT: local port and may well refuse a TCP/IP port; this
-        # says so out loud instead of leaving it to be guessed at.
+        # Diagnostic, never fatal. Answered on 2026-07-27: *all* of them --
+        # TCP/IP port creation, all four inbox drivers bound to it (including
+        # "Microsoft Print To PDF", which I had wrongly guessed would refuse a
+        # non-PORTPROMPT port), and PORTPROMPT: itself. So the spooler was never
+        # the problem and the test fixture's driver choice is sound; the failures
+        # were ours, in how the script reached PowerShell.
+        #
+        # Kept as a canary rather than deleted: it costs ~3s, and if a future
+        # image drops a driver or locks down port creation, this line says so
+        # instead of the tests failing somewhere less obvious.
         continue-on-error: true
         shell: pwsh
         run: |

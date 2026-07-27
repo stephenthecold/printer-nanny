@@ -41,6 +41,7 @@ rather than duplicated. Every operation here is therefore written as
 
 from __future__ import annotations
 
+import base64
 import logging
 import os
 import shutil
@@ -95,13 +96,15 @@ class PowerShellRunner:
     def run(self, script: str, variables: Optional[Dict[str, str]] = None) -> str:
         """Execute ``script``, exposing ``variables`` as $env:PN_* inside it.
 
-        The script is fed on **stdin**, never as an argv element, so its text is
-        fixed at import time and no caller-supplied string can extend it.
+        The script is delivered **base64-encoded in one argv element**, and its
+        text is one of this module's constants -- fixed at import time, so no
+        caller-supplied string can extend it. Caller values never appear in the
+        script at all; they arrive by environment.
 
-        Failures are detected from the *script*, not from the process exit code.
-        ``powershell -Command -`` exits 0 even when a cmdlet throws, including
-        under ``$ErrorActionPreference = 'Stop'`` -- so trusting returncode meant
-        a failed Add-Printer was reported as success and the caller happily
+        Failures are detected from the *script*, not from the process exit code
+        alone. PowerShell exits 0 even when a cmdlet throws, including under
+        ``$ErrorActionPreference = 'Stop'`` -- so trusting returncode meant a
+        failed Add-Printer was reported as success and the caller happily
         recorded "created" for a queue that does not exist. The Windows CI job
         caught exactly that; a fake runner never could.
 
@@ -114,17 +117,23 @@ class PowerShellRunner:
         env.update(build_env(variables or {}))
         # -NoProfile: a machine profile must not change our behaviour.
         # -NonInteractive: never block a service on a prompt.
-        # -Command -: read the script from stdin.
+        # -EncodedCommand: the script as base64 UTF-16LE in a single argv slot.
+        #
+        # NOT `-Command -` on stdin: that parses input line by line, so a
+        # multi-line construct is incomplete on its first line and the script
+        # silently produces nothing. That regression was real -- wrapping the
+        # scripts in try/catch made every call return empty output until this
+        # changed. Encoding sidesteps command-line parsing entirely, which also
+        # means newlines, quotes and braces survive exactly as written.
         argv = [
             self.executable,
             "-NoProfile",
             "-NonInteractive",
             "-ExecutionPolicy", "Bypass",
-            "-Command", "-",
+            "-EncodedCommand", encode_command(wrap_script(script)),
         ]
         proc = subprocess.run(  # noqa: S603 - fixed argv, no shell, no interpolation
             argv,
-            input=wrap_script(script),
             capture_output=True,
             text=True,
             timeout=self.timeout_s,
@@ -143,9 +152,9 @@ class PowerShellRunner:
 
 
 #: Emitted by the wrapper when the script threw. Belt-and-braces alongside the
-#: exit code, because some PowerShell hosts have historically been unreliable
-#: about propagating `exit` from a stdin-fed script -- and a runner that reports
-#: success on failure is worse than no runner at all.
+#: exit code, because PowerShell hosts have historically been unreliable about
+#: propagating `exit` out of a non-interactive invocation -- and a runner that
+#: reports success on failure is worse than no runner at all.
 _FAILURE_MARKER = "__PN_SCRIPT_FAILED__"
 
 _WRAP_HEAD = "$ErrorActionPreference = 'Stop'\n$ProgressPreference = 'SilentlyContinue'\ntry {\n"
@@ -163,6 +172,16 @@ _WRAP_TAIL = (
     "  exit $LASTEXITCODE\n"
     "}\n"
 )
+
+
+def encode_command(script: str) -> str:
+    """Base64 UTF-16LE, the encoding -EncodedCommand expects.
+
+    Carries an arbitrary multi-line script through a single argv element with no
+    shell or command-line parsing in between. Only our own constant scripts are
+    encoded; caller values still travel by environment.
+    """
+    return base64.b64encode(script.encode("utf-16-le")).decode("ascii")
 
 
 def wrap_script(script: str) -> str:

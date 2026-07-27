@@ -14,6 +14,9 @@ that invariant directly rather than trying to enumerate hostile inputs.
 
 from __future__ import annotations
 
+import base64
+import subprocess
+
 import pytest
 
 from printer_nanny_agent import workstation as ws
@@ -145,6 +148,92 @@ def test_wrapper_does_not_interpolate_caller_data():
         if name.startswith("_SCRIPT_"):
             wrapped = ws.wrap_script(getattr(ws, name))
             assert "{}" not in wrapped and "%s" not in wrapped
+
+
+def _script_constants():
+    return sorted(n for n in dir(ws) if n.startswith("_SCRIPT_"))
+
+
+@pytest.mark.parametrize("name", _script_constants())
+def test_encode_command_round_trips_every_script(name):
+    """Byte-for-byte survival, newlines included -- what stdin destroyed.
+
+    ``powershell -Command -`` parses stdin **line by line**, so a construct that
+    spans lines is incomplete on its first line and the script silently produces
+    nothing. Two failures on the Windows runner were this: the try/catch wrapper
+    made *every* call return empty output, and before that ``_SCRIPT_ADD_TCP_PORT``
+    lost its ``if {}`` body, so the port was never created and the Add-Printer
+    that followed had no port to bind. -EncodedCommand sidesteps command-line
+    parsing entirely, so the property to pin is exact round-trip.
+    """
+    script = ws.wrap_script(getattr(ws, name))
+    decoded = base64.b64decode(ws.encode_command(script)).decode("utf-16-le")
+    assert decoded == script
+    assert decoded.count("\n") == script.count("\n") > 1
+
+
+def test_some_scripts_span_lines_so_stdin_delivery_can_never_come_back():
+    """Pin the reason -EncodedCommand is not merely a stylistic choice.
+
+    If these bodies ever became single-line, the hazard would look theoretical
+    and someone would reasonably "simplify" the runner back to stdin. They are
+    not single-line, and this says which ones and why it matters.
+    """
+    spanning = [
+        n for n in _script_constants()
+        if any(line.rstrip().endswith("{") for line in getattr(ws, n).splitlines())
+    ]
+    assert spanning, "no multi-line blocks left -- re-read the runner's comment before changing it"
+    assert "_SCRIPT_ADD_TCP_PORT" in spanning
+
+
+def test_run_passes_the_script_as_one_encoded_argv_element(monkeypatch):
+    """Pin the delivery mechanism: encoded argv, no shell, no stdin.
+
+    Two regressions this catches. Reverting to ``-Command -`` (which silently
+    truncates multi-line scripts), and ever passing the script as plain argv
+    text where a command-line parser would get a say in what it means.
+    """
+    seen = {}
+
+    def fake_run(argv, **kwargs):
+        seen["argv"] = argv
+        seen["kwargs"] = kwargs
+        return subprocess.CompletedProcess(argv, 0, "ok", "")
+
+    monkeypatch.setattr(ws.subprocess, "run", fake_run)
+    runner = ws.PowerShellRunner(executable="powershell")
+    assert runner.run(ws._SCRIPT_QUEUE_EXISTS, {"name": "Lobby"}) == "ok"
+
+    argv = seen["argv"]
+    assert argv[-2] == "-EncodedCommand"
+    assert "-Command" not in argv, "-Command - truncates multi-line scripts"
+    assert seen["kwargs"]["shell"] is False
+    assert "input" not in seen["kwargs"], "the script no longer travels on stdin"
+
+    # The one argv element carries the wrapped script intact...
+    payload = base64.b64decode(argv[-1]).decode("utf-16-le")
+    assert payload == ws.wrap_script(ws._SCRIPT_QUEUE_EXISTS)
+    # ...and the caller's value is nowhere in it -- it went by environment.
+    assert "Lobby" not in payload
+    assert seen["kwargs"]["env"]["PN_NAME"] == "Lobby"
+
+
+def test_run_raises_when_the_script_reports_failure(monkeypatch):
+    """Exit code 0 with the marker present is still a failure.
+
+    This is the real Windows behaviour the fake cannot reproduce: PowerShell
+    exits 0 even when a cmdlet throws, so the marker is what makes a failed
+    Add-Printer stop being reported as a created queue.
+    """
+    def fake_run(argv, **kwargs):
+        return subprocess.CompletedProcess(argv, 0, "junk\n" + ws._FAILURE_MARKER + "\n", "boom")
+
+    monkeypatch.setattr(ws.subprocess, "run", fake_run)
+    with pytest.raises(ws.PowerShellError) as exc:
+        ws.PowerShellRunner(executable="powershell").run(ws._SCRIPT_QUEUE_EXISTS)
+    assert exc.value.stderr == "boom"
+    assert ws._FAILURE_MARKER not in exc.value.stdout
 
 
 def test_build_env_namespaces_and_stringifies():
