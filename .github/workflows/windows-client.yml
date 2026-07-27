@@ -36,10 +36,19 @@ jobs:
         with:
           python-version: "3.12"
 
-      - name: Install the agent package
-        # Only the package itself -- these tests need no central, no database
-        # and no SNMP stack, and installing less keeps the job fast.
-        run: python -m pip install --upgrade pip pytest ./agent
+      - name: Install
+        # The spooler tests themselves need only the agent package, but pytest
+        # loads tests/conftest.py for anything under tests/, and that imports
+        # central.db to build the throwaway SQLite fixture. Installing the agent
+        # alone therefore fails at collection with ModuleNotFoundError:
+        # sqlalchemy -- before a single spooler call runs.
+        #
+        # So install both, mirroring the Linux job. The agent's standalone
+        # property is already guarded by the dedicated agent-standalone job, so
+        # nothing is lost by having central present here.
+        run: |
+          python -m pip install --upgrade pip
+          pip install -e ".[dev,agent]"
 
       - name: Report the spooler environment
         # Printed unconditionally: when a future image changes which drivers
