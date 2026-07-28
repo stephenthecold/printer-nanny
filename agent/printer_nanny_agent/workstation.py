@@ -481,6 +481,18 @@ def ensure_driverless_queue(
     * **This touches the network.** The old path never did, so a sleeping printer
       is a new failure mode; it raises ``IppProvisionError(retryable=True)``
       rather than being recorded as broken.
+
+    CONFIRMED AGAINST REAL HARDWARE (2026-07-28)
+    --------------------------------------------
+    A Brother NIC advertising ``image/pwg-raster`` over IPP 2.0 provisioned to::
+
+        port:    WSD-b9af1cc7-7932-49d9-b785-8ca9aa0c8b11
+        monitor: IPP Port
+        driver:  Microsoft IPP Class Driver
+
+    Neither that port name nor that monitor is something ``Add-PrinterPort`` can
+    produce, which is what makes the old path's failure a demonstrated fact
+    rather than a reading of the documentation.
     * **There is no fallback to a TCP port.** Falling back would reintroduce
       exactly the silent breakage above. Failing loudly is the point.
 

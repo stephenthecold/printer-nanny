@@ -509,6 +509,44 @@ transports, **not** against real tenants.
   a `$LASTEXITCODE` check because a native command (`pnputil`) that fails does
   not throw. A fake runner returns what it is told, so no amount of unit testing
   above the seam can find this class of defect — only the Windows job can.
+- **Tier 1 hands Windows a URL; it never builds the port itself — and this was
+  wrong for as long as it existed.** `Add-PrinterPort` has exactly four
+  parameter sets (`local`, `tcp`, `tcplpr`, `lpr`) and **none creates an IPP
+  port**: the Standard TCP/IP monitor speaks only RAW or LPR on 9100. The
+  original tier 1 derived a port name from the IPP URL, made a port with
+  `-PrinterHostAddress ipp://…`, and bound the class driver to it — producing a
+  queue that was created, listed by `Get-Printer`, passed every convergence
+  check, and **could not print**. Exactly the "central shows provisioned while
+  the user has nothing to print to" failure this codebase says must never happen.
+  The supported call is `Add-Printer -IppURL`, whose parameter set is *disjoint*
+  from `-DriverName`/`-PortName` — so this was the wrong cmdlet shape, not a bad
+  argument. Windows runs the IPP query, picks the driver and names the port.
+  Proven on real hardware 2026-07-28: a Brother NIC came back on port
+  `WSD-<guid>` with monitor **`IPP Port`** — neither of which `Add-PrinterPort`
+  can produce, which is what makes the old path's failure a fact rather than a
+  theory. Consequences that must not be undone: tier 1 does **not** share
+  `_converge` (Windows owns the port name, so a derived name never matches and
+  every poll would re-provision); a converged queue costs **no** network round
+  trip (`-IppURL` is a live query and this runs on every poll, so re-querying
+  would fail queues whose printer is merely asleep); a queue found on the
+  Standard TCP/IP monitor is **rebuilt**, which is the migration path for queues
+  the old code left behind; and landing on that monitor is an **error, never
+  "created"**. There is deliberately no fallback — falling back is what produced
+  the silent breakage. `-IppURL` is documented for Server 2022/2025 and **absent
+  on 2019**, so tier 1 probes for it and refuses outright when missing. (The
+  Server 2016→2025 matrix elsewhere is about the *site agent* MSI, which is an
+  SNMP poller and never touches this path.)
+- **Nothing above the seam could have caught that.** `tests/windows/` never
+  called `ensure_driverless_queue` — all 15 spooler tests drove `_converge` with
+  `port_name_for("127.0.0.1")` and a local driver, so an `ipp://` URI never once
+  reached `Add-PrinterPort` on a real machine, and binding an inbox driver to a
+  loopback TCP port succeeds whether or not printing would work. The job was
+  green and blind simultaneously. What closed it was
+  `scripts/windows_provision_check.py`, run by hand against a real printer:
+  `Get-Printer` returning the queue proves nothing, so it asserts the port name
+  is **not** one we derived, the monitor is **not** Standard TCP/IP, and the
+  driver is the inbox one. Any future claim that driverless printing works needs
+  that check, not a green CI run.
 - **Queue provisioning converges; it never blindly creates.** The client re-runs
   on every assignment change, service start and poll, so `Add-Printer` on an
   existing queue would mean a crash loop or a swallowed exception hiding real
