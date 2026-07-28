@@ -438,3 +438,62 @@ def test_services_refuse_a_cross_tenant_machine_assignment(db):
     import pytest
     with pytest.raises(services.TenancyError):
         services.assign_printer(db, printer=other, machine=machine)
+
+
+def test_a_signed_in_user_is_matched_by_upn(db):
+    """Windows hands the service a UPN, not an email, and the two drift apart:
+    a mailbox move changes the email while the UPN stays put."""
+    c, printer = _client_with_printer(db, "Acme", "10.0.0.1")
+    person = m.EndUser(client_id=c.id, email="new.address@acme.test",
+                       upn="jo@acme.local", display_name="Jo")
+    db.add(person)
+    db.flush()
+    db.add(m.PrinterAssignment(printer_id=printer.id, end_user_id=person.id,
+                               is_default=True))
+    enrolled = _enroll(TestClient(app), _enroll_key(db, c), "GUID-A").json()
+    db.commit()
+
+    r = TestClient(app).get(
+        f"/api/v1/workstations/{enrolled['machine_id']}/assignments",
+        params={"user": "jo@acme.local"},
+        headers={"Authorization": f"Bearer {enrolled['api_key']}"})
+    body = r.json()
+    assert body["resolved_for"] == "jo@acme.local"
+    assert body["default_printer_id"] == printer.id
+
+
+def test_email_still_matches_when_no_upn_is_stored(db):
+    """Tenants that never populated a UPN must keep working."""
+    c, printer = _client_with_printer(db, "Acme", "10.0.0.1")
+    person = m.EndUser(client_id=c.id, email="jo@acme.test", display_name="Jo")
+    db.add(person)
+    db.flush()
+    db.add(m.PrinterAssignment(printer_id=printer.id, end_user_id=person.id))
+    enrolled = _enroll(TestClient(app), _enroll_key(db, c), "GUID-A").json()
+    db.commit()
+
+    r = TestClient(app).get(
+        f"/api/v1/workstations/{enrolled['machine_id']}/assignments",
+        params={"user": "jo@acme.test"},
+        headers={"Authorization": f"Bearer {enrolled['api_key']}"})
+    assert r.json()["resolved_for"] == "jo@acme.test"
+
+
+def test_upn_matching_is_still_tenant_scoped(db):
+    """The scoping rule must not have been widened by adding a second column."""
+    acme, printer = _client_with_printer(db, "Acme", "10.0.0.1")
+    globex, other = _client_with_printer(db, "Globex", "10.9.9.1")
+    stranger = m.EndUser(client_id=globex.id, email="x@globex.test",
+                         upn="jsmith@globex.local", display_name="J")
+    db.add(stranger)
+    db.flush()
+    db.add(m.PrinterAssignment(printer_id=other.id, end_user_id=stranger.id))
+    enrolled = _enroll(TestClient(app), _enroll_key(db, acme), "GUID-A").json()
+    db.commit()
+
+    r = TestClient(app).get(
+        f"/api/v1/workstations/{enrolled['machine_id']}/assignments",
+        params={"user": "jsmith@globex.local"},
+        headers={"Authorization": f"Bearer {enrolled['api_key']}"})
+    assert r.json()["resolved_for"] is None
+    assert r.json()["printers"] == []
