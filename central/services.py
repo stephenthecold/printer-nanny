@@ -632,10 +632,11 @@ def assign_printer(
     printer: m.Printer,
     end_user: Optional[m.EndUser] = None,
     group: Optional[m.EndUserGroup] = None,
+    machine: Optional[m.Machine] = None,
     is_default: bool = False,
     operator_id: Optional[int] = None,
 ) -> m.PrinterAssignment:
-    """Assign a printer to one end user or one group, same-tenant only.
+    """Assign a printer to one end user, one group, or one machine -- same tenant.
 
     This function exists to own the invariant the schema cannot state: the
     printer and its target must belong to the same client. A multi-tenant
@@ -644,14 +645,22 @@ def assign_printer(
     customer's hardware into another's UI -- so the check is here, in the one
     place every caller has to pass through, rather than repeated per route.
 
+    Machines go through this same function rather than a parallel one, precisely
+    because of the paragraph above: a second implementation is a second place the
+    tenancy rule can be got wrong, and the one that drifts will be the one nobody
+    remembered existed.
+
     Re-assigning an existing pair is idempotent and updates ``is_default``,
     because the natural operator gesture (tick the box again) should not be a
     unique-constraint 500.
     """
-    if (end_user is None) == (group is None):
-        raise ValueError("assign_printer needs exactly one of end_user or group")
+    targets = [t for t in (end_user, group, machine) if t is not None]
+    if len(targets) != 1:
+        raise ValueError(
+            "assign_printer needs exactly one of end_user, group or machine"
+        )
 
-    target_client_id = end_user.client_id if end_user is not None else group.client_id
+    target_client_id = targets[0].client_id
     if target_client_id != printer.client_id:
         raise TenancyError(
             f"printer {printer.id} belongs to client {printer.client_id}, "
@@ -663,6 +672,7 @@ def assign_printer(
             m.PrinterAssignment.printer_id == printer.id,
             m.PrinterAssignment.end_user_id == (end_user.id if end_user else None),
             m.PrinterAssignment.group_id == (group.id if group else None),
+            m.PrinterAssignment.machine_id == (machine.id if machine else None),
         )
     )
     if existing is not None:
@@ -673,6 +683,7 @@ def assign_printer(
         printer_id=printer.id,
         end_user_id=end_user.id if end_user else None,
         group_id=group.id if group else None,
+        machine_id=machine.id if machine else None,
         is_default=is_default,
         created_by_user_id=operator_id,
     )
@@ -849,3 +860,124 @@ def sync_group_members(
             db.delete(row)
     db.flush()
     return len(want - have), len(have - want)
+
+
+# --------------------- workstation enrollment ------------------------------- #
+
+
+def redeem_enroll_key(
+    db: Session,
+    key: str,
+    *,
+    machine_uid: str,
+    name: Optional[str] = None,
+) -> Optional[tuple]:
+    """Exchange a client enroll key for a machine + its own API key.
+
+    Returns ``(machine, api_key, created)`` or ``None`` when the key is unknown
+    or revoked. The caller must not distinguish those to the client: a bearer
+    credential that reports *why* it failed is an oracle for guessing others.
+
+    RE-ENROLLING A KNOWN ``machine_uid`` ROTATES ITS KEY rather than creating a
+    second row. Both halves of that matter:
+
+    * A second row would be the same PC twice -- one holding the operator's
+      assignments and one holding none -- and the operator has no way to tell
+      which is live. The uniqueness constraint makes it impossible anyway; this
+      makes the good outcome happen instead of an integrity error.
+    * Rotating means a workstation that lost its credential (a wiped ProgramData,
+      a corrupt key file) recovers by itself. Without it, the machine is bricked
+      until somebody visits it, which for a print client is the failure that
+      makes people uninstall.
+
+    The cost, stated rather than glossed: whoever holds the enroll key can
+    rotate any machine's key **in that client** and inherit its assignments.
+    That is bounded by already holding the key -- they could enroll regardless --
+    and it is why revocation is one click and every redemption is audited.
+    """
+    from central.security import generate_api_key, hash_api_key, hash_enroll_key
+
+    uid = (machine_uid or "").strip()
+    if not uid or not (key or "").strip():
+        return None
+
+    row = db.scalar(
+        select(m.WorkstationEnrollKey).where(
+            m.WorkstationEnrollKey.key_hash == hash_enroll_key(key),
+            m.WorkstationEnrollKey.revoked_at.is_(None),
+        )
+    )
+    if row is None:
+        return None
+
+    now = _now()
+    row.last_used_at = now
+
+    # Machine-reported, therefore untrusted: length-capped and used only as a
+    # display label. It never selects the tenant -- client_id comes from the key.
+    clean_name = (name or "").strip()[:255]
+    api_key = generate_api_key()
+
+    machine = db.scalar(
+        select(m.Machine).where(
+            m.Machine.client_id == row.client_id,
+            m.Machine.machine_uid == uid[:64],
+        )
+    )
+    created = machine is None
+    if machine is None:
+        machine = m.Machine(
+            client_id=row.client_id,
+            machine_uid=uid[:64],
+            name=clean_name,
+        )
+        db.add(machine)
+    elif clean_name:
+        machine.name = clean_name
+
+    machine.api_key_hash = hash_api_key(api_key)
+    machine.last_seen_at = now
+    # A re-enrolling machine that an operator retired comes back active: the PC
+    # is demonstrably running the client again, and leaving it inactive would
+    # silently provision nothing while reporting a successful enrollment.
+    machine.active = True
+    db.flush()
+    return machine, api_key, created
+
+
+def printers_for_machine(db: Session, machine: m.Machine) -> list:
+    """The machine's own printers, with nobody signed in.
+
+    Same return shape as ``effective_printers_for`` so the caller has one thing
+    to iterate, and the same single-default guarantee, tie-broken by lowest
+    printer id for the same reason: a workstation's default must not depend on
+    query ordering.
+
+    An inactive machine resolves to nothing, matching an inactive user.
+    """
+    if not machine.active:
+        return []
+
+    rows = db.scalars(
+        select(m.PrinterAssignment).where(m.PrinterAssignment.machine_id == machine.id)
+    ).all()
+    if not rows:
+        return []
+
+    by_printer = {a.printer_id: a.is_default for a in rows}
+    printers = {
+        p.id: p
+        for p in db.scalars(
+            select(m.Printer).where(m.Printer.id.in_(list(by_printer.keys())))
+        ).all()
+    }
+    defaults = sorted(pid for pid, is_def in by_printer.items() if is_def)
+    winner = defaults[0] if defaults else None
+
+    out = []
+    for pid in sorted(by_printer):
+        printer = printers.get(pid)
+        if printer is None:  # pragma: no cover - FK makes this unreachable
+            continue
+        out.append((printer, pid == winner, None))
+    return out

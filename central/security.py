@@ -60,3 +60,19 @@ def generate_claim_code() -> str:
 
 def hash_claim_code(code: str) -> str:
     return hashlib.sha256(code.encode("utf-8")).hexdigest()
+
+
+def generate_enroll_key() -> str:
+    """A client-scoped workstation enrollment key.
+
+    Prefixed so an operator who finds one in an installer, a log or a ticket can
+    tell what it is and revoke the right thing. Longer than a claim code because
+    this one is long-lived and multi-use -- it is not protected by a short TTL.
+    """
+    return "pnw_" + secrets.token_urlsafe(32)
+
+
+def hash_enroll_key(key: str) -> str:
+    """SHA-256, matching hash_api_key: a database dump must not yield a working
+    enrollment."""
+    return hashlib.sha256((key or "").encode()).hexdigest()

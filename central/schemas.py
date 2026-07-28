@@ -353,3 +353,58 @@ class CommandIn(BaseModel):
                 f"payload keys not allowed for {self.type.value}: {', '.join(unknown)}"
             )
         return self
+
+
+class MachineEnrollIn(BaseModel):
+    """What a workstation sends to enroll.
+
+    Note what is absent: any tenant selector. ``client_id`` comes from the
+    enroll key, never from the caller -- a bearer credential must not let its
+    holder choose whose fleet it lands in.
+    """
+
+    enroll_key: str
+    machine_uid: str
+    name: Optional[str] = None
+
+
+class MachineEnrolled(BaseModel):
+    """The one and only time the minted machine key is transmitted."""
+
+    machine_id: int
+    api_key: str
+    client_id: int
+    #: False when an existing machine_uid re-enrolled and had its key rotated.
+    #: Surfaced so a client can log which happened without central having to
+    #: guess from timing.
+    created: bool
+
+
+class MachinePrinterOut(BaseModel):
+    """One queue the workstation should provision."""
+
+    printer_id: int
+    name: str
+    ip: str
+    is_default: bool
+    driver_tier: Optional[str] = None
+    ipp_endpoint: Optional[str] = None
+
+
+class MachineAssignmentsOut(BaseModel):
+    printers: list[MachinePrinterOut]
+    machine_id: int
+    #: Echoes which person this was resolved for, or null at the login screen.
+    #: The client logs it, and it is what makes "why did this PC get those
+    #: queues?" answerable without reproducing the resolver by hand.
+    resolved_for: Optional[str] = None
+    default_printer_id: Optional[int] = None
+
+
+class MachineCheckinIn(BaseModel):
+    name: Optional[str] = None
+
+
+class MachineCheckinOut(BaseModel):
+    machine_id: int
+    ok: bool

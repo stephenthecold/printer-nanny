@@ -55,6 +55,7 @@
 {%- endif -%}
 {%- if user.role.value == 'admin' -%}
   {%- set _ = g_admin.append({'href': '/manage/people', 'label': 'People'}) -%}
+  {%- set _ = g_admin.append({'href': '/manage/machines', 'label': 'Machines'}) -%}
   {%- set _ = g_admin.append({'href': '/manage/users', 'label': 'Users'}) -%}
   {%- set _ = g_admin.append({'href': '/manage/audit', 'label': 'Audit'}) -%}
   {%- set _ = g_admin.append({'href': '/admin/backup', 'label': 'Backup'}) -%}

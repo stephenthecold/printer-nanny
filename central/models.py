@@ -1268,6 +1268,78 @@ class EndUserGroupMember(Base):
     __table_args__ = (Index("ix_end_user_group_members_user", "end_user_id"),)
 
 
+class WorkstationEnrollKey(Base):
+    """A long-lived, client-scoped credential that lets a workstation enroll.
+
+    WHY THIS IS NOT A CLAIM CODE
+    ----------------------------
+    ``AgentClaimToken`` is single-use, which is right when one agent serves a
+    site. A workstation installer is the opposite shape: one MSI runs on
+    hundreds of PCs, so a single-use code cannot be baked into it, and minting
+    one code per PC is the manual step the per-client MSI exists to remove.
+
+    So this key is deliberately multi-use and long-lived, and the safety comes
+    from narrowing what holding it can accomplish:
+
+    * **It can only create.** Redeeming mints a machine and that machine's own
+      key. The enroll key itself reads nothing -- no printers, no people, no
+      other machines. Every call after enrollment authenticates as the machine.
+    * **``client_id`` is fixed at mint time**, never supplied by the redeemer.
+      Same rule as ``AgentClaimToken.site_id`` and for the same reason: a bearer
+      credential must never let its holder choose a tenant.
+    * **A fresh machine resolves to no printers.** Enrolling grants nothing on
+      its own; an operator still has to assign something. The blast radius of a
+      leaked key is junk rows in one tenant, which ``revoked_at`` stops and the
+      audit log records.
+    * **Revocation does not break the fleet.** Existing machines authenticate
+      with their own keys, so revoking stops *new* enrollments and leaves every
+      enrolled PC working -- which is what makes rotating it a routine act
+      rather than an outage.
+
+    What it does NOT defend against, stated plainly rather than implied away: a
+    holder can enroll a machine and then ask what printers a named person gets,
+    which discloses that client's assignments. Any design where a workstation
+    asks "who is signed in, what do they print to" has this property. It is
+    bounded to the one tenant, needs the key, and is revocable and audited.
+
+    ``key_hash`` stores SHA-256, never the key: a database dump must not yield a
+    working enrollment.
+    """
+
+    __tablename__ = "workstation_enroll_keys"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    client_id: Mapped[int] = mapped_column(
+        ForeignKey("clients.id", ondelete="CASCADE"), index=True
+    )
+    key_hash: Mapped[str] = mapped_column(String(128), unique=True)
+    #: Operator-facing name ("Acme MSI, July 2026") so a key can be revoked
+    #: without having to work out which installer it went into.
+    label: Mapped[str] = mapped_column(String(120), default="")
+
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+    created_by_user_id: Mapped[Optional[int]] = mapped_column(
+        ForeignKey("users.id", ondelete="SET NULL"), default=None
+    )
+    #: Set rather than deleted, so the audit trail keeps the row that explains
+    #: where a machine came from.
+    revoked_at: Mapped[Optional[datetime]] = mapped_column(
+        DateTime(timezone=True), default=None
+    )
+    #: Refreshed on every successful redemption. An enroll key that has not been
+    #: used in a year is a candidate for revocation, and that is only visible if
+    #: it is recorded.
+    last_used_at: Mapped[Optional[datetime]] = mapped_column(
+        DateTime(timezone=True), default=None
+    )
+
+    client: Mapped[Client] = relationship()
+
+    @property
+    def live(self) -> bool:
+        return self.revoked_at is None
+
+
 class Machine(Base):
     """A workstation running the client. Tenant-scoped, like everything else.
 
@@ -1305,6 +1377,12 @@ class Machine(Base):
     #: one tenant can never adopt another's machine.
     machine_uid: Mapped[str] = mapped_column(String(64))
     name: Mapped[str] = mapped_column(String(255), default="")
+
+    #: SHA-256 of this machine's own API key, minted at enrollment and shown to
+    #: nobody -- the workstation stores it, central stores only the hash, exactly
+    #: as ``Agent.api_key_hash`` does. Nullable because an operator can create a
+    #: machine row in the UI before the PC exists; it gets a key when it enrolls.
+    api_key_hash: Mapped[Optional[str]] = mapped_column(String(128), default=None)
 
     #: "Whoever is at this machine gets its default, whatever their groups say."
     #: Off by default: the agreed precedence is direct user > machine > group,
