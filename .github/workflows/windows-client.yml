@@ -1,0 +1,138 @@
+name: Windows workstation client
+
+# The workstation client provisions print queues by driving the Windows spooler,
+# which no Linux runner can exercise. Everything above the PowerShell seam is
+# covered by the normal CI job with a fake; this job covers the seam itself
+# against a real spooler.
+#
+# Path-filtered on purpose: Windows runner minutes bill at 2x the Linux rate on
+# private repositories, so this runs only when the code it covers changes.
+# workflow_dispatch is there so it can be run by hand against any branch.
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "agent/printer_nanny_agent/workstation.py"
+      - "tests/windows/**"
+      - ".github/workflows/windows-client.yml"
+  pull_request:
+    paths:
+      - "agent/printer_nanny_agent/workstation.py"
+      - "tests/windows/**"
+      - ".github/workflows/windows-client.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  spooler:
+    runs-on: windows-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install
+        # The spooler tests themselves need only the agent package, but pytest
+        # loads tests/conftest.py for anything under tests/, and that imports
+        # central.db to build the throwaway SQLite fixture. Installing the agent
+        # alone therefore fails at collection with ModuleNotFoundError:
+        # sqlalchemy -- before a single spooler call runs.
+        #
+        # So install both, mirroring the Linux job. The agent's standalone
+        # property is already guarded by the dedicated agent-standalone job, so
+        # nothing is lost by having central present here.
+        run: |
+          python -m pip install --upgrade pip
+          pip install -e ".[dev,agent]"
+
+      - name: Report the spooler environment
+        # Printed unconditionally: when a future image changes which drivers
+        # ship, this output is what turns "mystery failure" into "the driver we
+        # picked is gone".
+        shell: pwsh
+        run: |
+          Write-Host "OS: $([System.Environment]::OSVersion.VersionString)"
+          Write-Host "PowerShell: $($PSVersionTable.PSVersion)"
+          $spooler = Get-Service -Name Spooler -ErrorAction SilentlyContinue
+          Write-Host "Spooler service: $($spooler.Status)"
+          Write-Host "--- installed printer drivers ---"
+          Get-PrinterDriver | Select-Object -ExpandProperty Name | Sort-Object
+          Write-Host "--- existing queues ---"
+          Get-Printer | Select-Object -ExpandProperty Name | Sort-Object
+
+      - name: Ensure the spooler is running
+        # A stopped spooler makes every Add-Printer fail with an error that
+        # looks like our bug rather than the environment's.
+        shell: pwsh
+        run: |
+          $s = Get-Service -Name Spooler
+          if ($s.Status -ne 'Running') { Start-Service Spooler; Start-Sleep -Seconds 3 }
+          (Get-Service -Name Spooler).Status
+
+      - name: Which driver/port combinations does this image accept?
+        # Diagnostic, never fatal. Answered on 2026-07-27: *all* of them --
+        # TCP/IP port creation, all four inbox drivers bound to it (including
+        # "Microsoft Print To PDF", which I had wrongly guessed would refuse a
+        # non-PORTPROMPT port), and PORTPROMPT: itself. So the spooler was never
+        # the problem and the test fixture's driver choice is sound; the failures
+        # were ours, in how the script reached PowerShell.
+        #
+        # Kept as a canary rather than deleted: it costs ~3s, and if a future
+        # image drops a driver or locks down port creation, this line says so
+        # instead of the tests failing somewhere less obvious.
+        continue-on-error: true
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Continue'
+          $port = 'PNDiag_127.0.0.1'
+          try { Add-PrinterPort -Name $port -PrinterHostAddress '127.0.0.1' -ErrorAction Stop; Write-Host "TCP port created: OK" }
+          catch { Write-Host "TCP port create FAILED: $($_.Exception.Message)" }
+
+          foreach ($drv in @(
+            'Microsoft Print To PDF',
+            'Microsoft enhanced Point and Print compatibility driver',
+            'Universal Print Class Driver',
+            'Microsoft IPP Class Driver'
+          )) {
+            $q = 'PNDiag-' + [guid]::NewGuid().ToString('N').Substring(0,6)
+            try {
+              Add-Printer -Name $q -DriverName $drv -PortName $port -ErrorAction Stop
+              Write-Host "TCP + '$drv' -> OK"
+              Remove-Printer -Name $q -ErrorAction SilentlyContinue
+            } catch {
+              Write-Host "TCP + '$drv' -> FAILED: $($_.Exception.Message)"
+            }
+          }
+
+          $q = 'PNDiag-portprompt'
+          try {
+            Add-Printer -Name $q -DriverName 'Microsoft Print To PDF' -PortName 'PORTPROMPT:' -ErrorAction Stop
+            Write-Host "PORTPROMPT: + 'Microsoft Print To PDF' -> OK"
+            Remove-Printer -Name $q -ErrorAction SilentlyContinue
+          } catch {
+            Write-Host "PORTPROMPT: -> FAILED: $($_.Exception.Message)"
+          }
+
+          Remove-PrinterPort -Name $port -ErrorAction SilentlyContinue
+
+      - name: Spooler integration tests
+        run: python -m pytest tests/windows -v
+
+      - name: Leave no queues behind
+        # Belt and braces over the per-test fixtures: a crashed test must not
+        # leave a PNTest- queue on a reused image.
+        if: always()
+        shell: pwsh
+        run: |
+          Get-Printer | Where-Object { $_.Name -like 'PNTest-*' } | ForEach-Object {
+            Write-Host "removing leftover queue: $($_.Name)"
+            Remove-Printer -Name $_.Name -ErrorAction SilentlyContinue
+          }
+          Get-PrinterPort | Where-Object { $_.Name -like 'PN_127.0.0.*' } | ForEach-Object {
+            Remove-PrinterPort -Name $_.Name -ErrorAction SilentlyContinue
+          }

@@ -470,9 +470,64 @@ groups, and per-user / per-group printer assignment with a deterministic
 resolver, at `/manage/people`; **directory sync** from Entra ID, Google
 Workspace and on-prem AD, per client, credentials encrypted at rest, worker-
 scheduled (`directory.sync_interval_min`) with a synchronous "Sync now".
-The Windows workstation client is **not built yet** — assignments are real data
-that nothing acts on until it lands. The providers are unit-tested against
-mocked transports, **not** against real tenants.
+The Windows workstation client is **partly built**: the IPP capability probe
+(`agent/printer_nanny_agent/ipp.py`), the persisted driver tier, and the queue
+provisioning logic (`workstation.py`) all exist. What does **not** exist is the
+service that runs it on a workstation — enrollment, the central poll for
+assignments, and the LocalSystem service wrapper — so assignments are still data
+that nothing acts on end to end. The providers are unit-tested against mocked
+transports, **not** against real tenants.
+- **The workstation client never interpolates a value into PowerShell.** Printer
+  names, locations and comments come from devices on customer LANs and from
+  operator free-text; a queue named `x"; Remove-Item -Recurse C:\ #` must be
+  inert. So the scripts in `workstation.py` are **constant strings** and every
+  value travels as an environment variable read as `$env:PN_*`. That makes the
+  injection question moot rather than merely handled — there is no quoting to
+  get wrong. A test asserts the script bodies contain no format placeholders,
+  and the Windows job proves a hostile value comes back as literal text.
+- **Scripts reach PowerShell as `-EncodedCommand`, and stdin is not an
+  alternative.** `powershell -Command -` parses stdin **line by line**, so any
+  construct spanning lines (`if (…) {`, `try {`) is incomplete on its first line
+  and the remainder is discarded — silently, with **exit 0** and empty output.
+  This cost two Windows CI rounds. First `_SCRIPT_ADD_TCP_PORT` lost its `if`
+  body, so the port was never created and the `Add-Printer` that followed had no
+  port to bind; then the try/catch wrapper added to catch *that* was itself
+  multi-line and made every call return `''` — a deliberate `throw` stopped
+  raising. So the script is base64 UTF-16LE in a single argv element, which
+  removes the command-line parser from the path entirely; newlines, quotes and
+  braces survive exactly. Only our own constants are encoded — caller values
+  still travel by environment, so this narrows the injection surface rather than
+  widening it. `tests/test_workstation_queue.py` round-trips every `_SCRIPT_*`
+  byte for byte and asserts some of them still span lines, so stdin cannot come
+  back as a "simplification".
+- **PowerShell exits 0 when a cmdlet throws**, including under
+  `$ErrorActionPreference = 'Stop'`. Trusting `returncode` meant a failed
+  `Add-Printer` was reported as success and the caller recorded "created" for a
+  queue that does not exist — on a workstation, central showing printers as
+  provisioned while the user has nothing to print to, with no error anywhere. So
+  the wrapper carries an explicit `exit 1` **and** a stdout failure marker, plus
+  a `$LASTEXITCODE` check because a native command (`pnputil`) that fails does
+  not throw. A fake runner returns what it is told, so no amount of unit testing
+  above the seam can find this class of defect — only the Windows job can.
+- **Queue provisioning converges; it never blindly creates.** The client re-runs
+  on every assignment change, service start and poll, so `Add-Printer` on an
+  existing queue would mean a crash loop or a swallowed exception hiding real
+  failures. Every operation inspects then reconciles, port names are derived
+  deterministically (a fresh name per run is how workstations end up with forty
+  dead ports), and drift — a re-addressed device, a replaced driver — is
+  repaired in place rather than leaving a broken queue beside a new one.
+  `reconcile` removes **only** queues matching its `managed_prefix`; an empty
+  prefix disables removal entirely rather than deleting everything unrecognised,
+  because deleting a user's own printer is how a print tool gets uninstalled.
+- **Windows CI covers the seam, and only the seam.**
+  `.github/workflows/windows-client.yml` runs `tests/windows/` on a
+  `windows-latest` runner against a real spooler; everything above
+  `PowerShellRunner` is covered on any platform with a fake. It is path-filtered
+  because Windows runner minutes bill at 2× on private repos. A green run does
+  **not** prove behaviour against a real printer, domain/GPO interaction with
+  `RestrictDriverInstallationToAdministrators`, vendor driver packages, or the
+  LocalSystem context (the runner is an elevated user, not SYSTEM) — those stay
+  manual, per `deploy/WINDOWS-MSI-TESTING.md`.
 
 **Core**: central server, multi-tenant model, push-based agents, brand-agnostic
 SNMP, alerting with dedupe + auto-resolve + flap damping, quiet hours + maintenance
