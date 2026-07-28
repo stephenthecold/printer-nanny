@@ -16,10 +16,17 @@
      path stays deliberately untested here. A preflight check refuses to run if
      the test files ever start staging.
 
-  2. EVERYTHING TRANSIENT LIVES IN A TEMP WORKSPACE -- a fresh clone and a
-     private virtualenv under $env:TEMP, deleted at the end. Nothing is
-     installed into your system Python, and no PATH, registry or service
-     setting is touched.
+  2. EVERYTHING TRANSIENT LIVES IN A TEMP WORKSPACE -- the source, the Python
+     environment and every dependency sit under $env:TEMP and are deleted at
+     the end. No PATH, registry or service setting is touched.
+
+     NOTHING NEEDS TO BE INSTALLED FIRST. Neither Python nor git is required:
+     without Python the official embeddable runtime is fetched into the
+     workspace and thrown away with it, and without git the source comes down
+     as a zip. This is deliberate rather than convenient -- the shipping
+     product is an MSI that bundles that same embeddable runtime, because
+     nobody puts Python on the machines their staff use every day, and a
+     try-out that demanded one would be testing something the product isn't.
 
   3. REMOVAL IS DEMONSTRATED, NOT ASSERTED. A full inventory of printers,
      ports and drivers is captured before anything runs and again at the end,
@@ -73,9 +80,10 @@
   powershell -NoProfile -ExecutionPolicy Bypass -File .\windows-tryout.ps1 -PrinterIp 192.168.1.50
 
 .NOTES
-  Needs Python 3.9+. Git is optional -- without it the source is fetched as a
-  zip over HTTPS, because a stock Windows box has no git and asking someone to
-  install one to try the other is a poor trade.
+  Requires nothing preinstalled. Python 3.9+ and git are both used if present
+  and both fall back to a download into the temp workspace if not -- asking
+  someone to install two tools in order to try a third is a poor trade, and on
+  a workstation installing Python is not on the table at all.
 #>
 [CmdletBinding()]
 param(
@@ -87,9 +95,14 @@ param(
     [string]   $Community     = "public",
     [int]      $MaxHosts      = 1024,
     [string]   $JsonOut,
+    # Same runtime the MSI bundles. Overridable for an air-gapped mirror, which
+    # is exactly why central/msi_builder.py exposes agent.python_embed_url.
+    [string]   $PythonEmbedUrl = "https://www.python.org/ftp/python/3.12.10/python-3.12.10-embed-amd64.zip",
+    [string]   $GetPipUrl      = "https://bootstrap.pypa.io/get-pip.py",
     [switch]   $SkipProbe,
     [switch]   $SkipSpooler,
     [switch]   $ForceZip,
+    [switch]   $ForceEmbeddedPython,
     [switch]   $KeepWorkspace
 )
 
@@ -253,6 +266,114 @@ function Resolve-Python {
     return $null
 }
 
+function Invoke-Download {
+    param([string] $Uri, [string] $OutFile)
+
+    # Some Windows builds still default to TLS 1.0/1.1, which python.org and
+    # github.com both refuse. Restored afterwards rather than left set: when this
+    # script is dot-sourced the change would otherwise outlive the run and
+    # re-pin the caller's TLS settings -- a trace, and this script promises none.
+    $prevProtocol = $null
+    try {
+        $prevProtocol = [Net.ServicePointManager]::SecurityProtocol
+        [Net.ServicePointManager]::SecurityProtocol =
+            $prevProtocol -bor [Net.SecurityProtocolType]::Tls12
+    } catch {
+        # Older .NET without the Tls12 member -- nothing to do but continue.
+    }
+
+    try {
+        # -UseBasicParsing: on Windows PowerShell 5.1 the default path leans on
+        # Internet Explorer's DOM engine, which fails outright on a machine where
+        # IE has never been launched. Harmless no-op on 7.x.
+        Invoke-WebRequest -Uri $Uri -OutFile $OutFile -UseBasicParsing
+    } finally {
+        if ($null -ne $prevProtocol) {
+            try { [Net.ServicePointManager]::SecurityProtocol = $prevProtocol } catch { }
+        }
+    }
+    if (-not (Test-Path $OutFile)) { throw "download of $Uri produced no file" }
+}
+
+function Get-EmbeddedPython {
+    param([string] $Workspace, [string] $EmbedUrl, [string] $GetPipUrl)
+
+    # WHY THIS EXISTS
+    # Requiring an operator to install Python before they can try a printer tool
+    # is backwards, and on a workstation it is unacceptable outright -- nobody
+    # puts Python on the machines their staff use every day. The product answer
+    # is the MSI, which bundles the official embeddable runtime (see
+    # central/msi_builder.py). This mirrors that exact approach for the harness,
+    # so the try-out has the same "installs nothing" property the real client has.
+    #
+    # It is also MORE removable than the system-Python path, not less: the whole
+    # interpreter lives inside the temp workspace and is deleted with it. No
+    # installer runs, no PATH entry is made, no registry key is written.
+    $pyDir = Join-Path $Workspace "python-embed"
+    $zip   = Join-Path $Workspace "python-embed.zip"
+
+    Write-Host "  no system Python; fetching the embeddable runtime instead"
+    Write-Host "  $EmbedUrl"
+    Invoke-Download -Uri $EmbedUrl -OutFile $zip
+
+    New-Item -ItemType Directory -Path $pyDir -Force | Out-Null
+    Expand-Archive -Path $zip -DestinationPath $pyDir -Force
+
+    $exe = Join-Path $pyDir "python.exe"
+    if (-not (Test-Path $exe)) { throw "embeddable archive contained no python.exe" }
+
+    # The embeddable distribution ships with `import site` commented out and
+    # site-packages off the path, so anything pip installs stays invisible.
+    # Same patch central/msi_builder.py applies for the same reason.
+    $pths = @(Get-ChildItem -Path $pyDir -Filter "python*._pth")
+    if ($pths.Count -eq 0) { throw "embeddable runtime has no python*._pth to patch" }
+    foreach ($pth in $pths) {
+        $kept = @()
+        foreach ($line in (Get-Content -Path $pth.FullName)) {
+            $t = $line.Trim()
+            if ($t -eq 'import site' -or $t -eq '#import site' -or $t -eq '# import site') { continue }
+            if ($t -eq 'Lib\site-packages' -or $t -eq 'Lib/site-packages') { continue }
+            $kept += $line
+        }
+        $kept += 'Lib\site-packages'
+        $kept += 'import site'
+        Set-Content -Path $pth.FullName -Value $kept
+    }
+
+    # The embeddable runtime deliberately omits pip; get-pip.py is the official
+    # way back in.
+    $getPip = Join-Path $Workspace "get-pip.py"
+    Write-Host "  bootstrapping pip"
+    Invoke-Download -Uri $GetPipUrl -OutFile $getPip
+
+    $exit = 1
+    $prevEap = $ErrorActionPreference
+    $ErrorActionPreference = 'Continue'
+    try {
+        & $exe $getPip --no-warn-script-location --quiet
+        $exit = $LASTEXITCODE
+
+        if ($exit -eq 0) {
+            # get-pip.py installs pip and NOTHING ELSE on modern Pythons --
+            # setuptools stopped being bundled with it. An editable install then
+            # dies in pip's own sanity check with
+            #   BackendUnavailable: Cannot import 'setuptools.build_meta'
+            # because that check imports the PEP 517 backend before build
+            # isolation would have provided one. A normal CPython install ships
+            # setuptools, which is exactly why this only shows up on the
+            # embeddable runtime and could not be caught anywhere else.
+            Write-Host "  adding the build backend (setuptools, wheel)"
+            & $exe -m pip install --quiet --no-warn-script-location setuptools wheel
+            $exit = $LASTEXITCODE
+        }
+    } finally {
+        $ErrorActionPreference = $prevEap
+    }
+    if ($exit -ne 0) { throw "bootstrapping pip into the embeddable runtime failed with exit code $exit" }
+
+    return $exe
+}
+
 function Get-RepoSource {
     param([string] $RepoUrl, [string] $Ref, [string] $Workspace, [switch] $ForceZip)
 
@@ -303,32 +424,7 @@ function Get-RepoSource {
     $stage  = Join-Path $Workspace "unpacked"
 
     Write-Host "  downloading $zipUrl ..."
-
-    # Some Windows builds still default to TLS 1.0/1.1, which github.com refuses.
-    # Restored afterwards rather than left set: when this script is dot-sourced
-    # (or run in an existing session rather than a child process) the change
-    # would otherwise outlive the run and quietly re-pin the caller's TLS
-    # settings -- a trace, and exactly the kind this script promises not to leave.
-    $prevProtocol = $null
-    try {
-        $prevProtocol = [Net.ServicePointManager]::SecurityProtocol
-        [Net.ServicePointManager]::SecurityProtocol =
-            $prevProtocol -bor [Net.SecurityProtocolType]::Tls12
-    } catch {
-        # Older .NET without the Tls12 member -- nothing to do but continue.
-    }
-
-    try {
-        # -UseBasicParsing: on Windows PowerShell 5.1 the default path leans on
-        # Internet Explorer's DOM engine, which fails outright on a machine where
-        # IE has never been launched. Harmless no-op on 7.x.
-        Invoke-WebRequest -Uri $zipUrl -OutFile $zip -UseBasicParsing
-    } finally {
-        if ($null -ne $prevProtocol) {
-            try { [Net.ServicePointManager]::SecurityProtocol = $prevProtocol } catch { }
-        }
-    }
-    if (-not (Test-Path $zip)) { throw "download produced no file" }
+    Invoke-Download -Uri $zipUrl -OutFile $zip
 
     New-Item -ItemType Directory -Path $stage -Force | Out-Null
     Expand-Archive -Path $zip -DestinationPath $stage -Force
@@ -369,20 +465,22 @@ Write-Host "OS            : $([System.Environment]::OSVersion.VersionString)"
 Write-Host "PowerShell    : $($PSVersionTable.PSVersion)"
 Write-Host "Elevated      : $isAdmin"
 
-$python = Resolve-Python
-if (-not $python) {
-    Write-Host ""
-    Write-Host "No working Python 3.9+ found." -ForegroundColor Red
-    Write-Host ""
-    Write-Host "If 'python' appears to be on your PATH under WindowsApps, that is" -ForegroundColor Yellow
-    Write-Host "an app execution alias, not an interpreter -- it opens the Microsoft" -ForegroundColor Yellow
-    Write-Host "Store when the package behind it isn't installed. Either install" -ForegroundColor Yellow
-    Write-Host "Python from python.org (tick 'Add python.exe to PATH'), or turn the" -ForegroundColor Yellow
-    Write-Host "alias off under Settings > Apps > Advanced app settings >" -ForegroundColor Yellow
-    Write-Host "App execution aliases." -ForegroundColor Yellow
-    exit 1
+$python = if ($ForceEmbeddedPython) { $null } else { Resolve-Python }
+if ($python) {
+    Write-Host "Python        : $($python.Path)  (v$($python.Version))"
+} else {
+    # NOT an error. Requiring someone to install Python before they can try a
+    # printer tool is backwards -- and on a workstation it is exactly what the
+    # product must never do, since nobody puts Python on the machines their
+    # staff use every day. The embeddable runtime is fetched into the temp
+    # workspace instead, which is what the MSI does and what this run will do
+    # a few lines further down.
+    #
+    # Worth noting what was almost certainly found and rejected: a python.exe
+    # under WindowsApps is an app execution alias, a shim that answers PATH
+    # lookups whether or not any interpreter is installed behind it.
+    Write-Host "Python        : none installed; will use a private embeddable runtime"
 }
-Write-Host "Python        : $($python.Path)  (v$($python.Version))"
 
 # The whole removability proof rests on being able to enumerate printers, ports
 # and drivers. `-ErrorAction SilentlyContinue` on those calls cannot distinguish
@@ -438,22 +536,42 @@ try {
     Write-Section "Driver-staging guard"
     Assert-NoDriverStaging -TestDir (Join-Path $repo "tests\windows")
 
-    Write-Section "Virtualenv (private to this run)"
-    $venv = Join-Path $script:Workspace "venv"
-    & $python.Path -m venv $venv
-    if ($LASTEXITCODE -ne 0) { throw "venv creation failed" }
-    $venvPy = Join-Path $venv "Scripts\python.exe"
-    Write-Host "  $venvPy"
+    Write-Section "Python environment (private to this run)"
+    if ($python) {
+        # System Python present: a venv keeps our packages out of it.
+        $venv = Join-Path $script:Workspace "venv"
+        & $python.Path -m venv $venv
+        if ($LASTEXITCODE -ne 0) { throw "venv creation failed" }
+        $venvPy = Join-Path $venv "Scripts\python.exe"
+        Write-Host "  venv: $venvPy"
+    } else {
+        # No system Python: the embeddable tree IS the isolation. It needs no
+        # venv (the embeddable distribution does not support one cleanly), and
+        # because it lives inside the workspace it is removed with everything
+        # else -- nothing is installed on the machine at any point.
+        $venvPy = Get-EmbeddedPython -Workspace $script:Workspace -EmbedUrl $PythonEmbedUrl -GetPipUrl $GetPipUrl
+        Write-Host "  embedded: $venvPy"
+    }
 
     Write-Host "  installing (this takes a minute) ..."
-    & $venvPy -m pip install --upgrade pip --quiet
+
+    # Native command under $ErrorActionPreference='Stop': pip writes progress and
+    # warnings to stderr, and on Windows PowerShell 5.1 a merged stderr line
+    # would terminate the script. Nothing is merged here, but the preference is
+    # relaxed around the calls so a chatty pip cannot end the run either.
+    $pipExit = 1
+    $prevEap = $ErrorActionPreference
+    $ErrorActionPreference = 'Continue'
     Push-Location $repo
     try {
+        & $venvPy -m pip install --upgrade pip --quiet
         & $venvPy -m pip install -e ".[dev,agent,agent-mdns]" --quiet
-        if ($LASTEXITCODE -ne 0) { throw "pip install failed with exit code $LASTEXITCODE" }
+        $pipExit = $LASTEXITCODE
     } finally {
         Pop-Location
+        $ErrorActionPreference = $prevEap
     }
+    if ($pipExit -ne 0) { throw "pip install failed with exit code $pipExit" }
     Write-Host "  installed" -ForegroundColor Green
 
     # --- phase 1: read-only discovery + IPP probe ----------------------------

@@ -215,6 +215,31 @@ jobs:
         shell: powershell
         run: ./scripts/windows-tryout.ps1 -ForceZip -SkipProbe -SkipSpooler
 
+      - name: Does it work with NO Python installed? (the embeddable runtime path)
+        # The whole reason this path exists: nobody installs Python on the
+        # machines their staff use every day, so the shipping product is an MSI
+        # bundling the official embeddable runtime (central/msi_builder.py). The
+        # harness now does the same rather than demanding a system interpreter --
+        # a try-out that needed one would be testing something the product isn't.
+        #
+        # Every runner has Python via setup-python, so the path would never be
+        # taken here by accident. -ForceEmbeddedPython takes it deliberately:
+        # download the embeddable zip, patch python*._pth to re-enable site and
+        # site-packages, bootstrap pip with get-pip.py, install into it.
+        #
+        # 5.1 for the same reason as the steps above -- it is the interpreter an
+        # operator actually launches, and where this script's defects have lived.
+        #
+        # The spooler phase runs rather than being skipped, deliberately. A step
+        # that only proved "pip exited 0" would have missed the first failure
+        # here by inches: pip succeeded at fetching but the embeddable runtime
+        # had no build backend. Running the tests proves the stripped-down
+        # runtime can actually import central, the agent and pytest, and drive a
+        # real spooler -- which is the claim being made, not that a download
+        # worked.
+        shell: powershell
+        run: ./scripts/windows-tryout.ps1 -ForceEmbeddedPython -SkipProbe -RepoPath .
+
       - name: Leave no queues behind
         # Belt and braces over the per-test fixtures: a crashed test must not
         # leave a PNTest- queue on a reused image.
