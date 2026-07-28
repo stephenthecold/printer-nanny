@@ -553,19 +553,41 @@ try {
         Write-Host "  embedded: $venvPy"
     }
 
-    Write-Host "  installing (this takes a minute) ..."
+    # Install only what the selected phases actually need.
+    #
+    # A probe-only run needs the agent package and nothing else. Installing the
+    # dev extra drags in fastapi, uvicorn, alembic, black, watchfiles,
+    # websockets and dozens more -- for code the probe never imports. On a slow
+    # link that is minutes of download to accomplish nothing, and it buries the
+    # actual output in pip warnings.
+    #
+    # The spooler phase genuinely does need them: tests/conftest.py imports
+    # central.db to build its throwaway SQLite fixture, so pytest cannot even
+    # collect without central present.
+    if ($SkipSpooler) {
+        $installTarget = "./agent[mdns]"
+        Write-Host "  installing the agent package only (probe needs nothing else) ..."
+    } else {
+        $installTarget = ".[dev,agent,agent-mdns]"
+        Write-Host "  installing central + agent + test dependencies ..."
+    }
 
     # Native command under $ErrorActionPreference='Stop': pip writes progress and
     # warnings to stderr, and on Windows PowerShell 5.1 a merged stderr line
     # would terminate the script. Nothing is merged here, but the preference is
     # relaxed around the calls so a chatty pip cannot end the run either.
+    #
+    # --no-warn-script-location: every console_script in the tree lands in a
+    # temp directory that is deliberately not on PATH, so pip emits a paragraph
+    # of warnings about it. They are correct and completely irrelevant here, and
+    # a wall of yellow WARNING makes a successful run look broken.
     $pipExit = 1
     $prevEap = $ErrorActionPreference
     $ErrorActionPreference = 'Continue'
     Push-Location $repo
     try {
-        & $venvPy -m pip install --upgrade pip --quiet
-        & $venvPy -m pip install -e ".[dev,agent,agent-mdns]" --quiet
+        & $venvPy -m pip install --upgrade pip --quiet --no-warn-script-location
+        & $venvPy -m pip install -e $installTarget --quiet --no-warn-script-location
         $pipExit = $LASTEXITCODE
     } finally {
         Pop-Location

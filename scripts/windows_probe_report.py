@@ -173,6 +173,32 @@ def describe(dev: dict) -> str:
     return "(unidentified)"
 
 
+#: Default NAT ranges for the common desktop hypervisors. A guest on one of
+#: these cannot see the physical LAN at all, so an empty sweep is expected
+#: rather than diagnostic -- and saying so saves someone debugging the wrong
+#: layer entirely.
+VIRTUAL_NAT_RANGES = (
+    "10.0.2.0/24",     # VirtualBox NAT, and QEMU/KVM user-mode networking
+    "192.168.56.0/24",  # VirtualBox host-only (no LAN route either)
+)
+
+
+def is_virtual_nat(cidr: str) -> bool:
+    """True when this subnet is a hypervisor NAT range with no route to the LAN."""
+    try:
+        net = ipaddress.ip_network(cidr, strict=False)
+    except ValueError:
+        return False
+    if net.version != 4:
+        # subnet_of raises TypeError across address families, and every range
+        # below is IPv4 anyway.
+        return False
+    for known in VIRTUAL_NAT_RANGES:
+        if net.subnet_of(ipaddress.ip_network(known)):
+            return True
+    return False
+
+
 def sort_key(ip: str):
     """Numeric sort for dotted quads, lexical for anything else.
 
@@ -225,10 +251,23 @@ def main(argv: Optional[List[str]] = None) -> int:
 
     if not merged:
         print("\nNo devices found.")
-        print("That is a real result, not necessarily a failure: a segmented")
-        print("management VLAN, a non-default SNMP community, or printers that")
-        print("simply aren't on this subnet all look like this. Re-run with")
-        print("-Cidr / --ip to target a known address.")
+        isolated = [c for c in cidrs if is_virtual_nat(c)]
+        if isolated:
+            # Worth calling out by name rather than leaving to inference: on a
+            # NAT'd VM no tool can see the LAN, so "0 printers" says nothing
+            # about the probe and everything about the network. Someone
+            # debugging this could easily spend an hour on the wrong layer.
+            print()
+            print("NOTE: {} is the default NAT range used by VirtualBox and".format(isolated[0]))
+            print("QEMU/KVM. A guest on NAT is isolated from the physical LAN by")
+            print("design, so printers on the real network are unreachable from")
+            print("here no matter what tool is used. To reach them, switch the")
+            print("VM's adapter to bridged mode, or run this on a host machine.")
+        print()
+        print("Otherwise this is a real result, not necessarily a failure: a")
+        print("segmented management VLAN, a non-default SNMP community, or")
+        print("printers that simply aren't on this subnet all look the same.")
+        print("Re-run with -Cidr / -PrinterIp to target a known address.")
         return 0
 
     print("\n[3/3] IPP probe of {} device(s)".format(len(merged)))
