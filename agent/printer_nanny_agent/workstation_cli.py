@@ -27,22 +27,52 @@ def _env(name: str, default: str = "") -> str:
     return (os.environ.get(name) or default).strip()
 
 
+def load_config(path: Optional[str]) -> dict:
+    """Read the installer-written config, if there is one.
+
+    WHY A FILE AND NOT COMMAND-LINE ARGUMENTS
+    -----------------------------------------
+    The enrollment key is a credential, and a Windows service's command line is
+    readable by **any logged-in user** (Task Manager's Command line column,
+    `Get-CimInstance Win32_Process`, `wmic process`). Passing it as an argument
+    would publish that client's enrollment key to every person who sits at the
+    machine. So the MSI writes it into this file and only the file's *path*
+    appears on the command line.
+
+    A missing or unreadable file is not fatal -- the flags and environment still
+    work, which is what makes the client runnable by hand for diagnosis.
+    """
+    if not path or not os.path.exists(path):
+        return {}
+    try:
+        try:
+            import tomllib  # Python 3.11+
+        except ImportError:  # pragma: no cover - exercised on 3.9/3.10
+            import tomli as tomllib
+        with open(path, "rb") as fp:
+            data = tomllib.load(fp)
+        return data if isinstance(data, dict) else {}
+    except Exception as exc:
+        log.warning("could not read config %s: %s", path, exc)
+        return {}
+
+
 def main(argv: Optional[list] = None) -> int:
     parser = argparse.ArgumentParser(
         prog="printer-nanny-workstation",
         description="Provision printer queues assigned to this machine and its user.",
     )
     parser.add_argument(
-        "--server", default=_env("PN_SERVER"), help="central base URL"
+        "--config", default=_env("PN_CONFIG") or None,
+        help="path to the installer-written config (holds the enrollment key)",
     )
+    parser.add_argument("--server", default=None, help="central base URL")
     parser.add_argument(
-        "--enroll-key",
-        default=_env("PN_ENROLL_KEY"),
+        "--enroll-key", default=None,
         help="client enrollment key (from the Machines page)",
     )
     parser.add_argument(
-        "--interval", type=float, default=float(_env("PN_INTERVAL", "300")),
-        help="seconds between polls",
+        "--interval", type=float, default=None, help="seconds between polls"
     )
     parser.add_argument(
         "--state-dir", default=_env("PN_STATE_DIR") or None,
@@ -67,24 +97,43 @@ def main(argv: Optional[list] = None) -> int:
         format="%(asctime)s %(levelname)s %(name)s: %(message)s",
     )
 
-    if not args.server:
-        parser.error("no central URL: pass --server or set PN_SERVER")
-    if not args.enroll_key:
-        parser.error("no enrollment key: pass --enroll-key or set PN_ENROLL_KEY")
+    # Precedence: an explicit flag beats the environment, which beats the file.
+    # A technician debugging on the box must be able to point the client at a
+    # staging server without editing (and then forgetting to restore) the file
+    # the installer owns.
+    cfg = load_config(args.config)
+    server = args.server or _env("PN_SERVER") or str(cfg.get("server") or "")
+    enroll_key = (
+        args.enroll_key or _env("PN_ENROLL_KEY") or str(cfg.get("enroll_key") or "")
+    )
+    interval = args.interval
+    if interval is None:
+        interval = float(_env("PN_INTERVAL") or cfg.get("interval") or 300)
+    prefix = args.prefix
+    if prefix is None and cfg.get("queue_prefix") is not None:
+        prefix = str(cfg["queue_prefix"])
+    verify_tls = not args.insecure and bool(cfg.get("verify_tls", True))
+
+    if not server:
+        parser.error("no central URL: pass --server, set PN_SERVER, or use --config")
+    if not enroll_key:
+        parser.error(
+            "no enrollment key: pass --enroll-key, set PN_ENROLL_KEY, or use --config"
+        )
 
     from printer_nanny_agent import workstation_service as svc
 
     kwargs = dict(
-        interval=args.interval,
-        state_dir=args.state_dir,
-        verify_tls=not args.insecure,
+        interval=interval,
+        state_dir=args.state_dir or cfg.get("state_dir") or None,
+        verify_tls=verify_tls,
         once=args.once,
     )
-    if args.prefix is not None:
-        kwargs["prefix"] = args.prefix
+    if prefix is not None:
+        kwargs["prefix"] = prefix
 
     try:
-        report = svc.run(args.server, args.enroll_key, **kwargs)
+        report = svc.run(server, enroll_key, **kwargs)
     except svc.ServiceError as exc:
         # Enrollment refused is terminal and worth a distinct exit code: under a
         # service manager, restarting on a bad key just retries forever and

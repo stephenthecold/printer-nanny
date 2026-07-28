@@ -87,6 +87,26 @@
   </form>
 </div>
 
+{# -------------------------------------------------------------- installer -- #}
+<div class="{{ c.card_cls() }} mb-8">
+  {{ c.section_title("Windows installer") }}
+  <p class="mb-4 text-sm text-slate-600">
+    A self-contained installer for {{ client.name }}: bundled Python runtime, the
+    workstation client, and a <strong>freshly minted enrollment key</strong> — one
+    per build, so revoking a leaked installer leaves every other install alone.
+    It runs as a LocalSystem service and provisions the queues assigned to each
+    machine and its signed-in user.
+  </p>
+  {% if msi_available %}
+    <form method="post" action="/manage/machines/msi">
+      <input type="hidden" name="client_id" value="{{ client.id }}">
+      <button type="submit" class="{{ c.btn('primary') }}">Download Windows MSI</button>
+    </form>
+  {% else %}
+    <div class="{{ c.note('muted') }}">{{ msi_reason }}</div>
+  {% endif %}
+</div>
+
 {# ------------------------------------------------------------ machines -- #}
 <div class="{{ c.card_cls() }}">
   {{ c.section_title("Workstations") }}

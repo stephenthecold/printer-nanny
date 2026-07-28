@@ -64,6 +64,20 @@ SERVICE_DESC = "Printer Nanny site agent -- SNMP collector that reports to the c
 PRODUCT_NAME = "Printer Nanny Agent"
 MANUFACTURER = "Printer Nanny"
 
+#: The workstation client's own UpgradeCode. It MUST differ from the agent's:
+#: Windows Installer treats a shared UpgradeCode as the same product, so
+#: installing one would silently uninstall the other. A site agent and a
+#: workstation client legitimately coexist -- an MSP's own server polls printers
+#: and also prints -- so that removal would be a real outage with no error.
+WS_UPGRADE_CODE = "2C7A9E14-6B3D-4F52-8A1C-9E4B7D2058AF"
+WS_SERVICE_NAME = "PrinterNannyWorkstation"
+WS_SERVICE_DISPLAY = "Printer Nanny Workstation"
+WS_SERVICE_DESC = (
+    "Printer Nanny workstation client -- provisions the printer queues assigned "
+    "to this machine and its signed-in user."
+)
+WS_PRODUCT_NAME = "Printer Nanny Workstation"
+
 # Default Python embeddable runtime. Overridable (air-gapped mirrors) via the
 # ``agent.python_embed_url`` setting / ``PN_PYTHON_EMBED_URL`` env. The version
 # string is parsed out of the URL filename so the cache key stays truthful even
@@ -78,6 +92,59 @@ DEFAULT_PYTHON_EMBED_URL = (
 # rebuilt MSI of the same version yields the same component identity (correct
 # Windows Installer component rules) instead of a random GUID each time.
 _GUID_NS = uuid.UUID("6f9619ff-8b86-d011-b42d-00c04fc964ff")
+
+
+@dataclass
+class ProductProfile:
+    """What differs between the two installers this module can build.
+
+    Everything else -- the embeddable Python, the wheel, NSSM, the component
+    and GUID scheme -- is identical, so it is shared rather than forked. A
+    second copy of the runtime-assembly code is a second place for the
+    "component has no GUID" class of bug to appear, and only one of them would
+    get fixed.
+    """
+
+    upgrade_code: str
+    service_name: str
+    service_display: str
+    service_desc: str
+    product_name: str
+    #: Leaf directory under "Program Files\\Printer Nanny". Distinct per product
+    #: so the two installs never share a tree; a shared tree would make either
+    #: uninstall delete the other's runtime.
+    install_dir_name: str
+    #: NSSM AppParameters. NOTE: never put a credential here -- a service's
+    #: command line is readable by any logged-in user, so secrets travel in the
+    #: config file instead and only its PATH appears on the command line.
+    app_parameters: str
+    log_name: str
+
+
+AGENT_PROFILE = ProductProfile(
+    upgrade_code=UPGRADE_CODE,
+    service_name=SERVICE_NAME,
+    service_display=SERVICE_DISPLAY,
+    service_desc=SERVICE_DESC,
+    product_name=PRODUCT_NAME,
+    install_dir_name="Agent",
+    app_parameters='-m printer_nanny_agent --config "[INSTALLDIR]config.toml" run',
+    log_name="agent.log",
+)
+
+WORKSTATION_PROFILE = ProductProfile(
+    upgrade_code=WS_UPGRADE_CODE,
+    service_name=WS_SERVICE_NAME,
+    service_display=WS_SERVICE_DISPLAY,
+    service_desc=WS_SERVICE_DESC,
+    product_name=WS_PRODUCT_NAME,
+    install_dir_name="Workstation",
+    app_parameters=(
+        '-m printer_nanny_agent.workstation_cli '
+        '--config "[INSTALLDIR]workstation.toml"'
+    ),
+    log_name="workstation.log",
+)
 
 
 @dataclass
@@ -363,7 +430,9 @@ def _guid_for(relpath: str) -> str:
     return str(uuid.uuid5(_GUID_NS, relpath)).upper()
 
 
-def generate_wxs(payload_dir: Path, *, product_version: str) -> str:
+def generate_wxs(
+    payload_dir: Path, *, product_version: str, profile: ProductProfile = None
+) -> str:
     """Generate the WiX source for ``payload_dir`` as a perMachine x64 MSI.
 
     ``payload_dir`` is the install tree exactly as it should land under the
@@ -375,6 +444,7 @@ def generate_wxs(payload_dir: Path, *, product_version: str) -> str:
     Returns the .wxs XML as a string. File @Source paths are RELATIVE to
     ``payload_dir`` -- invoke wixl with that as its working directory.
     """
+    profile = profile or AGENT_PROFILE
     payload_dir = payload_dir.resolve()
     comp_refs: list[str] = []
     components_xml: list[str] = []
@@ -423,7 +493,7 @@ def generate_wxs(payload_dir: Path, *, product_version: str) -> str:
                     f'{indent}    <File Id="{fid}" Name={quoteattr(f.name)} '
                     f'Source={quoteattr(src)}{keypath} />'
                 )
-            service_xml = _service_xml(indent + "    ") if is_root else ""
+            service_xml = _service_xml(indent + "    ", profile) if is_root else ""
             components_xml.append(
                 f'{indent}  <Component Id="{comp_id}" Guid="{guid}" Win64="yes">\n'
                 + "\n".join(file_xml) + "\n"
@@ -460,15 +530,16 @@ def generate_wxs(payload_dir: Path, *, product_version: str) -> str:
     # Dedicated component for the NSSM service parameters (HKLM registry).
     reg_comp_id = next_comp()
     reg_guid = _guid_for("nssm-parameters")
-    reg_component = _registry_component(reg_comp_id, reg_guid, "        ")
+    reg_component = _registry_component(reg_comp_id, reg_guid, "        ", profile)
     comp_refs.append(reg_comp_id)
 
     refs = "\n".join(f'      <ComponentRef Id="{c}" />' for c in comp_refs)
 
     return _WXS_TEMPLATE.format(
-        product_name=escape(PRODUCT_NAME),
+        product_name=escape(profile.product_name),
         manufacturer=escape(MANUFACTURER),
-        upgrade_code=UPGRADE_CODE,
+        upgrade_code=profile.upgrade_code,
+        install_dir_name=escape(profile.install_dir_name),
         version=escape(product_version),
         install_tree=tree_body,
         registry_component=reg_component,
@@ -479,7 +550,7 @@ def generate_wxs(payload_dir: Path, *, product_version: str) -> str:
 _DIR_COMP_PLACEHOLDER = "<!--COMPONENT:{comp_id}-->"
 
 
-def _service_xml(indent: str) -> str:
+def _service_xml(indent: str, profile: ProductProfile = None) -> str:
     """ServiceInstall + ServiceControl, attached to the nssm.exe component.
 
     The service's binary is the component keypath (nssm.exe). NSSM, when started
@@ -491,18 +562,21 @@ def _service_xml(indent: str) -> str:
     Wait="no" so a central server that's briefly unreachable at install time
     doesn't fail the whole installation.
     """
+    profile = profile or AGENT_PROFILE
     return (
-        f'{indent}<ServiceInstall Id="PrinterNannyService" Name="{SERVICE_NAME}"\n'
-        f'{indent}    DisplayName={quoteattr(SERVICE_DISPLAY)}\n'
-        f'{indent}    Description={quoteattr(SERVICE_DESC)}\n'
-        f'{indent}    Arguments={quoteattr(SERVICE_NAME)}\n'
+        f'{indent}<ServiceInstall Id="PrinterNannyService" Name="{profile.service_name}"\n'
+        f'{indent}    DisplayName={quoteattr(profile.service_display)}\n'
+        f'{indent}    Description={quoteattr(profile.service_desc)}\n'
+        f'{indent}    Arguments={quoteattr(profile.service_name)}\n'
         f'{indent}    Type="ownProcess" Start="auto" ErrorControl="normal" Vital="yes" />\n'
-        f'{indent}<ServiceControl Id="PrinterNannyServiceCtl" Name="{SERVICE_NAME}"\n'
+        f'{indent}<ServiceControl Id="PrinterNannyServiceCtl" Name="{profile.service_name}"\n'
         f'{indent}    Start="install" Stop="both" Remove="uninstall" Wait="no" />\n'
     )
 
 
-def _registry_component(comp_id: str, guid: str, indent: str) -> str:
+def _registry_component(
+    comp_id: str, guid: str, indent: str, profile: ProductProfile = None
+) -> str:
     """NSSM run parameters under the service's registry key.
 
     NSSM reads these on service start: Application = the embeddable python.exe,
@@ -510,14 +584,15 @@ def _registry_component(comp_id: str, guid: str, indent: str) -> str:
     = the install dir, plus rotating stdout/stderr logging. Writing them through
     the MSI Registry table means uninstall removes them cleanly.
     """
-    key = f"SYSTEM\\CurrentControlSet\\Services\\{SERVICE_NAME}\\Parameters"
+    profile = profile or AGENT_PROFILE
+    key = f"SYSTEM\\CurrentControlSet\\Services\\{profile.service_name}\\Parameters"
     # Computed out here: Python < 3.12 forbids a backslash inside an f-string
     # expression, and this repo stays 3.9-compatible.
     appexit_key = key + "\\AppExit"
     app = "[INSTALLDIR]python\\python.exe"
-    app_params = '-m printer_nanny_agent --config "[INSTALLDIR]config.toml" run'
+    app_params = profile.app_parameters
     app_dir = "[INSTALLDIR]"
-    log_path = "[INSTALLDIR]agent.log"
+    log_path = "[INSTALLDIR]" + profile.log_name
     return (
         f'{indent}<Component Id="{comp_id}" Guid="{guid}" Win64="yes">\n'
         # All values are fully-resolved absolute paths ([INSTALLDIR] is expanded
@@ -558,7 +633,7 @@ _WXS_TEMPLATE = """<?xml version="1.0" encoding="utf-8"?>
     <Directory Id="TARGETDIR" Name="SourceDir">
       <Directory Id="ProgramFiles64Folder">
         <Directory Id="CompanyDir" Name="Printer Nanny">
-          <Directory Id="INSTALLDIR" Name="Agent">
+          <Directory Id="INSTALLDIR" Name="{install_dir_name}">
 {install_tree}
 {registry_component}
           </Directory>
@@ -768,3 +843,163 @@ def _extract_member(path: Path, name: str) -> Optional[str]:
             except OSError:
                 return None
     return None
+
+
+# --------------------------------------------------------------------------- #
+# Workstation client MSI
+# --------------------------------------------------------------------------- #
+
+
+def render_workstation_config(
+    *,
+    central_url: str,
+    enroll_key: str,
+    interval: int = 300,
+    queue_prefix: Optional[str] = None,
+    verify_tls: bool = True,
+) -> str:
+    """Render the workstation.toml baked into the installer.
+
+    THE KEY IS IN THE FILE, NOT ON THE COMMAND LINE
+    -----------------------------------------------
+    A Windows service's command line is readable by any logged-in user, so an
+    enrollment key passed as an argument would be published to everyone who
+    sits at the machine. Only this file's path reaches the command line.
+
+    The file still lives under Program Files, which authenticated users can
+    read, so this narrows the exposure rather than closing it. That is why the
+    key is scoped the way it is: it can only enroll, never read a fleet, and it
+    is revocable in one click without disturbing machines already enrolled.
+    Each built MSI carries its OWN freshly-minted key, so revoking one installer
+    does not invalidate the others.
+    """
+    if not (enroll_key or "").strip():
+        raise ValueError("render_workstation_config needs an enroll_key")
+
+    lines = [
+        "# Generated by the Printer Nanny MSI builder.",
+        "# Printer assignment is managed in the central UI, not here.",
+        f'server = "{_toml_escape(central_url.rstrip("/"))}"',
+        "# Enrollment key for THIS client. It can only enroll a machine -- it",
+        "# cannot read printers, people or other machines. Revoke it in the UI",
+        "# (Machines -> Enrollment keys) to stop new installs from enrolling;",
+        "# machines already enrolled authenticate with their own credentials",
+        "# and keep working.",
+        f'enroll_key = "{_toml_escape(str(enroll_key))}"',
+        f"interval = {int(interval)}",
+    ]
+    if queue_prefix is not None:
+        lines.append(f'queue_prefix = "{_toml_escape(queue_prefix)}"')
+    lines.append(f"verify_tls = {'true' if verify_tls else 'false'}")
+    return "\n".join(lines) + "\n"
+
+
+@dataclass
+class WorkstationMsiBuildResult:
+    path: Path
+    size: int
+    product_version: str
+    agent_version: str
+    client_id: int
+    #: Id of the enroll key minted for this build, so an operator can tie an
+    #: installer in the wild back to the row they revoke.
+    enroll_key_id: Optional[int] = None
+
+
+def build_workstation_msi(
+    *,
+    client_name: str,
+    client_id: int,
+    central_url: str,
+    enroll_key: str,
+    enroll_key_id: Optional[int] = None,
+    slug: Optional[str] = None,
+    interval: int = 300,
+    queue_prefix: Optional[str] = None,
+    verify_tls: bool = True,
+    out_dir: Path,
+    embed_url: Optional[str] = None,
+    cache_dir: Optional[Path] = None,
+    agent_src: Optional[Path] = None,
+    agent_version: Optional[str] = None,
+    product_version: Optional[str] = None,
+    python_exe: Optional[str] = None,
+) -> WorkstationMsiBuildResult:
+    """Build the per-client workstation installer.
+
+    Shares the agent's runtime cache deliberately -- same embeddable Python,
+    same wheel, same NSSM -- so building both for one release downloads and
+    installs nothing twice. What differs is the profile (distinct UpgradeCode,
+    service name and install directory, so the two products coexist) and the
+    config that gets baked in.
+    """
+    cap = msi_build_available()
+    if not cap.available:
+        raise RuntimeError(cap.reason)
+
+    # Sanitised, not trusted: it lands in a filesystem path and the caller
+    # derives it from a client name, which is operator input.
+    raw_slug = str(slug or f"client{client_id}")
+    safe_slug = re.sub(r"[^A-Za-z0-9_.-]", "-", raw_slug)[:60] or "workstation"
+
+    cache = Path(cache_dir) if cache_dir else _cache_dir()
+    embed_url = (
+        embed_url or os.environ.get("PN_PYTHON_EMBED_URL") or DEFAULT_PYTHON_EMBED_URL
+    )
+    agent_src = Path(agent_src) if agent_src else _repo_agent_src()
+    python_exe = python_exe or sys.executable
+    if agent_version is None:
+        from central.agent_release import bundled_agent_version
+
+        agent_version = bundled_agent_version()
+    if product_version is None:
+        from central import __version__ as product_version  # type: ignore
+
+    out_dir = Path(out_dir)
+    out_dir.mkdir(parents=True, exist_ok=True)
+
+    runtime = _ensure_runtime_tree(
+        cache=cache, embed_url=embed_url, agent_src=agent_src,
+        agent_version=agent_version, python_exe=python_exe,
+    )
+
+    payload = out_dir / f"ws-payload-{safe_slug}"
+    if payload.exists():
+        shutil.rmtree(payload)
+    shutil.copytree(runtime, payload)
+    (payload / "workstation.toml").write_text(
+        render_workstation_config(
+            central_url=central_url, enroll_key=enroll_key, interval=interval,
+            queue_prefix=queue_prefix, verify_tls=verify_tls,
+        )
+    )
+
+    # The payload holds a live enrollment key, so it is removed whether wixl
+    # succeeds or fails -- the only surviving copy is the MSI the caller owns.
+    msi_path = out_dir / f"printer-nanny-workstation-{safe_slug}.msi"
+    try:
+        wxs = generate_wxs(
+            payload, product_version=product_version, profile=WORKSTATION_PROFILE
+        )
+        wxs_name = f"workstation-{safe_slug}.wxs"
+        (payload / wxs_name).write_text(wxs)
+
+        cmd = [cap.wixl or "wixl", "--arch", "x64", "-o", str(msi_path), wxs_name]
+        log.info("running wixl: %s (cwd=%s)", " ".join(cmd), payload)
+        proc = subprocess.run(cmd, cwd=str(payload), capture_output=True, text=True)
+        if proc.returncode != 0 or not msi_path.exists():
+            raise RuntimeError(
+                "wixl failed to build the workstation MSI:\n"
+                + proc.stdout[-2000:] + "\n" + proc.stderr[-2000:]
+            )
+    finally:
+        shutil.rmtree(payload, ignore_errors=True)
+
+    return WorkstationMsiBuildResult(
+        path=msi_path,
+        size=msi_path.stat().st_size,
+        product_version=product_version,
+        agent_version=agent_version,
+        client_id=client_id,
+        enroll_key_id=enroll_key_id,
+    )
