@@ -15,11 +15,15 @@ on:
     paths:
       - "agent/printer_nanny_agent/workstation.py"
       - "tests/windows/**"
+      - "scripts/windows-tryout.ps1"
+      - "scripts/windows_probe_report.py"
       - ".github/workflows/windows-client.yml"
   pull_request:
     paths:
       - "agent/printer_nanny_agent/workstation.py"
       - "tests/windows/**"
+      - "scripts/windows-tryout.ps1"
+      - "scripts/windows_probe_report.py"
       - ".github/workflows/windows-client.yml"
   workflow_dispatch:
 
@@ -122,6 +126,36 @@ jobs:
 
       - name: Spooler integration tests
         run: python -m pytest tests/windows -v
+
+      - name: Does windows-tryout.ps1 parse?
+        # That script is meant to be run by hand on an operator's own machine,
+        # and it is authored on Linux where no PowerShell exists to check it.
+        # PowerShell's own parser is the only thing that can say whether it is
+        # syntactically valid, so it runs here rather than being discovered
+        # broken by the person we asked to try it.
+        shell: pwsh
+        run: |
+          $errors = $null
+          [System.Management.Automation.Language.Parser]::ParseFile(
+            "scripts/windows-tryout.ps1", [ref]$null, [ref]$errors) | Out-Null
+          if ($errors -and $errors.Count -gt 0) {
+            $errors | ForEach-Object { Write-Host "$($_.Extent.StartLineNumber): $($_.Message)" }
+            throw "windows-tryout.ps1 has $($errors.Count) parse error(s)"
+          }
+          Write-Host "parses clean"
+
+      - name: Does windows-tryout.ps1 actually leave the machine clean?
+        # The script's central claim is that it puts the machine back exactly as
+        # it found it. That claim is worth nothing unverified, and this runner is
+        # a real Windows box -- so run the thing end to end and let its own
+        # inventory diff be the judge. It exits non-zero if a single queue, port
+        # or driver differs, so a leak fails the job rather than being reported
+        # by whoever trusted it.
+        #
+        # -SkipProbe: no subnet scanning from a hosted runner. -RepoPath: use
+        # this checkout instead of cloning, so the run tests the working tree.
+        shell: pwsh
+        run: ./scripts/windows-tryout.ps1 -SkipProbe -RepoPath . -KeepWorkspace:$false
 
       - name: Leave no queues behind
         # Belt and braces over the per-test fixtures: a crashed test must not
