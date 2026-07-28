@@ -157,6 +157,20 @@ jobs:
         shell: pwsh
         run: ./scripts/windows-tryout.ps1 -SkipProbe -RepoPath . -KeepWorkspace:$false
 
+      - name: Does the zip fallback work? (the path a machine without git takes)
+        # The step above passes -RepoPath, so it never touches Get-RepoSource --
+        # and this runner has git anyway, so even without -RepoPath it would take
+        # the clone branch. The zip fallback was therefore completely unverified
+        # while being exactly the path a stock Windows box hits, which is how the
+        # first real user got "git not found on PATH".
+        #
+        # -ForceZip skips the git branch outright. Fetches main rather than the PR
+        # head, which is fine: what is under test is download -> extract -> venv
+        # -> pip install, not the contents. Both phases skipped to keep it quick;
+        # the inventory diff still runs and still fails on a leak.
+        shell: pwsh
+        run: ./scripts/windows-tryout.ps1 -ForceZip -SkipProbe -SkipSpooler
+
       - name: Leave no queues behind
         # Belt and braces over the per-test fixtures: a crashed test must not
         # leave a PNTest- queue on a reused image.
