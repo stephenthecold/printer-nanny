@@ -1,0 +1,184 @@
+{% extends "base.html" %}
+{% import "_components.html" as c %}
+{% block title %}Machines{% endblock %}
+
+{% block body %}
+{{ c.page_title("Machines", "Workstations running the print client, and the keys that let them enroll.") }}
+
+{% if flash %}
+  <div class="{{ c.note('info', 'mb-4') }}">{{ flash }}</div>
+{% endif %}
+
+{% if not client %}
+  <div class="{{ c.note('info') }}">No clients yet. Create one before enrolling workstations.</div>
+{% else %}
+
+<form method="get" action="/manage/machines" class="mb-6 flex flex-wrap items-end gap-3">
+  <div class="min-w-0">
+    {% call c.select_field('client_id', 'Client') %}
+      {% for cl in clients %}
+        <option value="{{ cl.id }}" {% if cl.id == client.id %}selected{% endif %}>{{ cl.name }}</option>
+      {% endfor %}
+    {% endcall %}
+  </div>
+  <button type="submit" class="{{ c.btn('neutral') }}">Show</button>
+</form>
+
+{# ---------------------------------------------------------------- keys -- #}
+<div class="{{ c.card_cls() }} mb-8">
+  {{ c.section_title("Enrollment keys") }}
+
+  {% if new_key %}
+    <div class="{{ c.note('warning', 'mb-4') }}">
+      <p class="font-medium">Copy this key now — it is not shown again.</p>
+      <code class="mt-2 block break-all rounded bg-slate-900 px-3 py-2 font-mono text-xs text-slate-100">{{ new_key }}</code>
+      <p class="mt-2 text-xs">Bake it into this client's installer as <code>PN_ENROLL_KEY</code>. It can only enroll machines — it cannot read your fleet.</p>
+    </div>
+  {% endif %}
+
+  <p class="mb-4 text-sm text-slate-600">
+    One key per client, baked into that client's installer. A machine redeems it
+    once to mint its own credential, so revoking a key stops <em>new</em>
+    enrollments and leaves every enrolled workstation working.
+  </p>
+
+  <div class="{{ c.table_wrap() }}">
+    <table class="{{ c.table_cls() }}">
+      <thead class="{{ c.thead_cls() }}">
+        <tr>
+          <th class="{{ c.th_cls() }}">Label</th>
+          <th class="{{ c.th_cls() }}">Created</th>
+          <th class="{{ c.th_cls() }}">Last used</th>
+          <th class="{{ c.th_cls() }}">Status</th>
+          <th class="{{ c.th_cls('right') }}"><span class="sr-only">Actions</span></th>
+        </tr>
+      </thead>
+      <tbody>
+        {% for k in keys %}
+        <tr class="{{ c.tr_cls() }}">
+          <td class="{{ c.td_cls() }}">{{ k.label }}</td>
+          <td class="{{ c.td_cls() }}">{{ k.created_at.strftime('%Y-%m-%d') if k.created_at else '—' }}</td>
+          <td class="{{ c.td_cls() }}">{{ k.last_used_at.strftime('%Y-%m-%d %H:%M') if k.last_used_at else 'never' }}</td>
+          <td class="{{ c.td_cls() }}">
+            {% if k.live %}{{ c.badge('Active', 'success') }}{% else %}{{ c.badge('Revoked', 'neutral') }}{% endif %}
+          </td>
+          <td class="{{ c.td_cls('right') }}">
+            {% if k.live %}
+            <form method="post" action="/manage/machines/keys/{{ k.id }}/revoke" class="inline">
+              <button type="submit" class="{{ c.btn('danger', 'sm') }}"
+                      aria-label="Revoke enrollment key {{ k.label }}">Revoke</button>
+            </form>
+            {% endif %}
+          </td>
+        </tr>
+        {% else %}
+          {{ c.empty_row(5, "No enrollment keys yet.") }}
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+
+  <form method="post" action="/manage/machines/keys/create" class="mt-4 flex flex-wrap items-end gap-3">
+    <input type="hidden" name="client_id" value="{{ client.id }}">
+    <div class="min-w-0 grow">
+      {{ c.field('label', 'Label', placeholder='%s workstations' % client.name) }}
+    </div>
+    <button type="submit" class="{{ c.btn('primary') }}">Create key</button>
+  </form>
+</div>
+
+{# ------------------------------------------------------------ machines -- #}
+<div class="{{ c.card_cls() }}">
+  {{ c.section_title("Workstations") }}
+
+  {% if not machines %}
+    {{ c.empty_note("No workstations have enrolled yet. Install the client with an enrollment key and they appear here.") }}
+  {% else %}
+  <div class="{{ c.table_wrap() }}">
+    <table class="{{ c.table_cls() }}">
+      <thead class="{{ c.thead_cls() }}">
+        <tr>
+          <th class="{{ c.th_cls() }}">Machine</th>
+          <th class="{{ c.th_cls() }}">Printers</th>
+          <th class="{{ c.th_cls() }}">Last seen</th>
+          <th class="{{ c.th_cls() }}">Status</th>
+          <th class="{{ c.th_cls('right') }}"><span class="sr-only">Actions</span></th>
+        </tr>
+      </thead>
+      <tbody>
+        {% for mach in machines %}
+        <tr class="{{ c.tr_cls() }}">
+          <td class="{{ c.td_cls() }}">
+            <div class="font-medium text-slate-900">{{ mach.name or 'Unnamed' }}</div>
+            <div class="font-mono text-xs text-slate-500">{{ mach.machine_uid[:16] }}…</div>
+            {% if mach.default_wins %}
+              <div class="mt-1">{{ c.badge('Shared terminal', 'warning') }}</div>
+            {% endif %}
+          </td>
+          <td class="{{ c.td_cls() }}">
+            {% for printer, is_default in assignments.get(mach.id, []) %}
+              {% if printer %}
+              <div class="flex items-center gap-2 py-0.5">
+                <span>{{ printer.display_name or printer.ip }}</span>
+                {% if is_default %}{{ c.badge('default', 'success') }}{% endif %}
+                <form method="post" action="/manage/machines/unassign" class="inline">
+                  <input type="hidden" name="machine_id" value="{{ mach.id }}">
+                  <input type="hidden" name="printer_id" value="{{ printer.id }}">
+                  <button type="submit" class="{{ c.btn('subtle', 'sm') }}"
+                          aria-label="Remove {{ printer.display_name or printer.ip }} from {{ mach.name or 'this machine' }}">Remove</button>
+                </form>
+              </div>
+              {% endif %}
+            {% else %}
+              <span class="text-sm text-slate-400">none</span>
+            {% endfor %}
+
+            <form method="post" action="/manage/machines/assign" class="mt-2 flex flex-wrap items-center gap-2">
+              <input type="hidden" name="machine_id" value="{{ mach.id }}">
+              <label class="sr-only" for="printer-{{ mach.id }}">Printer to assign to {{ mach.name or 'this machine' }}</label>
+              <select id="printer-{{ mach.id }}" name="printer_id" class="{{ c.input_sm_cls() }}">
+                {% for p in printers %}
+                  <option value="{{ p.id }}">{{ p.display_name or p.ip }}</option>
+                {% endfor %}
+              </select>
+              <label class="flex items-center gap-1 text-xs text-slate-600">
+                <input type="checkbox" name="is_default" value="1" class="rounded border-slate-300">
+                default
+              </label>
+              <button type="submit" class="{{ c.btn('neutral', 'sm') }}">Assign</button>
+            </form>
+          </td>
+          <td class="{{ c.td_cls() }}">
+            {{ mach.last_seen_at.strftime('%Y-%m-%d %H:%M') if mach.last_seen_at else 'never' }}
+          </td>
+          <td class="{{ c.td_cls() }}">
+            {% if mach.active %}{{ c.badge('Active', 'success') }}{% else %}{{ c.badge('Retired', 'neutral') }}{% endif %}
+          </td>
+          <td class="{{ c.td_cls('right') }}">
+            <div class="flex flex-wrap justify-end gap-2">
+              <form method="post" action="/manage/machines/{{ mach.id }}/default-wins" class="inline">
+                <input type="hidden" name="default_wins" value="{{ '0' if mach.default_wins else '1' }}">
+                <button type="submit" class="{{ c.btn('subtle', 'sm') }}"
+                        aria-label="{{ 'Stop' if mach.default_wins else 'Let' }} {{ mach.name or 'this machine' }} {{ 'overriding' if mach.default_wins else 'override' }} personal defaults">
+                  {{ 'Unset shared' if mach.default_wins else 'Shared terminal' }}
+                </button>
+              </form>
+              <form method="post" action="/manage/machines/{{ mach.id }}/active" class="inline">
+                <input type="hidden" name="active" value="{{ '0' if mach.active else '1' }}">
+                <button type="submit" class="{{ c.btn('warning' if mach.active else 'success', 'sm') }}"
+                        aria-label="{{ 'Retire' if mach.active else 'Reactivate' }} {{ mach.name or 'this machine' }}">
+                  {{ 'Retire' if mach.active else 'Reactivate' }}
+                </button>
+              </form>
+            </div>
+          </td>
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+  {% endif %}
+</div>
+
+{% endif %}
+{% endblock %}

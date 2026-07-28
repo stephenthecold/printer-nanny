@@ -12,11 +12,20 @@ from starlette.middleware.sessions import SessionMiddleware
 from uvicorn.middleware.proxy_headers import ProxyHeadersMiddleware
 
 from central import auth_oauth_smtp, auth_oidc
-from central.api import enrollment, exports, ingest, management, reporting, scim
+from central.api import (
+    enrollment,
+    exports,
+    ingest,
+    management,
+    reporting,
+    scim,
+    workstations,
+)
 from central.config import settings
 from central.dashboard import (
     backup_routes,
     installer,
+    machines,
     manage,
     people,
     routes as dashboard,
@@ -25,7 +34,7 @@ from central.dashboard import (
 from central.db import create_all, get_db
 from central.health import database_ok, worker_health
 
-app = FastAPI(title="Printer Nanny", version="0.19.0")
+app = FastAPI(title="Printer Nanny", version="0.20.0")
 # Honor X-Forwarded-Proto/For from the reverse proxy so request.base_url returns
 # https:// when Caddy/Nginx terminates TLS in front of us. Without this, the
 # agent install command on /manage/agents leaks http://… to operators behind
@@ -46,6 +55,7 @@ app.add_middleware(
 # would otherwise try to parse "register" as an agent id.
 app.include_router(enrollment.router)
 app.include_router(ingest.router)
+app.include_router(workstations.router)
 app.include_router(management.router)
 app.include_router(reporting.router)
 app.include_router(exports.router)
@@ -55,6 +65,7 @@ app.include_router(scim.router)
 app.include_router(dashboard.router)
 app.include_router(manage.router)
 app.include_router(people.router)
+app.include_router(machines.router)
 app.include_router(settings_routes.router)
 app.include_router(backup_routes.router)
 app.include_router(auth_oidc.router)

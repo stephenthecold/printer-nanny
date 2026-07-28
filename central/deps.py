@@ -29,6 +29,37 @@ def authenticated_agent(
     return agent
 
 
+def authenticated_machine(
+    machine_id: int,
+    authorization: str = Header(default=""),
+    db: Session = Depends(get_db),
+) -> m.Machine:
+    """Resolve the path ``machine_id`` and verify the Bearer key matches it.
+
+    Mirrors ``authenticated_agent`` deliberately, including the single
+    indistinguishable error: reporting "no such machine" separately from "wrong
+    key" turns this into an oracle for enumerating a tenant's machines.
+
+    An inactive machine is rejected here rather than further in. Deactivating a
+    machine in the UI must stop it polling on its very next request -- if it only
+    took effect at the resolver, a retired PC would keep authenticating and keep
+    being told it has no printers, which reads as a broken client rather than a
+    retired one.
+    """
+    if not authorization.lower().startswith("bearer "):
+        raise HTTPException(status.HTTP_401_UNAUTHORIZED, "Missing bearer token")
+    token = authorization[7:].strip()
+    machine = db.get(m.Machine, machine_id)
+    if (
+        machine is None
+        or not machine.active
+        or not machine.api_key_hash
+        or machine.api_key_hash != hash_api_key(token)
+    ):
+        raise HTTPException(status.HTTP_401_UNAUTHORIZED, "Invalid machine credentials")
+    return machine
+
+
 def current_user(request: Request, db: Session = Depends(get_db)) -> Optional[m.User]:
     """Return the logged-in dashboard user from the signed session, or None.
 
