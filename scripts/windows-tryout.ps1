@@ -59,6 +59,13 @@
   Use an existing clone instead of cloning fresh. The clone is left alone --
   only the virtualenv inside the temp workspace is created and removed.
 
+.PARAMETER ProvisionFrom
+  Address of a REAL printer to provision a queue against, then remove. This is
+  the only check that exercises the driverless path end to end -- probe says
+  driverless, Windows builds the queue, the queue comes back out. Requires an
+  elevated shell. Creates exactly one PNTest-* queue and removes it; stages no
+  driver, so nothing irreversible happens.
+
 .PARAMETER JsonOut
   Write the probe results as JSON to this path. Opt-in on purpose: a file the
   operator did not ask for is a trace, and the inventory diff cannot see files.
@@ -101,6 +108,7 @@ param(
     [string]   $GetPipUrl      = "https://bootstrap.pypa.io/get-pip.py",
     [switch]   $SkipProbe,
     [switch]   $SkipSpooler,
+    [string]   $ProvisionFrom,
     [switch]   $ForceZip,
     [switch]   $ForceEmbeddedPython,
     [switch]   $KeepWorkspace
@@ -499,11 +507,12 @@ foreach ($required in @('Get-Printer', 'Get-PrinterPort', 'Get-PrinterDriver')) 
     }
 }
 
-if (-not $SkipSpooler -and -not $isAdmin) {
+if ((-not $SkipSpooler -or $ProvisionFrom) -and -not $isAdmin) {
     Write-Host ""
     Write-Host "The spooler phase needs an elevated shell (Add-Printer requires it)." -ForegroundColor Yellow
     Write-Host "Either re-run this from an Administrator PowerShell, or use" -ForegroundColor Yellow
-    Write-Host "  -SkipSpooler   to run the read-only probe phase alone." -ForegroundColor Yellow
+    Write-Host "  -SkipSpooler   to run the read-only probe phase alone" -ForegroundColor Yellow
+    Write-Host "  (and drop -ProvisionFrom, which also creates a queue)." -ForegroundColor Yellow
     exit 1
 }
 
@@ -564,7 +573,7 @@ try {
     # The spooler phase genuinely does need them: tests/conftest.py imports
     # central.db to build its throwaway SQLite fixture, so pytest cannot even
     # collect without central present.
-    if ($SkipSpooler) {
+    if ($SkipSpooler -and -not $ProvisionFrom) {
         $installTarget = "./agent[mdns]"
         Write-Host "  installing the agent package only (probe needs nothing else) ..."
     } else {
@@ -641,6 +650,25 @@ try {
     }
 
     # --- phase 2: the spooler ------------------------------------------------
+
+    if ($ProvisionFrom) {
+        Write-Section "Phase 1b -- provision a REAL printer, then remove it"
+        Write-Host "  target: $ProvisionFrom"
+        Write-Host "  creates one PNTest-* queue and removes it; stages no driver."
+        Write-Host ""
+
+        # Values reach Python as argv on a fixed command line, never as
+        # PowerShell text -- same rule as everywhere else in this codebase.
+        $provArgs = @(
+            (Join-Path $repo "scripts\windows_provision_check.py"),
+            "--ip", $ProvisionFrom
+        )
+        & $venvPy @provArgs
+        if ($LASTEXITCODE -ne 0) {
+            Write-Host "`n  provisioning check FAILED (exit $LASTEXITCODE)" -ForegroundColor Red
+            $script:ExitCode = 1
+        }
+    }
 
     if (-not $SkipSpooler) {
         Write-Section "Phase 2 -- spooler queue lifecycle"
