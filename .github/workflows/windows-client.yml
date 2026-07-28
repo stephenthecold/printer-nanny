@@ -127,6 +127,26 @@ jobs:
       - name: Spooler integration tests
         run: python -m pytest tests/windows -v
 
+      - name: Does windows-tryout.ps1 parse under Windows PowerShell 5.1?
+        # `shell: powershell` on windows-latest is Windows PowerShell 5.1, NOT
+        # pwsh 7. That distinction is the whole point of this step.
+        #
+        # Every other step here runs pwsh, and 7.x quietly accepts things 5.1
+        # rejects outright -- ternaries, ?., null-coalescing, `clean` pipeline
+        # chain operators. Operators run this script from whatever shell their
+        # Start menu gave them, which on a stock box is 5.1. Without this step a
+        # 7-only construct ships green and fails on the first real machine.
+        shell: powershell
+        run: |
+          $errors = $null
+          [System.Management.Automation.Language.Parser]::ParseFile(
+            "scripts/windows-tryout.ps1", [ref]$null, [ref]$errors) | Out-Null
+          if ($errors -and $errors.Count -gt 0) {
+            $errors | ForEach-Object { Write-Host "$($_.Extent.StartLineNumber): $($_.Message)" }
+            throw "windows-tryout.ps1 has $($errors.Count) parse error(s) on 5.1"
+          }
+          Write-Host "parses clean on $($PSVersionTable.PSVersion)"
+
       - name: Does windows-tryout.ps1 parse?
         # That script is meant to be run by hand on an operator's own machine,
         # and it is authored on Linux where no PowerShell exists to check it.
@@ -156,6 +176,44 @@ jobs:
         # this checkout instead of cloning, so the run tests the working tree.
         shell: pwsh
         run: ./scripts/windows-tryout.ps1 -SkipProbe -RepoPath . -KeepWorkspace:$false
+
+      - name: Does the whole harness run on Windows PowerShell 5.1?
+        # The step above proves it on pwsh 7.6.3. This proves it on 5.1, which is
+        # what a stock Windows box actually launches -- and 5.1 is where this
+        # script's real defects have lived.
+        #
+        # The one that cost a user a failed run: under 5.1, merging a NATIVE
+        # command's stderr with `2>&1` while $ErrorActionPreference='Stop' makes
+        # every stderr line a script-terminating NativeCommandError. PowerShell
+        # 7.2+ dropped that behaviour, so a pwsh-only job is structurally
+        # incapable of catching it no matter how many steps it runs.
+        #
+        # This does not guarantee catching that specific defect -- it needs the
+        # native command to actually emit stderr, and CI's python and git are
+        # well-behaved. What it does prove is that the script runs end to end on
+        # 5.1 at all, and that its inventory diff comes back clean there. That
+        # was previously unverified on the interpreter most operators use.
+        shell: powershell
+        run: ./scripts/windows-tryout.ps1 -SkipProbe -RepoPath . -KeepWorkspace:$false
+
+      - name: Does the zip fallback work? (the path a machine without git takes)
+        # The step above passes -RepoPath, so it never touches Get-RepoSource --
+        # and this runner has git anyway, so even without -RepoPath it would take
+        # the clone branch. The zip fallback was therefore completely unverified
+        # while being exactly the path a stock Windows box hits, which is how the
+        # first real user got "git not found on PATH".
+        #
+        # -ForceZip skips the git branch outright. Fetches main rather than the PR
+        # head, which is fine: what is under test is download -> extract -> venv
+        # -> pip install, not the contents. Both phases skipped to keep it quick;
+        # the inventory diff still runs and still fails on a leak.
+        #
+        # Deliberately 5.1: this path is Invoke-WebRequest -UseBasicParsing plus
+        # Expand-Archive plus a TLS 1.2 opt-in, and every one of those exists
+        # *because* of a 5.1 behaviour. Testing it on 7.x would exercise the code
+        # while proving nothing about the reason it was written that way.
+        shell: powershell
+        run: ./scripts/windows-tryout.ps1 -ForceZip -SkipProbe -SkipSpooler
 
       - name: Leave no queues behind
         # Belt and braces over the per-test fixtures: a crashed test must not

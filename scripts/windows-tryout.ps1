@@ -52,17 +52,30 @@
   Use an existing clone instead of cloning fresh. The clone is left alone --
   only the virtualenv inside the temp workspace is created and removed.
 
+.PARAMETER JsonOut
+  Write the probe results as JSON to this path. Opt-in on purpose: a file the
+  operator did not ask for is a trace, and the inventory diff cannot see files.
+  Everything in it is printed to the console regardless.
+
 .PARAMETER KeepWorkspace
   Leave the temp workspace in place for inspection. The printer inventory is
   still restored; this only keeps the files.
 
 .EXAMPLE
   # Safest first run: probe only, nothing created.
-  .\windows-tryout.ps1 -SkipSpooler
+  # Windows blocks downloaded .ps1 files by default, so run it in a child
+  # process with the policy relaxed for that process alone -- this writes
+  # nothing to the registry and leaves the calling shell's policy untouched.
+  powershell -NoProfile -ExecutionPolicy Bypass -File .\windows-tryout.ps1 -SkipSpooler
 
 .EXAMPLE
-  # Everything, against a known printer.
-  .\windows-tryout.ps1 -PrinterIp 192.168.1.50
+  # Everything, against a known printer. Needs an elevated shell.
+  powershell -NoProfile -ExecutionPolicy Bypass -File .\windows-tryout.ps1 -PrinterIp 192.168.1.50
+
+.NOTES
+  Needs Python 3.9+. Git is optional -- without it the source is fetched as a
+  zip over HTTPS, because a stock Windows box has no git and asking someone to
+  install one to try the other is a poor trade.
 #>
 [CmdletBinding()]
 param(
@@ -73,8 +86,10 @@ param(
     [string[]] $PrinterIp,
     [string]   $Community     = "public",
     [int]      $MaxHosts      = 1024,
+    [string]   $JsonOut,
     [switch]   $SkipProbe,
     [switch]   $SkipSpooler,
+    [switch]   $ForceZip,
     [switch]   $KeepWorkspace
 )
 
@@ -94,8 +109,10 @@ function Write-Section {
 }
 
 function Get-Inventory {
-    # Names only. Enough to prove nothing was added or removed, and it cannot
-    # itself fail on a machine where one of these cmdlets is unavailable.
+    # Names only -- enough to prove nothing was added or removed. The
+    # SilentlyContinue here is safe only because preflight already refused to run
+    # on a machine lacking these cmdlets; otherwise an empty snapshot would be
+    # indistinguishable from an empty spooler, and cleanup keys off it.
     [ordered]@{
         printers = @(Get-Printer       -ErrorAction SilentlyContinue | Select-Object -ExpandProperty Name | Sort-Object)
         ports    = @(Get-PrinterPort   -ErrorAction SilentlyContinue | Select-Object -ExpandProperty Name | Sort-Object)
@@ -153,8 +170,19 @@ function Assert-NoDriverStaging {
     # The guard that makes claim #1 real rather than a promise. If a future
     # edit teaches the Windows tests to stage a driver, this refuses to run
     # rather than quietly making an irreversible change to someone's machine.
+    #
+    # It fails CLOSED. Get-ChildItem on a missing directory returns nothing
+    # quietly, so "zero files scanned" and "zero offenders found" produce an
+    # identical green line. On the one operation that cannot be undone, a guard
+    # that passes because it inspected nothing is worse than no guard, because
+    # it reads as reassurance.
+    $files = @(Get-ChildItem -Path $TestDir -Filter *.py -Recurse -ErrorAction SilentlyContinue)
+    if ($files.Count -eq 0) {
+        throw "driver-staging guard found no test files under '$TestDir' -- refusing to run rather than trust a check that inspected nothing"
+    }
+
     $offenders = @()
-    foreach ($file in Get-ChildItem -Path $TestDir -Filter *.py -Recurse -ErrorAction SilentlyContinue) {
+    foreach ($file in $files) {
         $text = Get-Content -Raw -Path $file.FullName
         foreach ($pattern in @('ensure_vendor_queue', 'pnputil', 'Add-PrinterDriver', '_SCRIPT_STAGE_DRIVER')) {
             if ($text -match [regex]::Escape($pattern)) {
@@ -171,6 +199,149 @@ function Assert-NoDriverStaging {
         throw "driver-staging guard tripped"
     }
     Write-Host "  no driver-staging call reachable from the test suite" -ForegroundColor Green
+}
+
+function Resolve-Python {
+    # Finding python on PATH is NOT proof python exists.
+    #
+    # Windows ships "app execution aliases" in WindowsApps -- zero-byte stubs
+    # that resolve happily through Get-Command and, when the Store package
+    # behind them isn't installed, open the Microsoft Store instead of running
+    # anything. A machine with no Python still answers `Get-Command python`,
+    # which is how a preflight check sails straight past the problem and fails
+    # incomprehensibly three phases later inside pip.
+    #
+    # So each candidate is made to prove itself by printing a version.
+    foreach ($candidate in @('python', 'python3', 'py')) {
+        $cmd = Get-Command $candidate -ErrorAction SilentlyContinue
+        if (-not $cmd) { continue }
+
+        # $ErrorActionPreference='Stop' is set script-wide, and on Windows
+        # PowerShell 5.1 that turns `2>&1` on a NATIVE command into a
+        # script-terminating error: each stderr line becomes an ErrorRecord with
+        # FullyQualifiedErrorId NativeCommandError, and 'Stop' promotes it.
+        # Without relaxing it here, a perfectly good interpreter that writes
+        # anything at all to stderr is thrown out and misreported as a
+        # WindowsApps stub. Scoped to the call and restored immediately.
+        $output = ''
+        $exit = 1
+        $prevEap = $ErrorActionPreference
+        $ErrorActionPreference = 'Continue'
+        try {
+            $output = (& $cmd.Source --version 2>&1 | Out-String)
+            $exit = $LASTEXITCODE
+        } catch {
+            $output = ''
+            $exit = 1
+        } finally {
+            $ErrorActionPreference = $prevEap
+        }
+        if ($exit -ne 0) { continue }
+        if ($output -notmatch 'Python\s+(\d+)\.(\d+)') { continue }
+
+        $major = [int]$Matches[1]
+        $minor = [int]$Matches[2]
+        if ($major -lt 3 -or ($major -eq 3 -and $minor -lt 9)) {
+            Write-Host "  $($cmd.Source) is Python $major.$minor; need 3.9+" -ForegroundColor Yellow
+            continue
+        }
+        return [pscustomobject]@{
+            Path    = $cmd.Source
+            Version = "$major.$minor"
+        }
+    }
+    return $null
+}
+
+function Get-RepoSource {
+    param([string] $RepoUrl, [string] $Ref, [string] $Workspace, [switch] $ForceZip)
+
+    # git first when it's genuinely present: a shallow clone is fast and pins an
+    # exact ref. But git is NOT on a stock Windows box, and requiring someone to
+    # install one tool in order to try another is a bad trade -- so its absence
+    # is a fallback, not an error.
+    # $Ref lands in a URL below and in a --branch argument here. Constrain it to
+    # ref-legal characters so a '..' segment cannot silently retarget the
+    # download at a different repository path.
+    if ($Ref -notmatch '^[A-Za-z0-9][A-Za-z0-9._/-]*$' -or $Ref -match '\.\.') {
+        throw "refusing to fetch ref '$Ref': expected a branch name, tag or commit SHA"
+    }
+
+    $git = if ($ForceZip) { $null } else { Get-Command git -ErrorAction SilentlyContinue }
+    if ($git) {
+        $dest = Join-Path $Workspace "printer-nanny"
+        Write-Host "  cloning $RepoUrl ($Ref) ..."
+
+        # NOT `2>&1 | Out-Null`. On Windows PowerShell 5.1, merging a native
+        # command's stderr into the success stream under
+        # $ErrorActionPreference='Stop' makes every stderr line a
+        # script-terminating NativeCommandError -- and git writes to stderr on
+        # every failure path, so the fallback this function exists to provide
+        # would never be reached. The whole point is to survive git failing.
+        $cloneExit = 1
+        $prevEap = $ErrorActionPreference
+        $ErrorActionPreference = 'Continue'
+        try {
+            & git clone --quiet --depth 1 --branch $Ref $RepoUrl $dest
+            $cloneExit = $LASTEXITCODE
+        } catch {
+            $cloneExit = 1
+        } finally {
+            $ErrorActionPreference = $prevEap
+        }
+
+        if ($cloneExit -eq 0) { return $dest }
+        Write-Host "  git clone failed (exit $cloneExit); falling back to the zip archive" -ForegroundColor Yellow
+        Remove-Item -Recurse -Force $dest -ErrorAction SilentlyContinue
+    } else {
+        Write-Host "  git not present; fetching the source as a zip instead"
+    }
+
+    $base   = $RepoUrl -replace '\.git$', ''
+    $zipUrl = "$base/archive/$Ref.zip"
+    $zip    = Join-Path $Workspace "source.zip"
+    $stage  = Join-Path $Workspace "unpacked"
+
+    Write-Host "  downloading $zipUrl ..."
+
+    # Some Windows builds still default to TLS 1.0/1.1, which github.com refuses.
+    # Restored afterwards rather than left set: when this script is dot-sourced
+    # (or run in an existing session rather than a child process) the change
+    # would otherwise outlive the run and quietly re-pin the caller's TLS
+    # settings -- a trace, and exactly the kind this script promises not to leave.
+    $prevProtocol = $null
+    try {
+        $prevProtocol = [Net.ServicePointManager]::SecurityProtocol
+        [Net.ServicePointManager]::SecurityProtocol =
+            $prevProtocol -bor [Net.SecurityProtocolType]::Tls12
+    } catch {
+        # Older .NET without the Tls12 member -- nothing to do but continue.
+    }
+
+    try {
+        # -UseBasicParsing: on Windows PowerShell 5.1 the default path leans on
+        # Internet Explorer's DOM engine, which fails outright on a machine where
+        # IE has never been launched. Harmless no-op on 7.x.
+        Invoke-WebRequest -Uri $zipUrl -OutFile $zip -UseBasicParsing
+    } finally {
+        if ($null -ne $prevProtocol) {
+            try { [Net.ServicePointManager]::SecurityProtocol = $prevProtocol } catch { }
+        }
+    }
+    if (-not (Test-Path $zip)) { throw "download produced no file" }
+
+    New-Item -ItemType Directory -Path $stage -Force | Out-Null
+    Expand-Archive -Path $zip -DestinationPath $stage -Force
+
+    # GitHub names the folder <repo>-<ref> with slashes flattened, so it is
+    # found rather than computed -- a branch called feature/x would not match
+    # any name we could predict.
+    $extracted = @(Get-ChildItem -Path $stage -Directory)
+    if ($extracted.Count -ne 1) {
+        throw "expected one directory inside the archive, found $($extracted.Count)"
+    }
+    Write-Host "  unpacked $($extracted[0].Name)"
+    return $extracted[0].FullName
 }
 
 function Get-LocalCidrs {
@@ -198,14 +369,37 @@ Write-Host "OS            : $([System.Environment]::OSVersion.VersionString)"
 Write-Host "PowerShell    : $($PSVersionTable.PSVersion)"
 Write-Host "Elevated      : $isAdmin"
 
-$python = (Get-Command python -ErrorAction SilentlyContinue)
-if (-not $python) { $python = (Get-Command py -ErrorAction SilentlyContinue) }
+$python = Resolve-Python
 if (-not $python) {
-    Write-Host "`nPython 3.9+ is required and was not found on PATH." -ForegroundColor Red
-    Write-Host "Install it from python.org or the Microsoft Store, then re-run." -ForegroundColor Red
+    Write-Host ""
+    Write-Host "No working Python 3.9+ found." -ForegroundColor Red
+    Write-Host ""
+    Write-Host "If 'python' appears to be on your PATH under WindowsApps, that is" -ForegroundColor Yellow
+    Write-Host "an app execution alias, not an interpreter -- it opens the Microsoft" -ForegroundColor Yellow
+    Write-Host "Store when the package behind it isn't installed. Either install" -ForegroundColor Yellow
+    Write-Host "Python from python.org (tick 'Add python.exe to PATH'), or turn the" -ForegroundColor Yellow
+    Write-Host "alias off under Settings > Apps > Advanced app settings >" -ForegroundColor Yellow
+    Write-Host "App execution aliases." -ForegroundColor Yellow
     exit 1
 }
-Write-Host "Python        : $($python.Source)"
+Write-Host "Python        : $($python.Path)  (v$($python.Version))"
+
+# The whole removability proof rests on being able to enumerate printers, ports
+# and drivers. `-ErrorAction SilentlyContinue` on those calls cannot distinguish
+# "nothing installed" from "cmdlet unavailable", and an empty BEFORE snapshot is
+# actively dangerous: cleanup removes PNTest-* queues that are absent from it, so
+# a silently-empty snapshot would license deleting a PNTest-* queue the operator
+# owns. Refuse up front rather than proceed with a proof we cannot make.
+foreach ($required in @('Get-Printer', 'Get-PrinterPort', 'Get-PrinterDriver')) {
+    if (-not (Get-Command $required -ErrorAction SilentlyContinue)) {
+        Write-Host ""
+        Write-Host "$required is unavailable on this system." -ForegroundColor Red
+        Write-Host "Without it the before/after inventory cannot be taken, and this" -ForegroundColor Red
+        Write-Host "script will not touch a machine whose state it cannot verify it" -ForegroundColor Red
+        Write-Host "restored. (The PrintManagement module ships with Windows 8/2012+.)" -ForegroundColor Red
+        exit 1
+    }
+}
 
 if (-not $SkipSpooler -and -not $isAdmin) {
     Write-Host ""
@@ -238,14 +432,7 @@ try {
         $repo = (Resolve-Path $RepoPath).Path
         Write-Host "  using existing clone: $repo"
     } else {
-        $git = Get-Command git -ErrorAction SilentlyContinue
-        if (-not $git) {
-            throw "git not found on PATH. Install Git for Windows, or pass -RepoPath to point at an existing clone."
-        }
-        $repo = Join-Path $script:Workspace "printer-nanny"
-        Write-Host "  cloning $RepoUrl ($Ref) ..."
-        & git clone --quiet --depth 1 --branch $Ref $RepoUrl $repo
-        if ($LASTEXITCODE -ne 0) { throw "git clone failed with exit code $LASTEXITCODE" }
+        $repo = Get-RepoSource -RepoUrl $RepoUrl -Ref $Ref -Workspace $script:Workspace -ForceZip:$ForceZip
     }
 
     Write-Section "Driver-staging guard"
@@ -253,7 +440,7 @@ try {
 
     Write-Section "Virtualenv (private to this run)"
     $venv = Join-Path $script:Workspace "venv"
-    & $python.Source -m venv $venv
+    & $python.Path -m venv $venv
     if ($LASTEXITCODE -ne 0) { throw "venv creation failed" }
     $venvPy = Join-Path $venv "Scripts\python.exe"
     Write-Host "  $venvPy"
@@ -294,11 +481,20 @@ try {
             $script:ExitCode = 1
         }
 
-        $probeJson = Join-Path $script:Workspace "probe.json"
-        if ((Test-Path $probeJson) -and -not $KeepWorkspace) {
-            $saved = Join-Path ([Environment]::GetFolderPath('Desktop')) "printer-nanny-probe.json"
-            Copy-Item $probeJson $saved -Force -ErrorAction SilentlyContinue
-            if (Test-Path $saved) { Write-Host "`n  probe JSON saved to $saved" -ForegroundColor Green }
+        # Deliberately NOT copied to the Desktop. An earlier version did, which
+        # quietly broke the script's central promise: the file persisted after
+        # the run, the inventory diff cannot see it (it only compares printers,
+        # ports and drivers), and the script then announced that nothing had
+        # been left behind. A file the operator did not ask for is a trace.
+        #
+        # So the JSON is written only where they name it. Everything it contains
+        # was already printed to the console above.
+        if ($JsonOut) {
+            $probeJson = Join-Path $script:Workspace "probe.json"
+            if (Test-Path $probeJson) {
+                Copy-Item $probeJson $JsonOut -Force
+                Write-Host "`n  probe JSON written to $JsonOut (you asked for it; nothing else persists)" -ForegroundColor Green
+            }
         }
     } else {
         Write-Section "Phase 1 -- skipped (-SkipProbe)"
@@ -348,7 +544,13 @@ finally {
         } else {
             Remove-Item -Recurse -Force $script:Workspace -ErrorAction SilentlyContinue
             if (Test-Path $script:Workspace) {
-                Write-Host "  could not fully remove $($script:Workspace)" -ForegroundColor Yellow
+                # A surviving workspace is a leak, and the inventory diff below
+                # cannot see it -- that diff only compares printers, ports and
+                # drivers. Reported loudly and failed, rather than mentioned in
+                # passing and then contradicted by "nothing left behind".
+                Write-Host "  LEFT BEHIND: $($script:Workspace)" -ForegroundColor Red
+                Write-Host "  (delete it by hand: Remove-Item -Recurse -Force '$($script:Workspace)')" -ForegroundColor Red
+                $script:ExitCode = 1
             } else {
                 Write-Host "  workspace removed"
             }
@@ -360,11 +562,15 @@ finally {
     $clean = Compare-Inventory -Before $script:Before -After $after
 
     Write-Host ""
-    if ($clean) {
-        Write-Host "  Machine is exactly as it was found. Nothing left behind." -ForegroundColor Green
-    } else {
+    if (-not $clean) {
         Write-Host "  DIFFERENCES FOUND -- see above. Please report this." -ForegroundColor Red
         $script:ExitCode = 1
+    } elseif ($script:ExitCode -ne 0 -and $script:Workspace -and (Test-Path $script:Workspace)) {
+        # The inventory is clean but a file-level leak was reported above. Saying
+        # "nothing left behind" here would contradict it, so it doesn't.
+        Write-Host "  Printer state restored, but the workspace above survived." -ForegroundColor Yellow
+    } else {
+        Write-Host "  Machine is exactly as it was found. Nothing left behind." -ForegroundColor Green
     }
 }
 
