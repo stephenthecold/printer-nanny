@@ -31,15 +31,56 @@ class FakeRunner:
     never learned that the first call created something.
     """
 
-    def __init__(self, queues=None, drivers=None):
+    def __init__(self, queues=None, drivers=None, ippurl=True, ipp_reachable=True):
         self.calls = []                              # (script, variables)
         self.queues = dict(queues or {})             # name -> (port, driver)
-        self.ports = set()
-        self.drivers = set(drivers or [])
+        self.ports = {}                              # name -> monitor description
+        # The IPP class driver is INBOX -- present on every supported Windows --
+        # so a fake that starts without it models a machine that does not exist.
+        # Pass drivers=[] explicitly to test the genuinely-missing case.
+        self.drivers = set(drivers) if drivers is not None else {ws.IPP_CLASS_DRIVER}
+        # Whether this pretend Windows has Add-Printer -IppURL at all (Server
+        # 2019 does not), and whether the pretend printer answers its IPP query.
+        self.ippurl = ippurl
+        self.ipp_reachable = ipp_reachable
 
     def run(self, script, variables=None):
         v = dict(variables or {})
         self.calls.append((script, v))
+
+        if "ContainsKey('IppURL')" in script:
+            return "YES" if self.ippurl else "NO"
+
+        if "Add-Printer -Name $env:PN_NAME -IppURL" in script:
+            # Windows performs the discovery and picks BOTH the port name and
+            # the driver. The fake mirrors that: it invents a port we did not
+            # choose, which is what makes the "cannot predict the port name"
+            # property testable at all.
+            if not self.ipp_reachable:
+                raise ws.PowerShellError(
+                    "Add-Printer failed", 1, "", "The request timed out."
+                )
+            name = v["name"]
+            if name not in self.queues:
+                port = "IPP_" + v["ippurl"].replace("://", "_").replace("/", "_")
+                self.queues[name] = (port, ws.IPP_CLASS_DRIVER)
+                self.ports[port] = "Internet Port"
+            port, driver = self.queues[name]
+            return "OK|{}|{}".format(port, driver)
+
+        if "Get-PrinterPort -Name $env:PN_PORT" in script and "Description" in script:
+            desc = self.ports.get(v.get("port"))
+            if desc is None:
+                return "ABSENT"
+            return "PRESENT|{}|{}".format(desc, "")
+
+        # BEFORE the Get-Printer branch: _SCRIPT_REMOVE_QUEUE contains BOTH
+        # "Get-Printer -Name" (its existence check) and "Remove-Printer". Matched
+        # the other way round the fake answers the existence check and never
+        # removes anything -- so a removal test passes while nothing is removed.
+        if "Remove-Printer" in script:
+            self.queues.pop(v.get("name"), None)
+            return "OK"
 
         if "Get-Printer -Name" in script:
             row = self.queues.get(v.get("name"))
@@ -54,7 +95,9 @@ class FakeRunner:
             return "PRESENT" if v.get("driver") in self.drivers else "ABSENT"
 
         if "Add-PrinterPort" in script:
-            self.ports.add(v["port"])
+            # The only port Add-PrinterPort can make is a Standard TCP/IP one --
+            # that is the whole reason tier 1 no longer goes anywhere near it.
+            self.ports[v["port"]] = "Standard TCP/IP Port"
             return "OK"
 
         if "pnputil" in script:
@@ -69,10 +112,6 @@ class FakeRunner:
 
         if "Set-Printer -Name $env:PN_NAME -DriverName" in script:
             self.queues[v["name"]] = (v["port"], v["driver"])
-            return "OK"
-
-        if "Remove-Printer" in script:
-            self.queues.pop(v.get("name"), None)
             return "OK"
 
         return "OK"
@@ -310,20 +349,49 @@ def test_absent_queue_is_created():
     assert not runner.scripts_containing("Set-Printer -Name $env:PN_NAME -DriverName")
 
 
-def test_matching_queue_is_left_alone():
-    port = ws.port_name_for("ipp://10.0.0.5:631/ipp/print")
-    runner = FakeRunner({"Lobby": (port, ws.IPP_CLASS_DRIVER)})
+def test_a_converged_queue_costs_no_network_round_trip():
+    """An already-good queue must NOT re-run Add-Printer -IppURL.
+
+    That cmdlet performs a live IPP query. This runs on every assignment change,
+    service start and poll, so re-querying would mean a round trip per printer
+    per poll -- and would make a sleeping printer fail a queue that already
+    works. Convergence is decided from local state alone.
+    """
+    runner = FakeRunner(
+        {"Lobby": ("IPP_ipp_10.0.0.5_631_ipp_print", ws.IPP_CLASS_DRIVER)}
+    )
+    runner.ports["IPP_ipp_10.0.0.5_631_ipp_print"] = "Internet Port"
     assert ws.ensure_driverless_queue(runner, "Lobby", "ipp://10.0.0.5:631/ipp/print") == "unchanged"
-    assert not runner.scripts_containing("Add-Printer ")
+    assert not runner.scripts_containing("-IppURL")
     assert not runner.scripts_containing("Add-PrinterPort")
 
 
-def test_drifted_queue_is_repaired_not_duplicated():
-    """A re-addressed device must not leave a broken queue beside a new one."""
+def test_a_queue_on_a_raw_tcp_port_is_rebuilt():
+    """The migration case: queues the OLD broken code left behind.
+
+    The previous implementation bound the IPP class driver to a Standard TCP/IP
+    (RAW 9100) port, producing a queue that looks provisioned everywhere and
+    cannot print. Those exist on real machines now. There is no Set-Printer that
+    repairs one -- for tier 1 Windows owns the port -- so it is removed and
+    rebuilt through discovery.
+    """
+    runner = FakeRunner({"Lobby": ("PN_10.0.0.5_631_ipp_print", ws.IPP_CLASS_DRIVER)})
+    runner.ports["PN_10.0.0.5_631_ipp_print"] = "Standard TCP/IP Port"
+
+    assert ws.ensure_driverless_queue(runner, "Lobby", "ipp://10.0.0.5:631/ipp/print") == "updated"
+    assert runner.scripts_containing("Remove-Printer")
+    assert runner.scripts_containing("-IppURL")
+    # And what it ends up on is a port Windows chose, not one we derived.
+    port, driver = runner.queues["Lobby"]
+    assert not port.startswith("PN_"), "a PN_ port means the derived-name bug came back"
+    assert driver == ws.IPP_CLASS_DRIVER
+
+
+def test_a_queue_with_the_wrong_driver_is_rebuilt():
     runner = FakeRunner({"Lobby": ("PN_old_address", "Some Old Driver")})
+    runner.ports["PN_old_address"] = "Standard TCP/IP Port"
     assert ws.ensure_driverless_queue(runner, "Lobby", "ipp://10.0.0.9:631/ipp/print") == "updated"
-    assert runner.scripts_containing("Set-Printer -Name $env:PN_NAME -DriverName")
-    assert not runner.scripts_containing("Add-Printer ")
+    assert runner.scripts_containing("Remove-Printer")
 
 
 def test_repeated_runs_are_idempotent():
@@ -335,12 +403,25 @@ def test_repeated_runs_are_idempotent():
     assert (first, second, third) == ("created", "unchanged", "unchanged")
 
 
-def test_driverless_binds_the_inbox_driver_and_installs_nothing():
+def test_driverless_hands_windows_the_url_and_installs_nothing():
+    """Tier 1 no longer names a driver or a port -- Windows picks both.
+
+    -IppURL sits in a parameter set disjoint from -DriverName/-PortName, so
+    passing either alongside it does not get ignored: PowerShell fails to bind
+    the parameters at all. What we send is the URL and nothing else.
+    """
     runner = FakeRunner()
     ws.ensure_driverless_queue(runner, "Lobby", "ipp://10.0.0.5:631/ipp/print")
-    add_vars = runner.vars_for("Add-Printer ")[0]
-    assert add_vars["driver"] == ws.IPP_CLASS_DRIVER
+
+    add_vars = runner.vars_for("-IppURL")[0]
+    assert add_vars["ippurl"] == "ipp://10.0.0.5:631/ipp/print"
+    assert "driver" not in add_vars, "-IppURL cannot be combined with -DriverName"
+    assert "port" not in add_vars, "-IppURL cannot be combined with -PortName"
+
     assert not runner.scripts_containing("pnputil"), "tier 1 must never stage a driver"
+    assert not runner.scripts_containing("Add-PrinterPort"), (
+        "Add-PrinterPort can only make a RAW/LPR port, which cannot carry IPP"
+    )
 
 
 def test_comment_and_location_are_only_set_when_supplied():
@@ -408,13 +489,18 @@ def test_reconcile_reports_per_queue_and_one_failure_does_not_abort():
 
 def test_reconcile_records_the_failing_queue_and_continues():
     class Boom(FakeRunner):
+        """Fails queue A only. Everything else delegates to the real fake.
+
+        Delegating matters: a blanket `return "OK"` also answers the -IppURL
+        capability probe with "OK", which is not "YES", so tier 1 would refuse
+        to provision anything and the test would pass for the wrong reason.
+        """
+
         def run(self, script, variables=None):
-            self.calls.append((script, dict(variables or {})))
-            if variables and variables.get("name") == "A" and "Add-Printer " in script:
+            if variables and variables.get("name") == "A" and "-IppURL" in script:
+                self.calls.append((script, dict(variables or {})))
                 raise ws.PowerShellError("spooler said no", 1, "", "")
-            if "Get-Printer -Name" in script:
-                return "ABSENT"
-            return "OK"
+            return super().run(script, variables)
 
     outcomes = ws.reconcile(
         Boom(),
@@ -441,17 +527,17 @@ def test_reconcile_without_a_prefix_removes_nothing():
 
 def test_reconcile_only_removes_queues_it_manages():
     class Listing(FakeRunner):
+        """Controls only the queue listing; everything else delegates."""
+
         def run(self, script, variables=None):
-            self.calls.append((script, dict(variables or {})))
             if "Get-Printer |" in script:
+                self.calls.append((script, dict(variables or {})))
                 return "\n".join([
                     "PN-Stale|p|d",          # ours, no longer wanted -> removed
                     "PN-A|p|d",              # ours and wanted -> kept
                     "Bob's Home Printer|p|d",  # not ours -> never touched
                 ])
-            if "Get-Printer -Name" in script:
-                return "ABSENT"
-            return "OK"
+            return super().run(script, variables)
 
     runner = Listing()
     outcomes = ws.reconcile(
@@ -463,3 +549,84 @@ def test_reconcile_only_removes_queues_it_manages():
     assert removed == ["PN-Stale"]
     assert outcomes["PN-Stale"] == "removed"
     assert "Bob's Home Printer" not in outcomes
+
+
+# --- tier 1 refuses rather than creating a queue that cannot print ----------
+
+
+def test_a_windows_without_ippurl_is_refused_not_worked_around():
+    """Server 2019's Add-Printer has no -IppURL.
+
+    The tempting fallback -- make a TCP port and bind the class driver -- is
+    exactly the defect this rework removed: it produces a queue that is created,
+    listed, and unable to print. Refusing is the correct behaviour, and it must
+    stay correct, so it is pinned.
+    """
+    runner = FakeRunner(ippurl=False)
+    with pytest.raises(ws.IppProvisionError) as exc:
+        ws.ensure_driverless_queue(runner, "Lobby", "ipp://10.0.0.5:631/ipp/print")
+    assert exc.value.retryable is False
+    assert not runner.scripts_containing("Add-PrinterPort"), "no RAW-port fallback"
+
+
+def test_a_sleeping_printer_is_retryable_and_a_broken_build_is_not():
+    """Central must be able to tell "printer was off" from "this will never work".
+
+    Directed discovery is a live network query, so a powered-off device is a new
+    failure mode the old code never had. Conflating it with a permanent failure
+    either dispatches a technician for nothing or gives up on a printer that is
+    merely asleep.
+    """
+    runner = FakeRunner(ipp_reachable=False)
+    with pytest.raises(ws.IppProvisionError) as exc:
+        ws.ensure_driverless_queue(runner, "Lobby", "ipp://10.0.0.5:631/ipp/print")
+    assert exc.value.retryable is True
+
+
+def test_a_bare_host_is_rejected():
+    """Tier 1 needs a URL. A bare host silently became a RAW port before."""
+    runner = FakeRunner()
+    with pytest.raises(ws.IppProvisionError):
+        ws.ensure_driverless_queue(runner, "Lobby", "10.0.0.5")
+
+
+def test_a_missing_inbox_driver_is_reported_as_state_not_a_cmdlet_error():
+    """Tier 3 checked its driver; tier 1 never did."""
+    runner = FakeRunner(drivers=[])
+    with pytest.raises(ws.IppProvisionError) as exc:
+        ws.ensure_driverless_queue(runner, "Lobby", "ipp://10.0.0.5:631/ipp/print")
+    assert exc.value.retryable is False
+    assert "IPP Class Driver" in str(exc.value)
+
+
+def test_a_queue_that_lands_on_a_raw_port_is_not_reported_as_provisioned():
+    """The backstop against the whole class of defect returning.
+
+    If anything ever produces a tier-1 queue on a Standard TCP/IP port again,
+    it is an error -- never "created". Reporting success there is what let a
+    non-printing queue look provisioned in central.
+    """
+    class LandsOnTcp(FakeRunner):
+        def run(self, script, variables=None):
+            if "Add-Printer -Name $env:PN_NAME -IppURL" in script:
+                self.calls.append((script, dict(variables or {})))
+                name = variables["name"]
+                self.queues[name] = ("PN_bad", ws.IPP_CLASS_DRIVER)
+                self.ports["PN_bad"] = "Standard TCP/IP Port"
+                return "OK|PN_bad|" + ws.IPP_CLASS_DRIVER
+            return super().run(script, variables)
+
+    with pytest.raises(ws.IppProvisionError) as exc:
+        ws.ensure_driverless_queue(LandsOnTcp(), "Lobby", "ipp://10.0.0.5:631/ipp/print")
+    assert "Standard TCP/IP" in str(exc.value)
+
+
+def test_reconcile_survives_an_unreachable_printer():
+    """One sleeping device must not abort provisioning for every other queue."""
+    runner = FakeRunner(ipp_reachable=False)
+    outcomes = ws.reconcile(
+        runner,
+        [{"name": "A", "tier": "driverless", "uri": "ipp://10.0.0.5:631/ipp/print"}],
+        managed_prefix="",
+    )
+    assert outcomes["A"].startswith("error:")

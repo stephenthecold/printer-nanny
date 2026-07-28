@@ -131,6 +131,74 @@ def test_non_addresses_sort_after_addresses_without_raising():
     assert sorted(ips, key=wpr.sort_key) == ["192.168.1.9", "printer.local"]
 
 
+# --- a subnet passed where an address was expected --------------------------
+
+
+def test_a_subnet_passed_to_ip_is_rerouted_to_the_sweep():
+    """`-PrinterIp 10.0.3.0/24` is an easy slip with a misleading failure.
+
+    Without this the literal string is probed as a hostname, cannot resolve,
+    burns the full timeout, and comes back `unreachable` -- which asserts that a
+    device is present and silent. That is a different diagnosis from "you gave
+    me a subnet", and it sends the reader off checking firewalls and cabling.
+    Happened on the first real attempt.
+    """
+    direct, misrouted = wpr.split_addresses(["10.0.3.0/24"])
+    assert direct == []
+    assert misrouted == ["10.0.3.0/24"]
+    # ...and it survives the cap check, so the sweep actually happens.
+    assert wpr.parse_cidrs(misrouted, max_hosts=1024) == ["10.0.3.0/24"]
+
+
+def test_addresses_and_hostnames_pass_through_untouched():
+    """The probe accepts a hostname, so only a prefix marks a subnet."""
+    direct, misrouted = wpr.split_addresses(["192.168.1.50", "printer.local"])
+    assert direct == ["192.168.1.50", "printer.local"]
+    assert misrouted == []
+
+
+def test_a_mixed_list_is_split_rather_than_rejected():
+    direct, misrouted = wpr.split_addresses(["192.168.1.50", "10.0.3.0/24"])
+    assert direct == ["192.168.1.50"]
+    assert misrouted == ["10.0.3.0/24"]
+
+
+def test_blank_entries_are_dropped():
+    """An empty -PrinterIp element must not become a probe of the empty string."""
+    assert wpr.split_addresses(["", "   ", None]) == ([], [])
+
+
+# --- hypervisor NAT detection -----------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "cidr", ["10.0.2.0/24", "10.0.2.15/24", "192.168.56.0/24", "192.168.56.101/24"]
+)
+def test_hypervisor_nat_ranges_are_recognised(cidr):
+    """A NAT'd VM cannot see the LAN, so an empty sweep needs explaining.
+
+    This came from a real run: the sweep found nothing on 10.0.2.0/24 and the
+    output invited the reader to suspect a segmented VLAN or a wrong SNMP
+    community. Both were wrong -- that range is VirtualBox/QEMU NAT, where no
+    tool can reach a physical printer. Without naming it, the next person spends
+    an hour debugging the probe instead of the network.
+    """
+    assert wpr.is_virtual_nat(cidr)
+
+
+@pytest.mark.parametrize("cidr", ["192.168.1.0/24", "10.0.0.0/24", "172.16.4.0/24"])
+def test_ordinary_lans_are_not_flagged_as_virtual(cidr):
+    """Crying "this is a VM" at a real office LAN would be worse than silence."""
+    assert not wpr.is_virtual_nat(cidr)
+
+
+@pytest.mark.parametrize("cidr", ["::1/128", "garbage", ""])
+def test_virtual_nat_check_never_raises(cidr):
+    """It runs on the no-devices-found path, where an exception would replace
+    a useful message with a traceback."""
+    assert wpr.is_virtual_nat(cidr) is False
+
+
 # --- the probe never raises -------------------------------------------------
 
 

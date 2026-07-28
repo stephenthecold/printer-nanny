@@ -11,9 +11,13 @@ So this never uses Point and Print. It runs inside a service under LocalSystem
 and provisions the queue itself, which is why the user is never prompted and
 never needs rights. Two paths, chosen by the tier the IPP probe recorded:
 
-``driverless``       bind the Windows inbox IPP class driver to an IPP port.
-                     Nothing is installed. Preferred -- as of 2026-07-01 Windows
-                     ranks that driver ahead of third-party ones by default.
+``driverless``       hand the IPP URL to ``Add-Printer -IppURL`` and let
+                     Windows discover the device, choose the class driver and
+                     create the port. Nothing is installed. Preferred -- as of
+                     2026-07-01 Windows ranks that driver ahead of third-party
+                     ones by default. We do NOT create the port ourselves:
+                     ``Add-PrinterPort`` can only make RAW/LPR ports, which
+                     cannot carry IPP. See ``ensure_driverless_queue``.
 ``driver_required``  stage a vendor driver into the DriverStore with pnputil,
                      register it, then build a TCP/IP queue on it.
 
@@ -282,6 +286,37 @@ $ErrorActionPreference = 'Stop'
 Get-Printer | ForEach-Object { $_.Name + '|' + $_.PortName + '|' + $_.DriverName }
 """
 
+# --- tier 1: driverless, via Windows' own directed IPP discovery -------------
+# Add-Printer's -IppURL belongs to a parameter set that is DISJOINT from
+# -DriverName / -PortName. Windows performs the IPP query itself, selects the
+# class driver, and creates a port of its own choosing. So there is nothing for
+# us to name here, and passing a driver or port name alongside -IppURL does not
+# merely get ignored -- PowerShell fails to bind the parameters at all.
+
+_SCRIPT_IPPURL_SUPPORTED = """
+$ErrorActionPreference = 'Stop'
+if ((Get-Command Add-Printer).Parameters.ContainsKey('IppURL')) { 'YES' } else { 'NO' }
+"""
+
+_SCRIPT_ADD_IPP_QUEUE = """
+$ErrorActionPreference = 'Stop'
+if ($null -eq (Get-Printer -Name $env:PN_NAME -ErrorAction SilentlyContinue)) {
+  Add-Printer -Name $env:PN_NAME -IppURL $env:PN_IPPURL
+}
+$p = Get-Printer -Name $env:PN_NAME
+'OK|' + $p.PortName + '|' + $p.DriverName
+"""
+
+#: Read a port's monitor so a queue can be checked for the failure this whole
+#: rework exists to prevent: a Standard TCP/IP (RAW 9100) port with an IPP class
+#: driver bolted on, which is created successfully and can never print.
+_SCRIPT_PORT_DETAIL = """
+$ErrorActionPreference = 'Stop'
+$p = Get-PrinterPort -Name $env:PN_PORT -ErrorAction SilentlyContinue
+if ($null -eq $p) { 'ABSENT' }
+else { 'PRESENT|' + [string]$p.Description + '|' + [string]$p.PrinterHostAddress }
+"""
+
 
 # --- pure helpers -----------------------------------------------------------
 
@@ -363,6 +398,49 @@ def driver_present(runner: PowerShellRunner, driver: str) -> bool:
     return runner.run(_SCRIPT_DRIVER_PRESENT, {"driver": driver}).strip().startswith("PRESENT")
 
 
+#: Name of the Standard TCP/IP port monitor, as Windows reports it. A tier-1
+#: queue sitting on this monitor is the defect this module was rewritten to
+#: prevent -- see ensure_driverless_queue.
+STANDARD_TCP_MONITOR = "standard tcp/ip"
+
+
+class IppProvisionError(RuntimeError):
+    """Tier 1 could not be provisioned.
+
+    ``retryable`` distinguishes "the printer was asleep" from "this will never
+    work", because central must be able to say which. A device that is merely
+    off gets tried again; a machine whose Windows build has no -IppURL never
+    will, and telling those apart is the difference between a self-healing
+    fleet and a technician dispatched for nothing.
+    """
+
+    def __init__(self, message: str, retryable: bool = False) -> None:
+        super().__init__(message)
+        self.retryable = retryable
+
+
+def ippurl_supported(runner: PowerShellRunner) -> bool:
+    """Does this Windows build's Add-Printer offer -IppURL?
+
+    Present in the Server 2022 and 2025 cmdlet sets, absent in 2019 (whose
+    second parameter set is WSD-only). Probed rather than inferred from an OS
+    version string, because the cmdlet is the thing that actually has to work.
+    """
+    return runner.run(_SCRIPT_IPPURL_SUPPORTED).strip().upper().startswith("YES")
+
+
+def port_detail(runner: PowerShellRunner, port: str) -> Dict[str, str]:
+    """Monitor description + host address for a port, or ``{}`` when absent."""
+    text = runner.run(_SCRIPT_PORT_DETAIL, {"port": port}).strip()
+    if not text or text.startswith("ABSENT"):
+        return {}
+    parts = text.split("|")
+    return {
+        "description": parts[1] if len(parts) > 1 else "",
+        "host_address": parts[2] if len(parts) > 2 else "",
+    }
+
+
 def ensure_driverless_queue(
     runner: PowerShellRunner,
     name: str,
@@ -370,13 +448,144 @@ def ensure_driverless_queue(
     comment: str = "",
     location: str = "",
 ) -> str:
-    """Tier 1: bind the inbox IPP class driver. Installs nothing.
+    """Tier 1: let Windows discover the device over IPP and bind its class driver.
 
-    Returns one of ``created`` / ``updated`` / ``unchanged`` so the caller can
-    log what actually happened instead of asserting success blindly.
+    WHY THIS DOES NOT CREATE A PORT
+    -------------------------------
+    It used to, and that was wrong in a way nothing here could catch. The old
+    path derived a port name from the URI and ran::
+
+        Add-PrinterPort -Name <derived> -PrinterHostAddress ipp://host:631/ipp/print
+        Add-Printer -Name <name> -DriverName "Microsoft IPP Class Driver" -PortName <derived>
+
+    ``Add-PrinterPort`` has four parameter sets -- local, tcp, tcplpr, lpr --
+    and **none of them makes an IPP port**. The Standard TCP/IP monitor speaks
+    only RAW or LPR, default TCP 9100. So the best case was a RAW:9100 port with
+    an IPP class driver bolted onto it: a queue that is created, appears in
+    ``Get-Printer``, satisfies every convergence check, and cannot print. That is
+    precisely the "central shows provisioned, the user has nothing to print to"
+    failure this module's docstring says must never happen.
+
+    ``Add-Printer -IppURL`` is the supported path. Windows performs the IPP query
+    itself, picks the class driver and creates a port of its own choosing --
+    which is why ``-IppURL`` is in a parameter set disjoint from ``-DriverName``
+    and ``-PortName``. We were not passing a bad value; we were using the wrong
+    cmdlet shape.
+
+    CONSEQUENCES WORTH KNOWING
+    --------------------------
+    * **Windows names the port, so we cannot predict it.** Tier 1 therefore does
+      not share ``_converge`` -- that compares against a derived port name, which
+      here would never match, so every poll would re-run ``Add-Printer``. State
+      is read back from the queue instead of assumed.
+    * **This touches the network.** The old path never did, so a sleeping printer
+      is a new failure mode; it raises ``IppProvisionError(retryable=True)``
+      rather than being recorded as broken.
+    * **There is no fallback to a TCP port.** Falling back would reintroduce
+      exactly the silent breakage above. Failing loudly is the point.
+
+    Returns ``created`` or ``unchanged``.
     """
-    port = port_name_for(ipp_uri)
-    return _converge(runner, name, port, IPP_CLASS_DRIVER, ipp_uri, comment, location)
+    if not ipp_uri or "://" not in ipp_uri:
+        raise IppProvisionError(
+            "tier 1 needs a full IPP URL (got {!r}); a bare host cannot be "
+            "discovered over IPP".format(ipp_uri)
+        )
+
+    if not ippurl_supported(runner):
+        raise IppProvisionError(
+            "this Windows build's Add-Printer has no -IppURL, so driverless "
+            "provisioning is unavailable (documented for Server 2022/2025; "
+            "absent on 2019). Refusing to fall back to a RAW TCP port, which "
+            "would create a queue that cannot print.",
+            retryable=False,
+        )
+
+    if not driver_present(runner, IPP_CLASS_DRIVER):
+        # Tier 3 checks its driver; tier 1 never did, so a machine missing the
+        # inbox driver failed with a bare cmdlet error instead of a state an
+        # operator could act on.
+        raise IppProvisionError(
+            "the inbox {!r} is not registered on this machine".format(IPP_CLASS_DRIVER),
+            retryable=False,
+        )
+
+    state = queue_state(runner, name)
+    existed = state.present
+    if existed:
+        detail = port_detail(runner, state.port) if state.port else {}
+        on_tcp = STANDARD_TCP_MONITOR in (detail.get("description") or "").lower()
+        driver_ok = (state.driver or "").strip() == IPP_CLASS_DRIVER
+
+        if driver_ok and not on_tcp:
+            # Converged. Deliberately WITHOUT calling Add-Printer -IppURL again:
+            # that is a live network query, and this runs on every assignment
+            # change, service start and poll. Re-querying would mean an IPP round
+            # trip per printer per poll, and would make a sleeping printer fail a
+            # queue that already works perfectly well.
+            return "unchanged"
+
+        # Wrong driver, or -- the case that matters for anyone who ran the older
+        # build -- a queue the previous code left sitting on a RAW:9100 Standard
+        # TCP/IP port. Neither can be repaired in place: for tier 1 Windows owns
+        # the port, so there is no Set-Printer that can move it onto a real IPP
+        # one. Removing and letting discovery rebuild is the only correct repair,
+        # and it is what silently converts those broken queues into working ones.
+        log.info(
+            "rebuilding tier-1 queue %r (driver=%r standard_tcp_port=%s)",
+            name, state.driver, on_tcp,
+        )
+        remove_queue(runner, name)
+
+    try:
+        out = runner.run(_SCRIPT_ADD_IPP_QUEUE, {"name": name, "ippurl": ipp_uri})
+    except PowerShellError as exc:
+        detail = ((exc.stderr or "") + " " + (exc.stdout or "")).lower()
+        # A device that is asleep, powered off or firewalled is a different
+        # problem from a machine that can never do this, and only the first is
+        # worth retrying.
+        retryable = any(
+            token in detail
+            for token in ("timed out", "timeout", "unreachable", "no response",
+                          "could not be found", "network path")
+        )
+        raise IppProvisionError(
+            "Add-Printer -IppURL failed for {}: {}".format(
+                ipp_uri, (exc.stderr or exc.stdout or "").strip()[:400]
+            ),
+            retryable=retryable,
+        ) from exc
+
+    parts = out.strip().split("|")
+    got_port = parts[1] if len(parts) > 1 else ""
+    got_driver = parts[2] if len(parts) > 2 else ""
+
+    # The guard that makes the failure above impossible to reintroduce quietly:
+    # if what we ended up with is a Standard TCP/IP port, the queue cannot speak
+    # IPP no matter what the driver says, so it is an error rather than a queue.
+    if got_port:
+        detail = port_detail(runner, got_port)
+        description = (detail.get("description") or "").lower()
+        if STANDARD_TCP_MONITOR in description:
+            raise IppProvisionError(
+                "queue {!r} was created on a Standard TCP/IP port ({!r}), which "
+                "speaks only RAW/LPR and cannot carry IPP -- refusing to report "
+                "this as provisioned".format(name, got_port),
+                retryable=False,
+            )
+
+    if got_driver and got_driver.strip() != IPP_CLASS_DRIVER:
+        log.warning(
+            "queue %r bound %r rather than %r; Windows chose the driver",
+            name, got_driver.strip(), IPP_CLASS_DRIVER,
+        )
+
+    if comment or location:
+        runner.run(
+            _SCRIPT_SET_COMMENT,
+            {"name": name, "comment": comment, "location": location},
+        )
+    return "updated" if existed else "created"
 
 
 def ensure_vendor_queue(
@@ -484,7 +693,7 @@ def reconcile(
                     runner, name, spec["host"], spec["driver"], spec.get("inf"),
                     spec.get("comment", ""), spec.get("location", ""),
                 )
-        except PowerShellError as exc:
+        except (PowerShellError, IppProvisionError) as exc:
             # One bad queue must not abort the rest of the reconcile. The
             # failure is recorded per-queue so central can show which printer
             # failed and why, rather than "provisioning failed".

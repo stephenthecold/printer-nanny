@@ -173,6 +173,64 @@ def describe(dev: dict) -> str:
     return "(unidentified)"
 
 
+#: Default NAT ranges for the common desktop hypervisors. A guest on one of
+#: these cannot see the physical LAN at all, so an empty sweep is expected
+#: rather than diagnostic -- and saying so saves someone debugging the wrong
+#: layer entirely.
+VIRTUAL_NAT_RANGES = (
+    "10.0.2.0/24",     # VirtualBox NAT, and QEMU/KVM user-mode networking
+    "192.168.56.0/24",  # VirtualBox host-only (no LAN route either)
+)
+
+
+def is_virtual_nat(cidr: str) -> bool:
+    """True when this subnet is a hypervisor NAT range with no route to the LAN."""
+    try:
+        net = ipaddress.ip_network(cidr, strict=False)
+    except ValueError:
+        return False
+    if net.version != 4:
+        # subnet_of raises TypeError across address families, and every range
+        # below is IPv4 anyway.
+        return False
+    for known in VIRTUAL_NAT_RANGES:
+        if net.subnet_of(ipaddress.ip_network(known)):
+            return True
+    return False
+
+
+def split_addresses(raw: List[str]) -> "tuple":
+    """Separate single addresses from subnets someone passed to --ip by mistake.
+
+    ``-PrinterIp 10.0.3.0/24`` is an easy and costly slip: without this the
+    literal string ``10.0.3.0/24`` is handed to the probe as a hostname, which
+    cannot resolve, so the run burns the full timeout and then reports
+    ``unreachable``. That word means "a device is there and did not answer",
+    which is a materially different diagnosis from "you gave me a subnet" -- and
+    it sends the reader off checking firewalls and cabling.
+
+    So a value carrying a prefix is rerouted to the sweep, loudly. Rerouting
+    rather than rejecting because the intent is unambiguous, and saying so
+    rather than doing it silently because a tool that quietly does something
+    other than what was asked cannot be trusted on the runs that matter.
+    """
+    direct: List[str] = []
+    misrouted: List[str] = []
+    for item in raw or []:
+        text = (item or "").strip()
+        if not text:
+            continue
+        if "/" in text:
+            print(
+                "  '{}' is a subnet, not an address -- sweeping it instead "
+                "(that is what --cidr / -Cidr is for)".format(text)
+            )
+            misrouted.append(text)
+        else:
+            direct.append(text)
+    return direct, misrouted
+
+
 def sort_key(ip: str):
     """Numeric sort for dotted quads, lexical for anything else.
 
@@ -201,8 +259,8 @@ def main(argv: Optional[List[str]] = None) -> int:
     print("Printer discovery + IPP driver-tier probe  (read-only)")
     print("=" * 72)
 
-    direct = [ip.strip() for ip in args.ip if ip.strip()]
-    cidrs = parse_cidrs(args.cidr, args.max_hosts)
+    direct, misrouted = split_addresses(args.ip)
+    cidrs = parse_cidrs(list(args.cidr) + misrouted, args.max_hosts)
 
     if not cidrs and not direct:
         print("\nNo usable subnet or address to probe. Nothing to do.")
@@ -225,10 +283,23 @@ def main(argv: Optional[List[str]] = None) -> int:
 
     if not merged:
         print("\nNo devices found.")
-        print("That is a real result, not necessarily a failure: a segmented")
-        print("management VLAN, a non-default SNMP community, or printers that")
-        print("simply aren't on this subnet all look like this. Re-run with")
-        print("-Cidr / --ip to target a known address.")
+        isolated = [c for c in cidrs if is_virtual_nat(c)]
+        if isolated:
+            # Worth calling out by name rather than leaving to inference: on a
+            # NAT'd VM no tool can see the LAN, so "0 printers" says nothing
+            # about the probe and everything about the network. Someone
+            # debugging this could easily spend an hour on the wrong layer.
+            print()
+            print("NOTE: {} is the default NAT range used by VirtualBox and".format(isolated[0]))
+            print("QEMU/KVM. A guest on NAT is isolated from the physical LAN by")
+            print("design, so printers on the real network are unreachable from")
+            print("here no matter what tool is used. To reach them, switch the")
+            print("VM's adapter to bridged mode, or run this on a host machine.")
+        print()
+        print("Otherwise this is a real result, not necessarily a failure: a")
+        print("segmented management VLAN, a non-default SNMP community, or")
+        print("printers that simply aren't on this subnet all look the same.")
+        print("Re-run with -Cidr / -PrinterIp to target a known address.")
         return 0
 
     print("\n[3/3] IPP probe of {} device(s)".format(len(merged)))
