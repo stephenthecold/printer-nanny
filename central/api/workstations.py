@@ -82,10 +82,15 @@ def machine_assignments(
 ) -> s.MachineAssignmentsOut:
     """What this machine should provision for the signed-in person.
 
-    ``user`` is the Windows UPN / email of whoever is logged in, or absent at
-    the sign-in screen. Matching is by email within this machine's client, never
-    globally: two customers each having a "jsmith" is normal, and a global match
-    would hand one customer's queue list to the other's PC.
+    ``user`` is the Windows UPN of whoever is logged in, or absent at the
+    sign-in screen. It is matched against ``upn`` first and ``email`` second,
+    because those are different values that drift apart in real tenants -- a
+    mailbox move changes the email while the UPN stays put, and matching only
+    one strands the person on whichever changed.
+
+    Matching is scoped to this machine's client, never global: two customers
+    each having a "jsmith" is normal, and a global match would hand one
+    customer's queue list to the other's PC.
 
     An unmatched or absent user is **not** an error. A workstation at the login
     screen, or one where a person has not been synced yet, still gets the
@@ -97,7 +102,16 @@ def machine_assignments(
     end_user = None
     wanted = (user or "").strip().lower()
     if wanted:
+        # UPN first: it is what Windows hands us, and it is the identifier that
+        # survives a mailbox move. Email is the fallback for tenants that never
+        # populated a UPN. Both exact -- no fuzzy or local-part matching, which
+        # across a tenant's staff is how one person gets another's printers.
         end_user = db.scalar(
+            select(m.EndUser).where(
+                m.EndUser.client_id == machine.client_id,
+                m.EndUser.upn == wanted,
+            )
+        ) or db.scalar(
             select(m.EndUser).where(
                 m.EndUser.client_id == machine.client_id,
                 m.EndUser.email == wanted,
@@ -136,7 +150,9 @@ def machine_assignments(
 
     return s.MachineAssignmentsOut(
         machine_id=machine.id,
-        resolved_for=end_user.email if end_user is not None else None,
+        resolved_for=(
+            (end_user.upn or end_user.email) if end_user is not None else None
+        ),
         default_printer_id=default_id,
         printers=printers,
     )

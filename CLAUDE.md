@@ -470,12 +470,29 @@ groups, and per-user / per-group printer assignment with a deterministic
 resolver, at `/manage/people`; **directory sync** from Entra ID, Google
 Workspace and on-prem AD, per client, credentials encrypted at rest, worker-
 scheduled (`directory.sync_interval_min`) with a synchronous "Sync now".
-The Windows workstation client is **partly built**: the IPP capability probe
-(`agent/printer_nanny_agent/ipp.py`), the persisted driver tier, and the queue
-provisioning logic (`workstation.py`) all exist. What does **not** exist is the
-service that runs it on a workstation — enrollment, the central poll for
-assignments, and the LocalSystem service wrapper — so assignments are still data
-that nothing acts on end to end. The providers are unit-tested against mocked
+**Machines** (`/manage/machines`) are workstations, tenant-scoped and identified
+by a client-minted GUID rather than the computer name — names are reused, are not
+unique across clients, and change on rename, so a rename would fork a machine and
+a recycled name would inherit another's printers. A re-image is therefore a *new*
+machine with no assignments; `machines.name` is stored so name-based adoption
+needs no migration if that is ever wanted. Precedence is **direct user > machine
+> group**, with a per-machine `default_wins` for shared terminals.
+
+The Windows workstation client now runs end to end:
+`workstation_service.py` mints the machine GUID, enrolls against a client-scoped
+key (`workstation_enroll_keys`, revocable, mints a per-machine credential),
+polls `/api/v1/workstations/{id}/assignments`, converges the spooler through
+`workstation.reconcile`, and checks in. Entry point
+`printer-nanny-workstation`. What is **not** built: the MSI that installs it as
+a LocalSystem service with `PN_ENROLL_KEY` baked in (the site-agent MSI builder
+is the model), and it has **never run against a real spooler** — every test
+above `PowerShellRunner` uses a fake, which is exactly the blindness that let
+tier 1 ship broken. Two deliberate gaps, both reported rather than silently
+skipped: it does **not** set the user's default printer (per-user registry state
+needing impersonation from LocalSystem — claiming a default the user lacks is
+the failure this codebase keeps warning about), and it does **not** stage vendor
+drivers, so `driver_required` printers are skipped with a reason rather than
+bound to a wrong driver. The providers are unit-tested against mocked
 transports, **not** against real tenants.
 - **The workstation client never interpolates a value into PowerShell.** Printer
   names, locations and comments come from devices on customer LANs and from
