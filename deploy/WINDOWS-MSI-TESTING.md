@@ -1,5 +1,30 @@
 # Windows MSI — build & test procedure
 
+Central builds **two** self-contained installers, and they are different products
+with different jobs:
+
+| | **Site agent** | **Workstation client** |
+|---|---|---|
+| Built from | Agents page, per agent | Machines page, per **client** |
+| Runs on | one server per site | every PC |
+| Does | polls printers over SNMP | provisions print queues |
+| Service | `PrinterNannyAgent` | `PrinterNannyWorkstation` |
+| Installs to | `…\Printer Nanny\Agent\` | `…\Printer Nanny\Workstation\` |
+| Credential | one agent's key / claim code | that client's **enrollment key** |
+
+They carry **different `UpgradeCode`s on purpose**. Windows Installer treats a
+shared UpgradeCode as the same product, so if they matched, installing one would
+silently uninstall the other — and a box legitimately runs both (an MSP's own
+server polls printers *and* prints from them). Confirming that they coexist is a
+smoke step below, because nothing in CI can prove it.
+
+The agent sections come first; **the workstation client starts at
+[Workstation client MSI](#workstation-client-msi)**.
+
+---
+
+## Site agent MSI
+
 The central server can build a self-contained **Windows `.msi`** for any enrolled
 agent (`central/msi_builder.py`, surfaced as a **Download Windows MSI** button on
 the Agents page right after you enroll or rotate a key). The MSI bundles
@@ -137,3 +162,174 @@ in-container tests cannot cover.
   only by Administrators/SYSTEM by default ACLs. (The `.ps1` installer
   additionally tightens the ACL; the MSI relies on the Program Files default —
   acceptable on a server, hardening via a future custom action is possible.)
+
+---
+
+# Workstation client MSI
+
+Built from **Machines → Windows installer**, one per **client** (not per machine).
+`central/msi_builder.py::build_workstation_msi` shares the agent's runtime cache —
+same embeddable Python, same wheel, same NSSM — and differs by a `ProductProfile`
+and the config baked in. It installs to
+`C:\Program Files\Printer Nanny\Workstation\` and registers the
+`PrinterNannyWorkstation` service, running as **LocalSystem**.
+
+What it does on each poll: ask central what this machine and its signed-in user
+should have, then converge the spooler onto that answer.
+
+## Each build mints its own enrollment key
+
+Enrollment keys are SHA-256 at rest, so an existing one **cannot be read back**
+to bake in — pressing that button mints a fresh key and bakes *that*.
+
+Two consequences worth knowing before you hand an installer to anyone:
+
+- **Every build is separately revocable.** An MSI that leaks — a file share, a
+  ticket attachment, a laptop that left with someone — is revoked on the
+  Machines page without disturbing any other installer or any machine already
+  enrolled. Revocation stops *new* enrollments only; enrolled machines
+  authenticate with their own per-machine credentials and keep working.
+- **The audit row records the key id, never the key** (`workstation.msi_build`,
+  `detail=ok enroll_key=<id> …`). That id is how you tie an installer in the
+  wild back to the row you revoke.
+
+Unlike the agent's claim code, this key is **multi-use** — that is the point,
+since one MSI installs on hundreds of PCs. What bounds it is what it can *do*:
+it can only enroll a machine. It cannot read printers, people, or other
+machines, and `client_id` is fixed at mint time so a holder cannot pick a
+tenant.
+
+## Where the key lives, and why that matters more here than on a server
+
+`workstation.toml` beside the runtime, **not** on the service command line:
+
+| Registry value | Value |
+|----------------|-------|
+| `Application` | `[INSTALLDIR]python\python.exe` |
+| `AppParameters` | `-m printer_nanny_agent.workstation_cli --config "[INSTALLDIR]workstation.toml"` |
+| `AppDirectory` | `[INSTALLDIR]` |
+| `AppStdout` / `AppStderr` | `[INSTALLDIR]workstation.log` (rotated at 5 MB) |
+| `AppExit\Default` | `Restart` |
+
+A service's command line is readable by **any logged-in user** (Task Manager's
+*Command line* column, `Get-CimInstance Win32_Process`, `wmic process`), so a key
+passed as an argument would be published to everyone who sits at the machine.
+Only the file's *path* appears there.
+
+> **This is a workstation, so the agent doc's ACL reasoning does not carry over.**
+> The site agent's note says the Program Files default ACL is "acceptable on a
+> server" — true, because ordinary users do not log into one. Ordinary users log
+> into *these*, and the Program Files default grants **Users: Read**. Treat the
+> enrollment key as readable by anyone who sits at the PC. That is survivable
+> because the key is enroll-only, per-installer and revocable in one click — but
+> if your threat model does not accept it, tighten the ACL on
+> `workstation.toml` by GPO after deployment and verify the service still starts.
+
+## Manual smoke on Windows (the part CI cannot do)
+
+Run on a real client OS you actually deploy to. **Everything above
+`PowerShellRunner` is tested with a fake**, so a green CI run proves nothing
+here — this section is the only evidence that any of it works.
+
+1. **Install** (elevated):
+   ```powershell
+   msiexec /i printer-nanny-workstation-<client>.msi /l*v ws-install.log
+   # silent: msiexec /i printer-nanny-workstation-<client>.msi /qn /l*v ws-install.log
+   ```
+2. **Files** landed in `C:\Program Files\Printer Nanny\Workstation\`:
+   `python\python.exe`, `nssm.exe`, `workstation.toml` (open it — `server` and
+   `enroll_key` present).
+3. **Service registered and running**:
+   ```powershell
+   Get-Service PrinterNannyWorkstation
+   sc.exe qc PrinterNannyWorkstation      # BINARY_PATH_NAME ends: \nssm.exe PrinterNannyWorkstation
+   ```
+4. **It enrolled** (KEY CHECK — the NSSM↔registry contract plus the API):
+   ```powershell
+   Get-Content 'C:\Program Files\Printer Nanny\Workstation\workstation.log' -Tail 40
+   Get-Content "$env:PROGRAMDATA\PrinterNanny\machine.json"   # machine_uid + machine_id + api_key
+   ```
+   The machine should appear on **Machines** within a poll, and the enrollment
+   key's *Last used* should update. Central's audit log gets `machine.enroll`.
+5. **The key is not on the command line** (asserted in CI against the WXS, but
+   verify the real service):
+   ```powershell
+   (Get-CimInstance Win32_Process -Filter "Name='python.exe'").CommandLine
+   ```
+   Must show `--config "...workstation.toml"` and **no `pnw_…` value**.
+6. **Assign a printer** to the machine (or to the signed-in person) on the
+   Machines / People page, wait a poll, then:
+   ```powershell
+   Get-Printer | Where-Object Name -like 'PN *'
+   ```
+7. **Prove the queue is real, not merely present** — this is the check that
+   caught tier 1 being broken for its entire existence:
+   ```powershell
+   python scripts\windows_provision_check.py --ip <printer-ip>
+   ```
+   `Get-Printer` returning the queue proves *nothing*. What matters:
+   - the **port name is one Windows chose** (a `WSD-<guid>`-style name), **not**
+     one we derived;
+   - the **monitor is not `Standard TCP/IP Port`** — that monitor speaks only
+     RAW/LPR on 9100 and cannot carry IPP, so landing there means the queue
+     cannot print;
+   - the driver is the **inbox IPP class driver**.
+
+   Then actually print a test page. A queue that converges and cannot print is
+   the exact failure this whole path exists to prevent.
+8. **Convergence is idempotent** — restart the service (or wait two polls) and
+   re-run step 6. The queue must be **unchanged**, not recreated. A fresh port
+   per run is how workstations end up with forty dead ports.
+9. **Both products coexist** (only if you deploy both to one box): install the
+   site agent MSI too, then confirm **both** services exist and **both** entries
+   appear in Programs & Features. If installing the second removed the first,
+   the `UpgradeCode`s have collided — that is a release-blocking regression.
+10. **Uninstall**:
+    ```powershell
+    msiexec /x printer-nanny-workstation-<client>.msi /qn
+    Get-Service PrinterNannyWorkstation    # should error: service not found
+    ```
+    Expected, and **not** a bug:
+    - **Provisioned `PN ` queues remain.** Uninstalling a management tool should
+      not rip printers out from under whoever is using them. Remove them by hand
+      if you want them gone.
+    - **`%PROGRAMDATA%\PrinterNanny\machine.json` remains**, so reinstalling
+      re-adopts the same machine identity and its assignments rather than
+      creating a second row for one PC. Delete it only if you intend the PC to
+      come back as a **new** machine.
+
+## Two gaps to confirm are *reported*, not silently skipped
+
+Both are deliberate. The smoke test is that the client says so rather than
+quietly doing nothing:
+
+- **The user's default printer is not set.** That is per-user registry state and
+  writing it from LocalSystem needs impersonation. The desired default is
+  recorded and reported as *not applied* — claiming a default the user does not
+  have is the failure this codebase keeps warning about. Expect the queue to
+  exist and Windows' own default to be untouched.
+- **Vendor drivers are not staged.** A `driver_required` printer is skipped with
+  a stated reason, never bound to a wrong driver. Check `workstation.log` for the
+  reason line; the printer should be visibly absent *and* explained.
+
+Also verify an `ipp_disabled` printer is described as **IPP disabled on the
+device (port 631 refused)** and never as a driver problem — that distinction
+sends a technician to the printer's web UI instead of the driver store.
+
+## Compatibility
+
+- **x64 only**; the embeddable runtime is `amd64`.
+- **`Add-Printer -IppURL` is required and is probed at runtime, not inferred
+  from an OS version.** It is present in the Server 2022/2025 cmdlet sets and
+  **absent on Server 2019**, whose second parameter set is WSD-only. Where it is
+  missing the client **refuses outright rather than falling back** — falling back
+  is what produced the silent breakage. Part of this smoke is establishing which
+  of *your* target OSes actually have it; do not assume from the version number.
+- The Server 2016→2025 matrix in the agent sections above is about the **site
+  agent**, which is an SNMP poller and never touches this path. Do not read it
+  as a support statement for the workstation client.
+- **CI cannot stand in for the LocalSystem context.** The Windows runner is an
+  elevated *user*, not SYSTEM, and console-user detection (`WTSQuerySessionInformation`
+  + `TranslateName`) behaves differently there. Domain-joined behaviour, GPO
+  interaction with `RestrictDriverInstallationToAdministrators`, and vendor
+  driver packages are all manual too.
