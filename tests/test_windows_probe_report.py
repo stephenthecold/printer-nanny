@@ -131,6 +131,43 @@ def test_non_addresses_sort_after_addresses_without_raising():
     assert sorted(ips, key=wpr.sort_key) == ["192.168.1.9", "printer.local"]
 
 
+# --- a subnet passed where an address was expected --------------------------
+
+
+def test_a_subnet_passed_to_ip_is_rerouted_to_the_sweep():
+    """`-PrinterIp 10.0.3.0/24` is an easy slip with a misleading failure.
+
+    Without this the literal string is probed as a hostname, cannot resolve,
+    burns the full timeout, and comes back `unreachable` -- which asserts that a
+    device is present and silent. That is a different diagnosis from "you gave
+    me a subnet", and it sends the reader off checking firewalls and cabling.
+    Happened on the first real attempt.
+    """
+    direct, misrouted = wpr.split_addresses(["10.0.3.0/24"])
+    assert direct == []
+    assert misrouted == ["10.0.3.0/24"]
+    # ...and it survives the cap check, so the sweep actually happens.
+    assert wpr.parse_cidrs(misrouted, max_hosts=1024) == ["10.0.3.0/24"]
+
+
+def test_addresses_and_hostnames_pass_through_untouched():
+    """The probe accepts a hostname, so only a prefix marks a subnet."""
+    direct, misrouted = wpr.split_addresses(["192.168.1.50", "printer.local"])
+    assert direct == ["192.168.1.50", "printer.local"]
+    assert misrouted == []
+
+
+def test_a_mixed_list_is_split_rather_than_rejected():
+    direct, misrouted = wpr.split_addresses(["192.168.1.50", "10.0.3.0/24"])
+    assert direct == ["192.168.1.50"]
+    assert misrouted == ["10.0.3.0/24"]
+
+
+def test_blank_entries_are_dropped():
+    """An empty -PrinterIp element must not become a probe of the empty string."""
+    assert wpr.split_addresses(["", "   ", None]) == ([], [])
+
+
 # --- hypervisor NAT detection -----------------------------------------------
 
 

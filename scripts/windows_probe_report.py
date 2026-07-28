@@ -199,6 +199,38 @@ def is_virtual_nat(cidr: str) -> bool:
     return False
 
 
+def split_addresses(raw: List[str]) -> "tuple":
+    """Separate single addresses from subnets someone passed to --ip by mistake.
+
+    ``-PrinterIp 10.0.3.0/24`` is an easy and costly slip: without this the
+    literal string ``10.0.3.0/24`` is handed to the probe as a hostname, which
+    cannot resolve, so the run burns the full timeout and then reports
+    ``unreachable``. That word means "a device is there and did not answer",
+    which is a materially different diagnosis from "you gave me a subnet" -- and
+    it sends the reader off checking firewalls and cabling.
+
+    So a value carrying a prefix is rerouted to the sweep, loudly. Rerouting
+    rather than rejecting because the intent is unambiguous, and saying so
+    rather than doing it silently because a tool that quietly does something
+    other than what was asked cannot be trusted on the runs that matter.
+    """
+    direct: List[str] = []
+    misrouted: List[str] = []
+    for item in raw or []:
+        text = (item or "").strip()
+        if not text:
+            continue
+        if "/" in text:
+            print(
+                "  '{}' is a subnet, not an address -- sweeping it instead "
+                "(that is what --cidr / -Cidr is for)".format(text)
+            )
+            misrouted.append(text)
+        else:
+            direct.append(text)
+    return direct, misrouted
+
+
 def sort_key(ip: str):
     """Numeric sort for dotted quads, lexical for anything else.
 
@@ -227,8 +259,8 @@ def main(argv: Optional[List[str]] = None) -> int:
     print("Printer discovery + IPP driver-tier probe  (read-only)")
     print("=" * 72)
 
-    direct = [ip.strip() for ip in args.ip if ip.strip()]
-    cidrs = parse_cidrs(args.cidr, args.max_hosts)
+    direct, misrouted = split_addresses(args.ip)
+    cidrs = parse_cidrs(list(args.cidr) + misrouted, args.max_hosts)
 
     if not cidrs and not direct:
         print("\nNo usable subnet or address to probe. Nothing to do.")
