@@ -352,10 +352,24 @@ function Get-EmbeddedPython {
     try {
         & $exe $getPip --no-warn-script-location --quiet
         $exit = $LASTEXITCODE
+
+        if ($exit -eq 0) {
+            # get-pip.py installs pip and NOTHING ELSE on modern Pythons --
+            # setuptools stopped being bundled with it. An editable install then
+            # dies in pip's own sanity check with
+            #   BackendUnavailable: Cannot import 'setuptools.build_meta'
+            # because that check imports the PEP 517 backend before build
+            # isolation would have provided one. A normal CPython install ships
+            # setuptools, which is exactly why this only shows up on the
+            # embeddable runtime and could not be caught anywhere else.
+            Write-Host "  adding the build backend (setuptools, wheel)"
+            & $exe -m pip install --quiet --no-warn-script-location setuptools wheel
+            $exit = $LASTEXITCODE
+        }
     } finally {
         $ErrorActionPreference = $prevEap
     }
-    if ($exit -ne 0) { throw "get-pip.py failed with exit code $exit" }
+    if ($exit -ne 0) { throw "bootstrapping pip into the embeddable runtime failed with exit code $exit" }
 
     return $exe
 }
