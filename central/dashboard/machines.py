@@ -9,10 +9,14 @@ the same tenancy checks.
 
 from __future__ import annotations
 
+import shutil
+import tempfile
+from pathlib import Path
 from typing import Optional
 
 from fastapi import APIRouter, Depends, Form, Request
-from fastapi.responses import HTMLResponse
+from fastapi.responses import FileResponse, HTMLResponse
+from starlette.background import BackgroundTask
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
@@ -30,6 +34,18 @@ from central.db import get_db
 from central.security import generate_enroll_key, hash_enroll_key
 
 router = APIRouter(prefix="/manage", tags=["manage"])
+
+
+def _msi_cap():
+    """Whether this central image can build an MSI at all.
+
+    Probed rather than assumed: msitools is installed by deploy/Dockerfile, so a
+    developer running central outside the container has no wixl, and a button
+    that 500s is worse than one that explains itself.
+    """
+    from central.msi_builder import msi_build_available
+
+    return msi_build_available()
 
 
 def _resolve_client(db: Session, raw: Optional[str]) -> Optional[m.Client]:
@@ -118,6 +134,8 @@ def machines_page(
         printers=printers,
         assignments=assignments,
         flash=_pop_flash(request),
+        msi_available=_msi_cap().available,
+        msi_reason=_msi_cap().reason,
         # Shown exactly once, straight after minting, then gone. Held in the
         # session rather than the database because storing it would defeat the
         # point of hashing it in the first place.
@@ -368,3 +386,104 @@ def unassign_from_machine(
         db.commit()
         _flash(request, "Assignment removed.")
     return _redirect(f"/manage/machines?client_id={machine.client_id}")
+
+
+@router.post("/machines/msi")
+def build_workstation_msi_route(
+    request: Request,
+    client_id: int = Form(...),
+    db: Session = Depends(get_db),
+):
+    """Build this client's workstation installer, minting the key it carries.
+
+    WHY THIS MINTS A KEY RATHER THAN REUSING ONE
+    --------------------------------------------
+    Enrollment keys are SHA-256 at rest, so there is no way to read an existing
+    one back out to bake it in -- which is the property that makes a database
+    dump useless, and it is not worth weakening to save a click.
+
+    Minting per build turns out to be better than reuse anyway: each installer
+    carries its own individually-revocable key, so an MSI that leaks (a file
+    share, a ticket attachment, a laptop that left with someone) is revoked
+    without disturbing any other installer or any machine already enrolled.
+    """
+    user = _manager(request, db)
+    if user is None:
+        return _redirect("/login")
+
+    client = db.get(m.Client, client_id)
+    if client is None:
+        _flash(request, "That client no longer exists.")
+        return _redirect("/manage/machines")
+
+    from central.msi_builder import build_workstation_msi, msi_build_available
+
+    # Capability first here, unlike the agent's claim-code build: there is no
+    # caller-supplied credential to validate, so the only way to fail early is
+    # the toolchain. Minting a key we then could not bake into anything would
+    # leave a live credential in the database that nobody holds.
+    cap = msi_build_available()
+    if not cap.available:
+        record(db, request, user, "workstation.msi_build",
+               target=f"client:{client.id}", detail=f"unavailable: {cap.reason}")
+        db.commit()
+        _flash(request, cap.reason)
+        return _redirect(f"/manage/machines?client_id={client.id}")
+
+    from central.runtime import load_settings
+    rt = load_settings(db)
+    central_url = (rt.get("app.public_url") or str(request.base_url)).rstrip("/")
+    embed_url = str(rt.get("agent.python_embed_url") or "").strip() or None
+
+    key = generate_enroll_key()
+    row = m.WorkstationEnrollKey(
+        client_id=client.id,
+        key_hash=hash_enroll_key(key),
+        label=f"MSI build for {client.name}"[:120],
+        created_by_user_id=user.id,
+    )
+    db.add(row)
+    db.flush()
+
+    out_dir = Path(tempfile.mkdtemp(prefix="pn-ws-msi-"))
+    try:
+        result = build_workstation_msi(
+            client_name=client.name,
+            client_id=client.id,
+            central_url=central_url,
+            enroll_key=key,
+            enroll_key_id=row.id,
+            slug=f"client-{client.id}",
+            out_dir=out_dir,
+            embed_url=embed_url,
+        )
+    except Exception as exc:  # noqa: BLE001 - a build failure is a flash, not a 500
+        shutil.rmtree(out_dir, ignore_errors=True)
+        # Roll the key back. A key minted for an installer that was never
+        # produced is a live credential nobody holds and nobody will think to
+        # revoke -- worse than no key, because it looks legitimate in the list.
+        db.rollback()
+        record(db, request, user, "workstation.msi_build",
+               target=f"client:{client.id}", detail=f"failed: {exc}")
+        db.commit()
+        _flash(request, f"MSI build failed: {exc}")
+        return _redirect(f"/manage/machines?client_id={client.id}")
+
+    record(
+        db, request, user, "workstation.msi_build",
+        target=f"client:{client.id}",
+        # The key id, never the key. This is what ties an installer in the wild
+        # back to the row an operator revokes.
+        detail=(f"ok enroll_key={row.id} size={result.size} "
+                f"agent_version={result.agent_version} "
+                f"product={result.product_version}"),
+    )
+    db.commit()
+
+    safe = "".join(ch for ch in client.name if ch.isalnum() or ch in "-_")[:40] or "client"
+    return FileResponse(
+        path=str(result.path),
+        media_type="application/x-msi",
+        filename=f"printer-nanny-workstation-{safe}.msi",
+        background=BackgroundTask(shutil.rmtree, out_dir, ignore_errors=True),
+    )

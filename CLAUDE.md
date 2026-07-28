@@ -483,9 +483,18 @@ The Windows workstation client now runs end to end:
 key (`workstation_enroll_keys`, revocable, mints a per-machine credential),
 polls `/api/v1/workstations/{id}/assignments`, converges the spooler through
 `workstation.reconcile`, and checks in. Entry point
-`printer-nanny-workstation`. What is **not** built: the MSI that installs it as
-a LocalSystem service with `PN_ENROLL_KEY` baked in (the site-agent MSI builder
-is the model), and it has **never run against a real spooler** — every test
+`printer-nanny-workstation`. The per-client **MSI** is built from the Machines
+page: `msi_builder.build_workstation_msi` shares the agent's runtime cache and
+differs only by a `ProductProfile` — **a distinct UpgradeCode, service name and
+install directory, because Windows treats a shared UpgradeCode as the same
+product and installing one would silently uninstall the other** (an MSP's own
+server legitimately runs both). Each build **mints its own enrollment key**:
+keys are SHA-256 at rest so an existing one cannot be read back, and per-build
+keys mean a leaked installer is revoked without touching any other. The key
+travels in `workstation.toml`, never in `AppParameters` — **a service's command
+line is readable by any logged-in user**. A build that fails rolls the key back,
+since a key minted for an installer that never existed is a live credential
+nobody holds. It has **never run against a real spooler** — every test
 above `PowerShellRunner` uses a fake, which is exactly the blindness that let
 tier 1 ship broken. Two deliberate gaps, both reported rather than silently
 skipped: it does **not** set the user's default printer (per-user registry state
