@@ -681,7 +681,9 @@ def assign_printer(
     return row
 
 
-def effective_printers_for(db: Session, end_user: m.EndUser) -> list:
+def effective_printers_for(
+    db: Session, end_user: m.EndUser, machine: Optional[m.Machine] = None
+) -> list:
     """Every printer this person should have, direct + inherited from groups.
 
     Returns ``[(printer, is_default, via_group_name_or_None), ...]`` ordered by
@@ -689,8 +691,13 @@ def effective_printers_for(db: Session, end_user: m.EndUser) -> list:
 
     Two resolution rules, both deliberate:
 
-    * **A direct assignment outranks a group one.** Somebody singled this person
-      out; that is more specific information than "they are in Accounting".
+    * **A direct assignment outranks a machine one, which outranks a group one.**
+      Somebody singled this person out; that is more specific than "the PC by
+      the warehouse door", which is in turn more specific than "they are in
+      Accounting". A machine flagged ``default_wins`` inverts the first pair --
+      what a shared floor terminal or kiosk needs, where the person is standing
+      at the machine and its printer is the right one whatever their group says.
+      Per-machine rather than global, because one site routinely has both kinds.
     * **Exactly one default, chosen deterministically.** A person in three
       groups can easily be handed three "make this default" flags. Rather than
       let the last writer win (which makes the workstation's default printer
@@ -699,10 +706,21 @@ def effective_printers_for(db: Session, end_user: m.EndUser) -> list:
       an operator asking "why is that their default?" gets an answer.
 
     Inactive users resolve to nothing. A deprovisioned person keeps their rows
-    for audit, but must not keep their printers.
+    for audit, but must not keep their printers. The same goes for a retired
+    machine.
+
+    A machine belonging to a different client than the user contributes nothing.
+    That is enforced here rather than left to the caller: tenancy spans three
+    tables, so the resolver refuses instead of trusting that somebody upstream
+    already checked.
     """
     if not end_user.active:
         return []
+
+    if machine is not None and (
+        not machine.active or machine.client_id != end_user.client_id
+    ):
+        machine = None
 
     direct = db.scalars(
         select(m.PrinterAssignment).where(
@@ -725,7 +743,24 @@ def effective_printers_for(db: Session, end_user: m.EndUser) -> list:
             )
         ).all()
 
-    # printer_id -> (is_default, group_name or None, is_direct)
+    via_machine = []
+    if machine is not None:
+        via_machine = db.scalars(
+            select(m.PrinterAssignment).where(
+                m.PrinterAssignment.machine_id == machine.id
+            )
+        ).all()
+
+    # Lower rank wins. A number rather than the old is_direct boolean because
+    # there are three sources now, and a boolean cannot order three things --
+    # which is precisely how a "last writer wins" bug gets in.
+    if machine is not None and machine.default_wins:
+        rank_direct, rank_machine = 1, 0
+    else:
+        rank_direct, rank_machine = 0, 1
+    rank_group = 2
+
+    # printer_id -> (is_default, group_name or None, rank)
     merged: dict = {}
     for a in via_group:
         name = a.group.name if a.group is not None else None
@@ -733,11 +768,19 @@ def effective_printers_for(db: Session, end_user: m.EndUser) -> list:
         # Among groups alone, a default flag anywhere wins; the tie-break below
         # settles which printer actually ends up default.
         if prev is None:
-            merged[a.printer_id] = (a.is_default, name, False)
+            merged[a.printer_id] = (a.is_default, name, rank_group)
         elif not prev[0] and a.is_default:
-            merged[a.printer_id] = (True, name, False)
+            merged[a.printer_id] = (True, name, rank_group)
+    for a in via_machine:
+        prev = merged.get(a.printer_id)
+        # Supersedes a group assignment for the same printer, never a direct one
+        # -- which is why `direct` is applied after this, not before.
+        if prev is None or prev[2] >= rank_machine:
+            merged[a.printer_id] = (a.is_default, None, rank_machine)
     for a in direct:
-        merged[a.printer_id] = (a.is_default, None, True)
+        prev = merged.get(a.printer_id)
+        if prev is None or prev[2] >= rank_direct:
+            merged[a.printer_id] = (a.is_default, None, rank_direct)
 
     if not merged:
         return []
@@ -749,12 +792,14 @@ def effective_printers_for(db: Session, end_user: m.EndUser) -> list:
         ).all()
     }
 
-    # Pick the single winner: direct beats group, then lowest printer id.
+    # Exactly one winner, chosen by (rank, printer id). Both terms are total
+    # orders, so the outcome cannot depend on dict or query ordering -- which is
+    # the whole point: a workstation's default must be reproducible, and "why is
+    # that their default?" must have an answer.
     candidates = [pid for pid, (is_def, _, _) in merged.items() if is_def]
     winner = None
     if candidates:
-        direct_defaults = [pid for pid in candidates if merged[pid][2]]
-        winner = min(direct_defaults) if direct_defaults else min(candidates)
+        winner = min(candidates, key=lambda pid: (merged[pid][2], pid))
 
     out = []
     for pid in sorted(merged):

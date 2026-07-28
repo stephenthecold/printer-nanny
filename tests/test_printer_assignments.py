@@ -331,3 +331,175 @@ def test_removing_someone_from_a_group_revokes_the_inherited_printer(db):
 
     services.sync_group_members(db, group=group, end_users=[])
     assert services.effective_printers_for(db, person) == []
+
+
+# --------------------- machine-scoped assignment ---------------------------- #
+
+
+def _machine(db, client: m.Client, uid: str, name: str = "PC", wins: bool = False):
+    mach = m.Machine(
+        client_id=client.id, machine_uid=uid, name=name, default_wins=wins
+    )
+    db.add(mach)
+    db.flush()
+    return mach
+
+
+def _assign(db, printer, *, user=None, group=None, machine=None, default=False):
+    a = m.PrinterAssignment(
+        printer_id=printer.id,
+        end_user_id=user.id if user else None,
+        group_id=group.id if group else None,
+        machine_id=machine.id if machine else None,
+        is_default=default,
+    )
+    db.add(a)
+    db.flush()
+    return a
+
+
+def test_machine_printers_are_added_to_the_users_own(db):
+    """A shared printer at a location, on top of whatever the person has."""
+    c = _client(db, "Acme")
+    theirs, shared = _printer(db, c, "10.0.0.1", "Theirs"), _printer(db, c, "10.0.0.2", "Shared")
+    user, mach = _person(db, c, "jo@acme.test"), _machine(db, c, "uid-1")
+    _assign(db, theirs, user=user)
+    _assign(db, shared, machine=mach)
+
+    got = {p.display_name for p, _, _ in services.effective_printers_for(db, user, mach)}
+    assert got == {"Theirs", "Shared"}
+
+
+def test_machine_default_beats_group_but_not_direct(db):
+    """The agreed order: direct user > machine > group.
+
+    Somebody singled this person out, which is more specific than "the PC by the
+    warehouse door", which is more specific than "they're in Accounting".
+    """
+    c = _client(db, "Acme")
+    p_direct = _printer(db, c, "10.0.0.1", "Direct")
+    p_machine = _printer(db, c, "10.0.0.2", "Machine")
+    p_group = _printer(db, c, "10.0.0.3", "Group")
+    user, mach, grp = _person(db, c, "jo@acme.test"), _machine(db, c, "uid-1"), _group(db, c, "Acct")
+    db.add(m.EndUserGroupMember(group_id=grp.id, end_user_id=user.id))
+    db.flush()
+
+    _assign(db, p_direct, user=user, default=True)
+    _assign(db, p_machine, machine=mach, default=True)
+    _assign(db, p_group, group=grp, default=True)
+
+    defaults = [p.display_name for p, is_def, _ in services.effective_printers_for(db, user, mach) if is_def]
+    assert defaults == ["Direct"]
+
+
+def test_machine_default_beats_group_when_there_is_no_direct_one(db):
+    c = _client(db, "Acme")
+    p_machine, p_group = _printer(db, c, "10.0.0.2", "Machine"), _printer(db, c, "10.0.0.3", "Group")
+    user, mach, grp = _person(db, c, "jo@acme.test"), _machine(db, c, "uid-1"), _group(db, c, "Acct")
+    db.add(m.EndUserGroupMember(group_id=grp.id, end_user_id=user.id))
+    db.flush()
+    _assign(db, p_machine, machine=mach, default=True)
+    _assign(db, p_group, group=grp, default=True)
+
+    defaults = [p.display_name for p, is_def, _ in services.effective_printers_for(db, user, mach) if is_def]
+    assert defaults == ["Machine"]
+
+
+def test_the_default_wins_flag_lets_a_shared_terminal_override_a_person(db):
+    """A kiosk or floor terminal: the person is standing at THIS machine.
+
+    Opt-in per machine rather than global, because one site routinely has both
+    a shared terminal and ordinary desks, and flipping this globally would make
+    every desk override people's own defaults.
+    """
+    c = _client(db, "Acme")
+    p_direct, p_machine = _printer(db, c, "10.0.0.1", "Direct"), _printer(db, c, "10.0.0.2", "Machine")
+    user = _person(db, c, "jo@acme.test")
+    kiosk = _machine(db, c, "uid-kiosk", name="Floor Terminal", wins=True)
+    _assign(db, p_direct, user=user, default=True)
+    _assign(db, p_machine, machine=kiosk, default=True)
+
+    defaults = [p.display_name for p, is_def, _ in services.effective_printers_for(db, user, kiosk) if is_def]
+    assert defaults == ["Machine"]
+
+
+def test_still_exactly_one_default_with_three_sources(db):
+    """The invariant the resolver exists for, now across three target types."""
+    c = _client(db, "Acme")
+    printers = [_printer(db, c, f"10.0.0.{i}", f"P{i}") for i in range(1, 5)]
+    user, mach, grp = _person(db, c, "jo@acme.test"), _machine(db, c, "uid-1"), _group(db, c, "Acct")
+    db.add(m.EndUserGroupMember(group_id=grp.id, end_user_id=user.id))
+    db.flush()
+    _assign(db, printers[0], user=user, default=True)
+    _assign(db, printers[1], machine=mach, default=True)
+    _assign(db, printers[2], group=grp, default=True)
+    _assign(db, printers[3], machine=mach, default=True)
+
+    resolved = services.effective_printers_for(db, user, mach)
+    assert sum(1 for _, is_def, _ in resolved if is_def) == 1
+    assert len(resolved) == 4, "all four printers still resolve; only the default is singular"
+
+
+def test_another_tenants_machine_contributes_nothing(db):
+    """Tenancy spans three tables here, so the resolver refuses rather than
+    trusting its caller to have checked."""
+    acme, globex = _client(db, "Acme"), _client(db, "Globex")
+    theirs = _printer(db, acme, "10.0.0.1", "Theirs")
+    other = _printer(db, globex, "10.9.9.9", "Other")
+    user = _person(db, acme, "jo@acme.test")
+    foreign = _machine(db, globex, "uid-globex")
+    _assign(db, theirs, user=user)
+    _assign(db, other, machine=foreign)
+
+    got = {p.display_name for p, _, _ in services.effective_printers_for(db, user, foreign)}
+    assert got == {"Theirs"}, "another tenant's printer must never resolve"
+
+
+def test_a_retired_machine_stops_provisioning_immediately(db):
+    c = _client(db, "Acme")
+    shared = _printer(db, c, "10.0.0.2", "Shared")
+    user, mach = _person(db, c, "jo@acme.test"), _machine(db, c, "uid-1")
+    _assign(db, shared, machine=mach)
+    mach.active = False
+    db.flush()
+    assert services.effective_printers_for(db, user, mach) == []
+
+
+def test_resolving_without_a_machine_is_unchanged(db):
+    """Every existing caller passes no machine; that path must not move."""
+    c = _client(db, "Acme")
+    p = _printer(db, c, "10.0.0.1", "Theirs")
+    user = _person(db, c, "jo@acme.test")
+    _assign(db, p, user=user, default=True)
+    resolved = services.effective_printers_for(db, user)
+    assert [(pr.display_name, d) for pr, d, _ in resolved] == [("Theirs", True)]
+
+
+def test_the_database_refuses_a_row_targeting_a_user_and_a_machine(db):
+    """The CHECK now means "exactly one of three", not "an odd number set"."""
+    c = _client(db, "Acme")
+    p, user, mach = _printer(db, c, "10.0.0.1"), _person(db, c, "jo@acme.test"), _machine(db, c, "uid-1")
+    db.add(m.PrinterAssignment(printer_id=p.id, end_user_id=user.id, machine_id=mach.id))
+    with pytest.raises(IntegrityError):
+        db.flush()
+    db.rollback()
+
+
+def test_the_database_refuses_a_row_targeting_all_three(db):
+    """The case the old `<>` idiom would have WRONGLY allowed.
+
+    `(a IS NULL) <> (b IS NULL)` generalises to parity, not to "exactly one":
+    with three targets set, an XOR chain reads as true. Stating it as a sum is
+    what makes this row impossible.
+    """
+    c = _client(db, "Acme")
+    p = _printer(db, c, "10.0.0.1")
+    user, grp, mach = _person(db, c, "jo@acme.test"), _group(db, c, "Acct"), _machine(db, c, "uid-1")
+    db.add(
+        m.PrinterAssignment(
+            printer_id=p.id, end_user_id=user.id, group_id=grp.id, machine_id=mach.id
+        )
+    )
+    with pytest.raises(IntegrityError):
+        db.flush()
+    db.rollback()

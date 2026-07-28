@@ -1268,6 +1268,69 @@ class EndUserGroupMember(Base):
     __table_args__ = (Index("ix_end_user_group_members_user", "end_user_id"),)
 
 
+class Machine(Base):
+    """A workstation running the client. Tenant-scoped, like everything else.
+
+    IDENTITY IS A GUID THE CLIENT MINTS, NOT THE COMPUTER NAME
+    ----------------------------------------------------------
+    ``machine_uid`` is generated once by the client and persisted under
+    ProgramData. Everything else on offer breaks on something ordinary:
+
+    * **Computer name** is reused constantly, is not unique across clients, and
+      changes on rename -- so a renamed PC silently becomes a new machine while
+      a recycled name silently inherits another machine's printers.
+    * **Machine SID** survives a rename but not a re-image, and cloned VM images
+      that skipped sysprep share one, which would merge two machines into a row.
+
+    The GUID survives renames, IP changes and domain moves. It does *not*
+    survive a re-image, and that is the deliberate part: a freshly imaged PC is
+    a new machine, comes back with no assignments, and leaves its old row for an
+    operator to retire. Silently inheriting a departed user's printers because a
+    name matched is the worse failure. If auto-adopting a re-imaged PC by name
+    is wanted later, ``name`` is already stored and the adoption would be
+    tenant-scoped -- no migration needed to add it.
+
+    ``name`` is a display label, never a key. It is what an operator recognises
+    in a list, and it is refreshed on every check-in.
+    """
+
+    __tablename__ = "machines"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    client_id: Mapped[int] = mapped_column(
+        ForeignKey("clients.id", ondelete="CASCADE"), index=True
+    )
+    #: Client-minted GUID. Unique per tenant rather than globally: two customers
+    #: cannot collide in practice, but scoping it means a restored backup from
+    #: one tenant can never adopt another's machine.
+    machine_uid: Mapped[str] = mapped_column(String(64))
+    name: Mapped[str] = mapped_column(String(255), default="")
+
+    #: "Whoever is at this machine gets its default, whatever their groups say."
+    #: Off by default: the agreed precedence is direct user > machine > group,
+    #: which is right for an ordinary desk. A shared floor terminal or kiosk is
+    #: the exception, and it is a property of the machine rather than a global
+    #: setting because one site can have both.
+    default_wins: Mapped[bool] = mapped_column(Boolean, default=False)
+
+    #: Deactivate rather than delete, exactly as end_users do -- a retired PC's
+    #: assignment history is worth keeping, and a machine that resolves to
+    #: nothing stops provisioning immediately.
+    active: Mapped[bool] = mapped_column(Boolean, default=True)
+
+    last_seen_at: Mapped[Optional[datetime]] = mapped_column(
+        DateTime(timezone=True), default=None
+    )
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+
+    client: Mapped[Client] = relationship()
+
+    __table_args__ = (
+        UniqueConstraint("client_id", "machine_uid", name="uq_machines_client_uid"),
+        Index("ix_machines_client_active", "client_id", "active"),
+    )
+
+
 class PrinterAssignment(Base):
     """"This printer belongs to this person (or this group)."
 
@@ -1298,6 +1361,12 @@ class PrinterAssignment(Base):
     group_id: Mapped[Optional[int]] = mapped_column(
         ForeignKey("end_user_groups.id", ondelete="CASCADE"), default=None, index=True
     )
+    #: "Every printer on this machine, whoever is signed in" -- shared floor
+    #: terminals, kiosks, the PC by the warehouse door. Distinct from a user
+    #: assignment because the printer belongs to the location, not the person.
+    machine_id: Mapped[Optional[int]] = mapped_column(
+        ForeignKey("machines.id", ondelete="CASCADE"), default=None, index=True
+    )
 
     # "Make this the workstation's default printer." Conflicts are inevitable
     # once groups are involved, so this is a request, not a guarantee --
@@ -1317,8 +1386,16 @@ class PrinterAssignment(Base):
     group: Mapped[Optional[EndUserGroup]] = relationship(back_populates="assignments")
 
     __table_args__ = (
+        # Exactly one target of three. Stated as a constraint rather than a
+        # convention because a row targeting two has no defined meaning and a row
+        # targeting none is an orphan the UI renders as a blank -- both cheap to
+        # produce from a form handler and expensive to find later. Written as a
+        # count rather than the old `<>` pair because that idiom does not extend
+        # past two columns.
         CheckConstraint(
-            "(end_user_id IS NULL) <> (group_id IS NULL)",
+            "((CASE WHEN end_user_id IS NULL THEN 0 ELSE 1 END) + "
+            "(CASE WHEN group_id IS NULL THEN 0 ELSE 1 END) + "
+            "(CASE WHEN machine_id IS NULL THEN 0 ELSE 1 END)) = 1",
             name="ck_printer_assignments_one_target",
         ),
         UniqueConstraint(
@@ -1326,6 +1403,9 @@ class PrinterAssignment(Base):
         ),
         UniqueConstraint(
             "printer_id", "group_id", name="uq_printer_assignments_printer_group"
+        ),
+        UniqueConstraint(
+            "printer_id", "machine_id", name="uq_printer_assignments_printer_machine"
         ),
     )
 

@@ -25,7 +25,7 @@ from central.dashboard import (
 from central.db import create_all, get_db
 from central.health import database_ok, worker_health
 
-app = FastAPI(title="Printer Nanny", version="0.18.0")
+app = FastAPI(title="Printer Nanny", version="0.19.0")
 # Honor X-Forwarded-Proto/For from the reverse proxy so request.base_url returns
 # https:// when Caddy/Nginx terminates TLS in front of us. Without this, the
 # agent install command on /manage/agents leaks http://… to operators behind
