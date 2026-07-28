@@ -58,11 +58,19 @@
 
 .EXAMPLE
   # Safest first run: probe only, nothing created.
-  .\windows-tryout.ps1 -SkipSpooler
+  # Windows blocks downloaded .ps1 files by default, so run it in a child
+  # process with the policy relaxed for that process alone -- this writes
+  # nothing to the registry and leaves the calling shell's policy untouched.
+  powershell -NoProfile -ExecutionPolicy Bypass -File .\windows-tryout.ps1 -SkipSpooler
 
 .EXAMPLE
-  # Everything, against a known printer.
-  .\windows-tryout.ps1 -PrinterIp 192.168.1.50
+  # Everything, against a known printer. Needs an elevated shell.
+  powershell -NoProfile -ExecutionPolicy Bypass -File .\windows-tryout.ps1 -PrinterIp 192.168.1.50
+
+.NOTES
+  Needs Python 3.9+. Git is optional -- without it the source is fetched as a
+  zip over HTTPS, because a stock Windows box has no git and asking someone to
+  install one to try the other is a poor trade.
 #>
 [CmdletBinding()]
 param(
@@ -173,6 +181,98 @@ function Assert-NoDriverStaging {
     Write-Host "  no driver-staging call reachable from the test suite" -ForegroundColor Green
 }
 
+function Resolve-Python {
+    # Finding python on PATH is NOT proof python exists.
+    #
+    # Windows ships "app execution aliases" in WindowsApps -- zero-byte stubs
+    # that resolve happily through Get-Command and, when the Store package
+    # behind them isn't installed, open the Microsoft Store instead of running
+    # anything. A machine with no Python still answers `Get-Command python`,
+    # which is how a preflight check sails straight past the problem and fails
+    # incomprehensibly three phases later inside pip.
+    #
+    # So each candidate is made to prove itself by printing a version.
+    foreach ($candidate in @('python', 'python3', 'py')) {
+        $cmd = Get-Command $candidate -ErrorAction SilentlyContinue
+        if (-not $cmd) { continue }
+
+        $output = ''
+        try {
+            $output = (& $cmd.Source --version 2>&1 | Out-String)
+        } catch {
+            continue
+        }
+        if ($LASTEXITCODE -ne 0) { continue }
+        if ($output -notmatch 'Python\s+(\d+)\.(\d+)') { continue }
+
+        $major = [int]$Matches[1]
+        $minor = [int]$Matches[2]
+        if ($major -lt 3 -or ($major -eq 3 -and $minor -lt 9)) {
+            Write-Host "  $($cmd.Source) is Python $major.$minor; need 3.9+" -ForegroundColor Yellow
+            continue
+        }
+        return [pscustomobject]@{
+            Path    = $cmd.Source
+            Version = "$major.$minor"
+        }
+    }
+    return $null
+}
+
+function Get-RepoSource {
+    param([string] $RepoUrl, [string] $Ref, [string] $Workspace)
+
+    # git first when it's genuinely present: a shallow clone is fast and pins an
+    # exact ref. But git is NOT on a stock Windows box, and requiring someone to
+    # install one tool in order to try another is a bad trade -- so its absence
+    # is a fallback, not an error.
+    $git = Get-Command git -ErrorAction SilentlyContinue
+    if ($git) {
+        $dest = Join-Path $Workspace "printer-nanny"
+        Write-Host "  cloning $RepoUrl ($Ref) ..."
+        & git clone --quiet --depth 1 --branch $Ref $RepoUrl $dest 2>&1 | Out-Null
+        if ($LASTEXITCODE -eq 0) { return $dest }
+        Write-Host "  git clone failed (exit $LASTEXITCODE); falling back to the zip archive" -ForegroundColor Yellow
+        Remove-Item -Recurse -Force $dest -ErrorAction SilentlyContinue
+    } else {
+        Write-Host "  git not present; fetching the source as a zip instead"
+    }
+
+    # Some Windows builds still default to TLS 1.0/1.1, which github.com refuses.
+    # Process-scoped, so nothing outside this run is affected.
+    try {
+        [Net.ServicePointManager]::SecurityProtocol =
+            [Net.ServicePointManager]::SecurityProtocol -bor [Net.SecurityProtocolType]::Tls12
+    } catch {
+        # Older .NET without the Tls12 member -- nothing to do but continue.
+    }
+
+    $base   = $RepoUrl -replace '\.git$', ''
+    $zipUrl = "$base/archive/$Ref.zip"
+    $zip    = Join-Path $Workspace "source.zip"
+    $stage  = Join-Path $Workspace "unpacked"
+
+    Write-Host "  downloading $zipUrl ..."
+    # -UseBasicParsing: on Windows PowerShell 5.1 the default path leans on
+    # Internet Explorer's DOM engine, which fails outright on a machine where IE
+    # has never been launched. Harmless no-op on 7.x.
+    Invoke-WebRequest -Uri $zipUrl -OutFile $zip -UseBasicParsing
+    if (-not (Test-Path $zip)) { throw "download produced no file" }
+
+    New-Item -ItemType Directory -Path $stage -Force | Out-Null
+    Expand-Archive -Path $zip -DestinationPath $stage -Force
+
+    # GitHub names the folder <repo>-<ref> with slashes flattened, so it is
+    # found rather than computed -- a branch called feature/x would not match
+    # any name we could predict.
+    $extracted = @(Get-ChildItem -Path $stage -Directory)
+    if ($extracted.Count -ne 1) {
+        throw "expected one directory inside the archive, found $($extracted.Count)"
+    }
+    Write-Host "  unpacked $($extracted[0].Name)"
+    return $extracted[0].FullName
+}
+
 function Get-LocalCidrs {
     $out = @()
     $addrs = Get-NetIPAddress -AddressFamily IPv4 -ErrorAction SilentlyContinue |
@@ -198,14 +298,20 @@ Write-Host "OS            : $([System.Environment]::OSVersion.VersionString)"
 Write-Host "PowerShell    : $($PSVersionTable.PSVersion)"
 Write-Host "Elevated      : $isAdmin"
 
-$python = (Get-Command python -ErrorAction SilentlyContinue)
-if (-not $python) { $python = (Get-Command py -ErrorAction SilentlyContinue) }
+$python = Resolve-Python
 if (-not $python) {
-    Write-Host "`nPython 3.9+ is required and was not found on PATH." -ForegroundColor Red
-    Write-Host "Install it from python.org or the Microsoft Store, then re-run." -ForegroundColor Red
+    Write-Host ""
+    Write-Host "No working Python 3.9+ found." -ForegroundColor Red
+    Write-Host ""
+    Write-Host "If 'python' appears to be on your PATH under WindowsApps, that is" -ForegroundColor Yellow
+    Write-Host "an app execution alias, not an interpreter -- it opens the Microsoft" -ForegroundColor Yellow
+    Write-Host "Store when the package behind it isn't installed. Either install" -ForegroundColor Yellow
+    Write-Host "Python from python.org (tick 'Add python.exe to PATH'), or turn the" -ForegroundColor Yellow
+    Write-Host "alias off under Settings > Apps > Advanced app settings >" -ForegroundColor Yellow
+    Write-Host "App execution aliases." -ForegroundColor Yellow
     exit 1
 }
-Write-Host "Python        : $($python.Source)"
+Write-Host "Python        : $($python.Path)  (v$($python.Version))"
 
 if (-not $SkipSpooler -and -not $isAdmin) {
     Write-Host ""
@@ -238,14 +344,7 @@ try {
         $repo = (Resolve-Path $RepoPath).Path
         Write-Host "  using existing clone: $repo"
     } else {
-        $git = Get-Command git -ErrorAction SilentlyContinue
-        if (-not $git) {
-            throw "git not found on PATH. Install Git for Windows, or pass -RepoPath to point at an existing clone."
-        }
-        $repo = Join-Path $script:Workspace "printer-nanny"
-        Write-Host "  cloning $RepoUrl ($Ref) ..."
-        & git clone --quiet --depth 1 --branch $Ref $RepoUrl $repo
-        if ($LASTEXITCODE -ne 0) { throw "git clone failed with exit code $LASTEXITCODE" }
+        $repo = Get-RepoSource -RepoUrl $RepoUrl -Ref $Ref -Workspace $script:Workspace
     }
 
     Write-Section "Driver-staging guard"
@@ -253,7 +352,7 @@ try {
 
     Write-Section "Virtualenv (private to this run)"
     $venv = Join-Path $script:Workspace "venv"
-    & $python.Source -m venv $venv
+    & $python.Path -m venv $venv
     if ($LASTEXITCODE -ne 0) { throw "venv creation failed" }
     $venvPy = Join-Path $venv "Scripts\python.exe"
     Write-Host "  $venvPy"
