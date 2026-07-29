@@ -310,8 +310,9 @@ here — this section is the only evidence that any of it works.
 
 ## Behaviour to confirm is *reported*, not silently assumed
 
-Both are deliberate. The smoke test is that the client says so rather than
-quietly doing nothing:
+Both of these do real work now, and both can fail in ways that look like
+success from central. The smoke test is that the client tells you which happened
+rather than assuming the good case:
 
 - **The user's default printer IS set**, by impersonating the console session.
   Verify it *as the signed-in user, not elevated* — the whole point is that it is
