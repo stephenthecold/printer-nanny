@@ -463,9 +463,17 @@ enforced; none of them is optional.
   a local run can pass while CI fails on a file you never checked.
 
 ## Status
-Production-ready feature surface (as of PR #46):
+**Every feature described below is built. What is NOT done is verification on
+real Windows**, and that distinction is the only one worth carrying at the top of
+this section: the site agent and the whole central surface run in production, and
+the workstation client — queue provisioning, driver staging, the default printer,
+the MSI — has never executed against a real spooler, driver store or console
+session. Every test above `PowerShellRunner` uses a fake, which is exactly the
+blindness that let tier 1 ship broken for its entire existence. Treat
+`deploy/WINDOWS-MSI-TESTING.md` as the outstanding work, not as documentation of
+work already done.
 
-**Print management** (in progress — this is the Printix-shaped half): end users,
+**Print management** (the Printix-shaped half, feature-complete): end users,
 groups, and per-user / per-group printer assignment with a deterministic
 resolver, at `/manage/people`; **directory sync** from Entra ID, Google
 Workspace and on-prem AD, per client, credentials encrypted at rest, worker-
@@ -494,7 +502,7 @@ enrollment key gets you: a holder who names their machine after a stale record
 inherits its printers, where enrollment alone previously granted nothing. That is
 the trade the setting exists to let an operator decline.
 
-The Windows workstation client now runs end to end:
+The Windows workstation client is feature-complete and unverified:
 `workstation_service.py` mints the machine GUID, enrolls against a client-scoped
 key (`workstation_enroll_keys`, revocable, mints a per-machine credential),
 polls `/api/v1/workstations/{id}/assignments`, converges the spooler through
@@ -512,8 +520,9 @@ line is readable by any logged-in user**. A build that fails rolls the key back,
 since a key minted for an installer that never existed is a live credential
 nobody holds. It has **never run against a real spooler** — every test
 above `PowerShellRunner` uses a fake, which is exactly the blindness that let
-tier 1 ship broken. It **sets the user's default printer** by impersonating the console session
-(`WTSQueryUserToken` → `ImpersonateLoggedOnUser` → Win32 `SetDefaultPrinter`,
+tier 1 ship broken. It **sets the user's default printer** by impersonating the
+console session (`WTSQueryUserToken` → `ImpersonateLoggedOnUser` → Win32
+`SetDefaultPrinter`,
 which acts on the calling thread's user) rather than hand-assembling the
 `Device` registry value, whose `Name,Driver,Port` needs a port Windows chose for
 an IPP queue — a guess there yields a default that looks set and does not work.
