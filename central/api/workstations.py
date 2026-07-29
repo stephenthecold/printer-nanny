@@ -55,12 +55,22 @@ def enroll_workstation(
         # them lets a holder of one key probe for the existence of others.
         raise HTTPException(status.HTTP_401_UNAUTHORIZED, "Invalid enrollment key")
 
-    machine, api_key, created = result
+    machine, api_key, created, adopted = result
+    # Adoption gets its own action rather than sharing "reenroll". One machine
+    # taking over another record's printers by name is a different event from a
+    # known machine refreshing its key, and an operator asking "why does this PC
+    # have those queues?" needs to find it.
+    if created:
+        action = "machine.enroll"
+    elif adopted:
+        action = "machine.adopt"
+    else:
+        action = "machine.reenroll"
     record(
         db,
         request,
         None,
-        "machine.enroll" if created else "machine.reenroll",
+        action,
         f"machine:{machine.id}",
         # The uid identifies the PC and is safe to record; the key never is.
         f"client={machine.client_id} uid={machine.machine_uid} name={machine.name!r}",
@@ -71,6 +81,7 @@ def enroll_workstation(
         api_key=api_key,
         client_id=machine.client_id,
         created=created,
+        adopted=adopted,
     )
 
 

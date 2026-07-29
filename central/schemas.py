@@ -378,6 +378,10 @@ class MachineEnrolled(BaseModel):
     #: Surfaced so a client can log which happened without central having to
     #: guess from timing.
     created: bool
+    #: True when this enrollment took over a previous record by computer name --
+    #: a re-imaged PC reclaiming its printers. Logged by the client so "where did
+    #: these queues come from?" is answerable on the machine as well as centrally.
+    adopted: bool = False
 
 
 class MachinePrinterOut(BaseModel):

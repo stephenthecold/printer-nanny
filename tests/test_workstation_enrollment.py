@@ -9,7 +9,7 @@ after being retired.
 
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 from fastapi.testclient import TestClient
 from sqlalchemy import select
@@ -497,3 +497,194 @@ def test_upn_matching_is_still_tenant_scoped(db):
         headers={"Authorization": f"Bearer {enrolled['api_key']}"})
     assert r.json()["resolved_for"] is None
     assert r.json()["printers"] == []
+
+
+# ------------------------ re-imaged PCs keep their printers ----------------- #
+
+
+def _seen(db, machine, minutes_ago: int) -> None:
+    machine.last_seen_at = datetime.now(timezone.utc) - timedelta(minutes=minutes_ago)
+    db.commit()
+
+
+def test_a_reimaged_pc_keeps_its_printers(db):
+    """The whole point: ProgramData is wiped, a fresh GUID arrives, and the PC
+    reclaims the record (and therefore the assignments) it had before."""
+    c, printer = _client_with_printer(db, "Acme", "10.0.0.1")
+    key = _enroll_key(db, c)
+    first = _enroll(TestClient(app), key, "GUID-BEFORE", "DESK-01").json()
+    db.add(m.PrinterAssignment(printer_id=printer.id,
+                               machine_id=first["machine_id"], is_default=True))
+    db.commit()
+    _seen(db, db.get(m.Machine, first["machine_id"]), minutes_ago=999)
+
+    # Re-imaged: same computer name, brand-new GUID.
+    second = _enroll(TestClient(app), key, "GUID-AFTER", "DESK-01").json()
+
+    assert second["adopted"] is True
+    assert second["created"] is False
+    assert second["machine_id"] == first["machine_id"], "same record, so same printers"
+
+    machine = db.get(m.Machine, first["machine_id"])
+    db.refresh(machine)
+    assert machine.machine_uid == "GUID-AFTER", "identity moved to the new install"
+
+    # And it really can see them.
+    body = TestClient(app).get(
+        f"/api/v1/workstations/{second['machine_id']}/assignments",
+        headers={"Authorization": f"Bearer {second['api_key']}"}).json()
+    assert [p["printer_id"] for p in body["printers"]] == [printer.id]
+
+
+def test_adoption_preserves_the_shared_terminal_flag(db):
+    """Assignments hang off the row id, so does everything else an operator set.
+    Preserving the row is what preserves the configuration."""
+    c, _ = _client_with_printer(db, "Acme", "10.0.0.1")
+    key = _enroll_key(db, c)
+    first = _enroll(TestClient(app), key, "GUID-BEFORE", "KIOSK-01").json()
+    machine = db.get(m.Machine, first["machine_id"])
+    machine.default_wins = True
+    db.commit()
+    _seen(db, machine, minutes_ago=999)
+
+    _enroll(TestClient(app), key, "GUID-AFTER", "KIOSK-01")
+    db.refresh(machine)
+    assert machine.default_wins is True
+
+
+def test_a_live_machine_is_never_adopted(db):
+    """A recent check-in means the PC is ALIVE, so a name match is a collision,
+    not a re-image. Adopting would rotate a working machine's credential out
+    from under it and the two would fight over the row forever."""
+    c, _ = _client_with_printer(db, "Acme", "10.0.0.1")
+    key = _enroll_key(db, c)
+    first = _enroll(TestClient(app), key, "GUID-LIVE", "DESK-01").json()
+    _seen(db, db.get(m.Machine, first["machine_id"]), minutes_ago=1)
+
+    second = _enroll(TestClient(app), key, "GUID-OTHER", "DESK-01").json()
+    assert second["adopted"] is False
+    assert second["created"] is True
+    assert second["machine_id"] != first["machine_id"]
+
+    # The live machine's credential still works -- it was not stolen.
+    assert TestClient(app).get(
+        f"/api/v1/workstations/{first['machine_id']}/assignments",
+        headers={"Authorization": f"Bearer {first['api_key']}"}
+    ).status_code == 200
+
+
+def test_an_ambiguous_name_is_never_adopted(db):
+    """Two records sharing a name means adopting either is a coin flip that
+    could hand one person's printers to another. A new machine is recoverable;
+    a wrong merge is not."""
+    c, _ = _client_with_printer(db, "Acme", "10.0.0.1")
+    key = _enroll_key(db, c)
+    a = _enroll(TestClient(app), key, "GUID-A", "DESK-01").json()
+    b = _enroll(TestClient(app), key, "GUID-B", "DESK-01").json()
+    for mid in (a["machine_id"], b["machine_id"]):
+        _seen(db, db.get(m.Machine, mid), minutes_ago=999)
+
+    third = _enroll(TestClient(app), key, "GUID-C", "DESK-01").json()
+    assert third["adopted"] is False
+    assert third["created"] is True
+    assert third["machine_id"] not in (a["machine_id"], b["machine_id"])
+
+
+def test_adoption_never_crosses_a_tenant(db):
+    """The name is matched inside the enrollment key's client only. Two
+    customers each having a DESK-01 is completely normal."""
+    acme, acme_printer = _client_with_printer(db, "Acme", "10.0.0.1")
+    globex, globex_printer = _client_with_printer(db, "Globex", "10.9.9.1")
+    globex_machine = _enroll(
+        TestClient(app), _enroll_key(db, globex), "GUID-GLOBEX", "DESK-01").json()
+    db.add(m.PrinterAssignment(printer_id=globex_printer.id,
+                               machine_id=globex_machine["machine_id"]))
+    db.commit()
+    _seen(db, db.get(m.Machine, globex_machine["machine_id"]), minutes_ago=999)
+
+    # An Acme PC with the same computer name must NOT inherit Globex's record.
+    acme_machine = _enroll(
+        TestClient(app), _enroll_key(db, acme), "GUID-ACME", "DESK-01").json()
+    assert acme_machine["adopted"] is False
+    assert acme_machine["machine_id"] != globex_machine["machine_id"]
+    assert acme_machine["client_id"] == acme.id
+
+
+def test_a_blank_name_never_adopts(db):
+    """Machine-reported and optional; every unnamed record would otherwise be
+    one collision."""
+    c, _ = _client_with_printer(db, "Acme", "10.0.0.1")
+    key = _enroll_key(db, c)
+    first = _enroll(TestClient(app), key, "GUID-A", "").json()
+    _seen(db, db.get(m.Machine, first["machine_id"]), minutes_ago=999)
+
+    second = _enroll(TestClient(app), key, "GUID-B", "").json()
+    assert second["adopted"] is False
+    assert second["machine_id"] != first["machine_id"]
+
+
+def test_name_matching_is_case_insensitive(db):
+    """Windows computer names are, and a PC that comes back as DESK-01 having
+    been desk-01 is the same desk."""
+    c, _ = _client_with_printer(db, "Acme", "10.0.0.1")
+    key = _enroll_key(db, c)
+    first = _enroll(TestClient(app), key, "GUID-A", "desk-01").json()
+    _seen(db, db.get(m.Machine, first["machine_id"]), minutes_ago=999)
+
+    second = _enroll(TestClient(app), key, "GUID-B", "DESK-01").json()
+    assert second["adopted"] is True
+    assert second["machine_id"] == first["machine_id"]
+
+
+def test_adoption_can_be_turned_off(db):
+    """It changes what holding an enrollment key gets you, so it is a setting."""
+    from central.runtime import save_settings
+
+    c, _ = _client_with_printer(db, "Acme", "10.0.0.1")
+    key = _enroll_key(db, c)
+    first = _enroll(TestClient(app), key, "GUID-A", "DESK-01").json()
+    _seen(db, db.get(m.Machine, first["machine_id"]), minutes_ago=999)
+
+    # An unchecked box posts nothing, so "in sections but absent from the form"
+    # is how False is recorded -- passing the key with a False VALUE would set it
+    # True, since save_settings reads presence, not value.
+    save_settings(db, {"workstation.adopt_stale_after_min": 60},
+                  sections={"Workstations"})
+    db.commit()
+    from central.runtime import load_settings
+    assert load_settings(db)["workstation.adopt_by_name"] is False
+
+    second = _enroll(TestClient(app), key, "GUID-B", "DESK-01").json()
+    assert second["adopted"] is False
+    assert second["created"] is True
+
+
+def test_adoption_is_audited_as_its_own_action(db):
+    """One machine taking over another record's printers by name is a different
+    event from a key rotation, and must be findable."""
+    c, _ = _client_with_printer(db, "Acme", "10.0.0.1")
+    key = _enroll_key(db, c)
+    first = _enroll(TestClient(app), key, "GUID-A", "DESK-01").json()
+    _seen(db, db.get(m.Machine, first["machine_id"]), minutes_ago=999)
+    _enroll(TestClient(app), key, "GUID-B", "DESK-01")
+
+    row = db.scalar(select(m.AuditLog).where(m.AuditLog.action == "machine.adopt"))
+    assert row is not None
+    assert "DESK-01" in (row.detail or "")
+    assert "GUID-B" in (row.detail or ""), "the new identity is what took over"
+
+
+def test_a_retired_machine_that_is_reimaged_comes_back_active(db):
+    """An operator retired the old PC; the replacement is demonstrably running."""
+    c, _ = _client_with_printer(db, "Acme", "10.0.0.1")
+    key = _enroll_key(db, c)
+    first = _enroll(TestClient(app), key, "GUID-A", "DESK-01").json()
+    machine = db.get(m.Machine, first["machine_id"])
+    machine.active = False
+    db.commit()
+    _seen(db, machine, minutes_ago=999)
+
+    second = _enroll(TestClient(app), key, "GUID-B", "DESK-01").json()
+    db.refresh(machine)
+    assert second["adopted"] is True
+    assert machine.active is True
