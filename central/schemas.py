@@ -422,6 +422,10 @@ class MachineAssignmentsOut(BaseModel):
     #: queues?" answerable without reproducing the resolver by hand.
     resolved_for: Optional[str] = None
     default_printer_id: Optional[int] = None
+    #: Whether the client may take over Windows' own default-printer management
+    #: for the signed-in user. Sent per poll rather than baked into the
+    #: installer so an operator can change their mind without reinstalling.
+    manage_default_printer: bool = True
 
 
 class MachineCheckinIn(BaseModel):

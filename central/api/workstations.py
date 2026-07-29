@@ -160,8 +160,13 @@ def machine_assignments(
         if is_default:
             default_id = printer.id
 
+    from central.runtime import load_settings
+
     return s.MachineAssignmentsOut(
         machine_id=machine.id,
+        manage_default_printer=bool(
+            load_settings(db).get("workstation.manage_default_printer", True)
+        ),
         resolved_for=(
             (end_user.upn or end_user.email) if end_user is not None else None
         ),

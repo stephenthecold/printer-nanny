@@ -512,10 +512,21 @@ line is readable by any logged-in user**. A build that fails rolls the key back,
 since a key minted for an installer that never existed is a live credential
 nobody holds. It has **never run against a real spooler** — every test
 above `PowerShellRunner` uses a fake, which is exactly the blindness that let
-tier 1 ship broken. Two deliberate gaps, both reported rather than silently
-skipped: it does **not** set the user's default printer (per-user registry state
-needing impersonation from LocalSystem — claiming a default the user lacks is
-the failure this codebase keeps warning about). It **does** stage vendor drivers:
+tier 1 ship broken. It **sets the user's default printer** by impersonating the console session
+(`WTSQueryUserToken` → `ImpersonateLoggedOnUser` → Win32 `SetDefaultPrinter`,
+which acts on the calling thread's user) rather than hand-assembling the
+`Device` registry value, whose `Name,Driver,Port` needs a port Windows chose for
+an IPP queue — a guess there yields a default that looks set and does not work.
+Two things keep it honest: it **reads the default back** and only reports success
+when the read agrees (`SetDefaultPrinter` returning non-zero is not evidence),
+and it addresses **"Let Windows manage my default printer"**, which ships ON and
+silently re-points the default at whatever was printed to last — without turning
+that off an assigned default appears to apply and then quietly does not. Turning
+it off overrides a user-facing preference, so it is a setting
+(`workstation.manage_default_printer`, sent per poll so an operator can change
+their mind without reinstalling) and the outcome is reported per machine. A
+default is **never** pointed at a queue that was skipped or errored. It **does**
+stage vendor drivers:
 an admin uploads a package on the Machines page and the client downloads it,
 **re-verifies its SHA-256 before unpacking anything**, extracts it refusing any
 entry that escapes the target directory, and stages it with `pnputil` as
