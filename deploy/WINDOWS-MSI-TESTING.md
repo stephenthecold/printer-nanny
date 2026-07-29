@@ -295,8 +295,18 @@ here — this section is the only evidence that any of it works.
       if you want them gone.
     - **`%PROGRAMDATA%\PrinterNanny\machine.json` remains**, so reinstalling
       re-adopts the same machine identity and its assignments rather than
-      creating a second row for one PC. Delete it only if you intend the PC to
-      come back as a **new** machine.
+      creating a second row for one PC.
+
+      Deleting it (or re-imaging, which wipes it) no longer costs the PC its
+      printers: it enrolls with a fresh GUID and central adopts the previous
+      record **by computer name**, provided that record has not checked in for
+      `workstation.adopt_stale_after_min` (default 60) and exactly one record in
+      that client carries the name. Worth testing deliberately — delete
+      `machine.json`, wait out the staleness window, restart the service, and
+      confirm the machine count does **not** grow and the queues come back. The
+      audit row is `machine.adopt`. Turn it off with **Settings → Agents →
+      Workstations → "Re-imaged PCs keep their printers"** if you would rather a
+      re-image always produce a new machine.
 
 ## Two gaps to confirm are *reported*, not silently skipped
 

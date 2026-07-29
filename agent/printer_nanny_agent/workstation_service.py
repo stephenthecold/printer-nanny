@@ -134,9 +134,17 @@ def machine_uid(state_dir: Optional[str] = None) -> str:
     silently inherit another machine's printers. The SID survives a rename but
     not a re-image, and cloned images that skipped sysprep share one.
 
-    This survives renames, IP changes and domain moves. It does not survive a
-    re-image, which is intended: a freshly imaged PC is a new machine and comes
-    back with no assignments rather than inheriting a departed user's.
+    This survives renames, IP changes and domain moves. It does NOT survive a
+    re-image -- a wiped ProgramData means a fresh GUID and a machine that looks
+    like a stranger.
+
+    That case is handled on the server, not here, and deliberately so. Central
+    can see the whole tenant, so it can tell "one retired record with this
+    computer name" from "two live PCs that happen to share one"; a client
+    knows only itself and would have to guess. So the client always sends its
+    real GUID and its real name, and ``services.adopt_by_name`` decides whether
+    this is a returning machine. The client never asserts an identity it cannot
+    prove.
     """
     state = load_state(state_dir)
     uid = state.get("machine_uid")
@@ -434,11 +442,15 @@ def ensure_enrolled(
     )
     save_state(state, state_dir)
     client.adopt(state["machine_id"], state["api_key"])
-    log.info(
-        "enrolled as machine %s (%s)",
-        state["machine_id"],
-        "new" if result.get("created") else "rotated",
-    )
+    if result.get("created"):
+        how = "new"
+    elif result.get("adopted"):
+        # Worth its own word in the log: this PC came back after a re-image and
+        # reclaimed the printers its predecessor had. "rotated" would hide that.
+        how = "adopted a previous record for this computer name"
+    else:
+        how = "rotated"
+    log.info("enrolled as machine %s (%s)", state["machine_id"], how)
     return state
 
 

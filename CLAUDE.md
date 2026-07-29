@@ -473,10 +473,26 @@ scheduled (`directory.sync_interval_min`) with a synchronous "Sync now".
 **Machines** (`/manage/machines`) are workstations, tenant-scoped and identified
 by a client-minted GUID rather than the computer name — names are reused, are not
 unique across clients, and change on rename, so a rename would fork a machine and
-a recycled name would inherit another's printers. A re-image is therefore a *new*
-machine with no assignments; `machines.name` is stored so name-based adoption
-needs no migration if that is ever wanted. Precedence is **direct user > machine
-> group**, with a per-machine `default_wins` for shared terminals.
+a recycled name would inherit another's printers. Precedence is **direct user >
+machine > group**, with a per-machine `default_wins` for shared terminals.
+
+A GUID does not survive a re-image, so **`services.adopt_by_name` handles the
+returning PC** (`workstation.adopt_by_name`, on by default): an enrolling machine
+whose computer name matches exactly one stale record for that client takes that
+record over, keeping its assignments — the row id is what assignments hang off,
+so preserving the row *is* preserving the printers. The decision lives on the
+server because only central can see the whole tenant; a client knows just itself
+and would have to guess. Name matching is weaker than GUID matching, so each way
+it can be wrong is refused rather than resolved: **tenant-scoped always**,
+**exactly one candidate or none** (ambiguity is a coin flip that could hand one
+person's printers to another), **the record must look gone** — a recent check-in
+means the PC is alive, so a name match is a collision, and adopting it would
+rotate a working machine's credential out from under it and the two would fight
+over the row forever — and **blank names never match**. Adoption is audited as
+`machine.adopt`, distinct from `machine.reenroll`. It does change what holding an
+enrollment key gets you: a holder who names their machine after a stale record
+inherits its printers, where enrollment alone previously granted nothing. That is
+the trade the setting exists to let an operator decline.
 
 The Windows workstation client now runs end to end:
 `workstation_service.py` mints the machine GUID, enrolls against a client-scoped

@@ -241,6 +241,21 @@ SPECS: List[Spec] = [
     # Applied once at creation and then owned by the client: editing these
     # never reaches back and rewrites customers who were already set up, which
     # would silently overwrite whatever an operator tuned by hand.
+    Spec("workstation.adopt_by_name", "bool", "Workstations",
+         "Re-imaged PCs keep their printers", True,
+         "A re-imaged PC has lost its identity file, so it enrolls as a stranger. "
+         "With this on, an enrolling machine whose computer name matches exactly "
+         "one RETIRED-looking record for that client takes that record over, "
+         "keeping its printer assignments and settings. Off means a re-image is "
+         "always a brand-new machine that comes back with nothing. Adoption is "
+         "always tenant-scoped and always audited (machine.adopt)."),
+    Spec("workstation.adopt_stale_after_min", "int", "Workstations",
+         "Treat a machine as gone after (minutes)", 60,
+         "Only a record not seen for this long can be taken over. A machine that "
+         "checked in recently is ALIVE, so a name match is a collision rather than "
+         "a re-image -- adopting it would steal a working PC's identity and the "
+         "two would fight over it forever. Raise this if you re-image slowly; "
+         "lower it only if you understand that trade."),
     Spec("onboarding.apply_defaults", "bool", "Onboarding defaults",
          "Apply defaults to new clients", True,
          "When a client is created through Onboard, give it the starting alert "
@@ -289,7 +304,7 @@ SETTINGS_GROUPS: "Dict[str, tuple]" = {
     "polling": ("Polling & SNMP", ["Polling", "SNMP defaults"]),
     "auth": ("Authentication",
              ["Single sign-on (OIDC)", "SCIM provisioning", "Directory sync"]),
-    "agents": ("Agents", ["Agent install", "Onboarding defaults"]),
+    "agents": ("Agents", ["Agent install", "Workstations", "Onboarding defaults"]),
 }
 DEFAULT_SETTINGS_GROUP = "branding"
 

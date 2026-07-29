@@ -874,8 +874,8 @@ def redeem_enroll_key(
 ) -> Optional[tuple]:
     """Exchange a client enroll key for a machine + its own API key.
 
-    Returns ``(machine, api_key, created)`` or ``None`` when the key is unknown
-    or revoked. The caller must not distinguish those to the client: a bearer
+    Returns ``(machine, api_key, created, adopted)`` or ``None`` when the key is
+    unknown or revoked. The caller must not distinguish those to the client: a bearer
     credential that reports *why* it failed is an oracle for guessing others.
 
     RE-ENROLLING A KNOWN ``machine_uid`` ROTATES ITS KEY rather than creating a
@@ -924,6 +924,13 @@ def redeem_enroll_key(
             m.Machine.machine_uid == uid[:64],
         )
     )
+    adopted = False
+    if machine is None:
+        # No record for this identity. Before creating one, see whether this is a
+        # re-imaged PC coming back under a new GUID.
+        machine = adopt_by_name(db, client_id=row.client_id, name=clean_name)
+        adopted = machine is not None
+
     created = machine is None
     if machine is None:
         machine = m.Machine(
@@ -932,8 +939,14 @@ def redeem_enroll_key(
             name=clean_name,
         )
         db.add(machine)
-    elif clean_name:
-        machine.name = clean_name
+    else:
+        if adopted:
+            # Take over the identity. Assignments, default_wins and history hang
+            # off the row id, so preserving the row IS preserving the printers --
+            # nothing has to be copied.
+            machine.machine_uid = uid[:64]
+        if clean_name:
+            machine.name = clean_name
 
     machine.api_key_hash = hash_api_key(api_key)
     machine.last_seen_at = now
@@ -942,7 +955,7 @@ def redeem_enroll_key(
     # silently provision nothing while reporting a successful enrollment.
     machine.active = True
     db.flush()
-    return machine, api_key, created
+    return machine, api_key, created, adopted
 
 
 def printers_for_machine(db: Session, machine: m.Machine) -> list:
@@ -981,3 +994,81 @@ def printers_for_machine(db: Session, machine: m.Machine) -> list:
             continue
         out.append((printer, pid == winner, None))
     return out
+
+
+def adopt_by_name(
+    db: Session, *, client_id: int, name: str
+) -> "Optional[m.Machine]":
+    """A re-imaged PC coming back: find the record it should take over.
+
+    A re-image wipes ProgramData, so the machine mints a fresh GUID and arrives
+    looking like a stranger. Without this it comes back with no printers and
+    leaves a dead row behind, which for a fleet that re-images routinely means
+    re-assigning every PC by hand. The computer name is the only durable thing
+    left to match on -- which is exactly why ``machines.name`` was stored.
+
+    Name matching is genuinely weaker than GUID matching, so every way it can be
+    wrong is refused rather than resolved:
+
+    * **Tenant-scoped, always.** The client comes from the enrollment key, never
+      from the caller, so a name can only ever match inside its own customer.
+    * **Exactly one candidate, or none.** Two records sharing a name means
+      adopting either is a coin flip that could hand one person's printers to
+      another. Ambiguity creates a new machine and leaves the operator a
+      decision to make, which is recoverable; a wrong merge is not.
+    * **The record must look GONE.** A machine that checked in recently is
+      alive, so a name match is a *collision*, not a re-image. Adopting it would
+      rotate a working PC's credential out from under it; that PC would 401,
+      re-enroll, and the two would take turns stealing the row forever. The
+      staleness window (``workstation.adopt_stale_after_min``) is what makes the
+      difference between "replaced" and "duplicate name" decidable at all.
+    * **Blank names never match.** Machine-reported and optional, and every
+      unnamed record would otherwise be one collision.
+
+    Returns the record to take over, or None to create a fresh one.
+
+    Worth stating plainly, because it is a real change in what holding an
+    enrollment key gets you: with adoption on, a holder who names their machine
+    after a stale record inherits that record's printers, where before
+    enrollment granted nothing at all. It is bounded to one tenant, needs the
+    key, needs the target to be stale, and writes a ``machine.adopt`` audit row.
+    Operators who do not want that trade turn ``workstation.adopt_by_name`` off.
+    """
+    from central.runtime import load_settings
+
+    clean = (name or "").strip()
+    if not clean:
+        return None
+
+    rt = load_settings(db)
+    if not rt.get("workstation.adopt_by_name", True):
+        return None
+    try:
+        stale_min = int(rt.get("workstation.adopt_stale_after_min", 60) or 0)
+    except (TypeError, ValueError):
+        stale_min = 60
+
+    # Case-insensitive: Windows computer names are, and a PC that comes back as
+    # DESK-01 having been desk-01 is the same desk.
+    candidates = [
+        row
+        for row in db.scalars(
+            select(m.Machine).where(m.Machine.client_id == client_id)
+        ).all()
+        if (row.name or "").strip().lower() == clean.lower()
+    ]
+    if len(candidates) != 1:
+        return None
+
+    candidate = candidates[0]
+    cutoff = _now() - timedelta(minutes=max(stale_min, 0))
+    last_seen = candidate.last_seen_at
+    if last_seen is not None:
+        # Rows written before timezone-awareness was universal can be naive;
+        # treat those as UTC rather than raising mid-enrollment.
+        if last_seen.tzinfo is None:
+            last_seen = last_seen.replace(tzinfo=timezone.utc)
+        if last_seen > cutoff:
+            return None
+
+    return candidate
