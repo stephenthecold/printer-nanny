@@ -16,14 +16,27 @@ picture.
 
 WHAT THIS MODULE DELIBERATELY DOES NOT DO
 -----------------------------------------
-**It does not set the user's default printer.** The default is per-user state
-living in that user's registry hive, and writing it from LocalSystem means
-impersonating the console session. That is real work with real failure modes
-(no token at the login screen, roaming profiles, a session that logs off
-mid-write), and half-building it would produce the exact failure this codebase
-keeps warning about: central reporting a default that the user does not have.
-So the desired default is recorded per queue and reported, and the queue is
-provisioned; making it *the* default is not claimed. See ``ProvisionReport``.
+**It sets the user's default printer by impersonating them, and verifies it.**
+The default is per-user state, so from LocalSystem the only correct way to touch
+it is to become that user for the duration: ``WTSQueryUserToken`` on the console
+session, ``ImpersonateLoggedOnUser``, then the ordinary Win32
+``SetDefaultPrinter`` -- which acts on the calling thread's user. Writing the
+registry directly was rejected: the ``Device`` value's ``Name,Driver,Port``
+format has to be assembled by hand, and an IPP queue's port is one Windows
+chose, so a guess there produces a default that looks set and does not work.
+
+Two things make this honest rather than hopeful. It **reads the default back**
+with ``GetDefaultPrinter`` and only reports success if the read agrees --
+``SetDefaultPrinter`` returning non-zero is not evidence the user has that
+default. And it addresses **"Let Windows manage my default printer"**, which
+ships ON and silently re-points the default at whatever was printed to last:
+without turning that off, an assigned default appears to apply and then quietly
+does not. Turning it off overrides a user-facing preference, so it is a setting
+(``workstation.manage_default_printer``) and what happened is reported per
+machine rather than done invisibly.
+
+Every failure path -- no console session, no token, a session that logged off
+mid-write -- becomes a stated reason on ``ProvisionReport``, never a claim.
 
 **It does not stage vendor drivers UNLESS central supplies one.** A
 ``driver_required`` printer whose client has a matching uploaded package gets
@@ -245,6 +258,126 @@ def _translate_to_upn(sam: str) -> str:  # pragma: no cover - Windows-only
 
 
 # --------------------------------------------------------------------------- #
+# The user's default printer
+# --------------------------------------------------------------------------- #
+
+
+class DefaultPrinterError(RuntimeError):
+    """The default could not be set or could not be verified. Never fatal --
+    the queues are already provisioned; only the default is in question."""
+
+
+#: HKCU value that decides whether Windows re-points the default at whatever was
+#: printed to last. Absent or 0 means Windows manages it (the shipped default),
+#: 1 means the user's choice stands.
+_LEGACY_MODE_KEY = r"Software\Microsoft\Windows NT\CurrentVersion\Windows"
+_LEGACY_MODE_VALUE = "LegacyDefaultPrinterMode"
+
+
+def set_default_printer(name: str, *, manage_windows_default: bool = True) -> str:
+    """Make ``name`` the console user's default. Returns the verified name.
+
+    Runs the whole thing **impersonating that user**, because the default is
+    per-user state and LocalSystem's own HKCU is not theirs. ``SetDefaultPrinter``
+    acts on the calling thread's user, so impersonation makes the ordinary API do
+    exactly the right thing -- no hand-assembled registry values, and no guessing
+    the port of a queue whose port Windows chose.
+
+    Raises ``DefaultPrinterError`` with a stated reason on every failure path,
+    including "the write succeeded and the read back disagreed", which is the one
+    that matters: a non-zero return from SetDefaultPrinter is not evidence that
+    the user has that default.
+    """
+    if not (name or "").strip():
+        raise DefaultPrinterError("no default requested")
+
+    try:  # pragma: no cover - Windows-only, exercised only on a real machine
+        import ctypes
+        from ctypes import wintypes
+    except Exception:
+        raise DefaultPrinterError("not running on Windows")
+
+    try:  # pragma: no cover - Windows-only
+        wtsapi = ctypes.WinDLL("wtsapi32")
+        kernel32 = ctypes.WinDLL("kernel32")
+        advapi32 = ctypes.WinDLL("advapi32")
+        winspool = ctypes.WinDLL("winspool.drv")
+    except (OSError, AttributeError):
+        raise DefaultPrinterError("not running on Windows")
+
+    session_id = kernel32.WTSGetActiveConsoleSessionId()  # pragma: no cover
+    if session_id in (0xFFFFFFFF, None):  # pragma: no cover
+        # Nobody is signed in. Not an error -- there is no per-user default to
+        # set at a login screen, and saying so beats implying a failure.
+        raise DefaultPrinterError("nobody is signed in")
+
+    token = wintypes.HANDLE()  # pragma: no cover - Windows-only below here
+    if not wtsapi.WTSQueryUserToken(session_id, ctypes.byref(token)):
+        raise DefaultPrinterError(
+            "could not obtain the console user's token "
+            f"(error {ctypes.get_last_error()})"
+        )
+
+    try:
+        if not advapi32.ImpersonateLoggedOnUser(token):
+            raise DefaultPrinterError(
+                f"could not impersonate the console user "
+                f"(error {ctypes.get_last_error()})"
+            )
+        try:
+            if manage_windows_default:
+                _stop_windows_managing_default()
+
+            if not winspool.SetDefaultPrinterW(ctypes.c_wchar_p(name)):
+                raise DefaultPrinterError(
+                    f"SetDefaultPrinter failed (error {ctypes.get_last_error()})"
+                )
+
+            got = _read_default_printer(winspool)
+            if got != name:
+                # The usual cause: Windows is still managing defaults, so it
+                # re-pointed immediately. Say which, rather than "failed".
+                raise DefaultPrinterError(
+                    f"default did not stick (wanted {name!r}, got {got!r}); "
+                    "Windows may still be managing the default printer"
+                )
+            return got
+        finally:
+            advapi32.RevertToSelf()
+    finally:
+        kernel32.CloseHandle(token)
+
+
+def _stop_windows_managing_default() -> None:  # pragma: no cover - Windows-only
+    """Turn off "Let Windows manage my default printer" for the impersonated user.
+
+    Written through HKCU **while impersonating**, so it lands in that user's hive
+    rather than SYSTEM's. Without this the default is re-pointed at whatever they
+    print to next, and central would be reporting a default that evaporates.
+    """
+    import winreg
+
+    with winreg.CreateKeyEx(
+        winreg.HKEY_CURRENT_USER, _LEGACY_MODE_KEY, 0, winreg.KEY_SET_VALUE
+    ) as key:
+        winreg.SetValueEx(key, _LEGACY_MODE_VALUE, 0, winreg.REG_DWORD, 1)
+
+
+def _read_default_printer(winspool) -> str:  # pragma: no cover - Windows-only
+    """GetDefaultPrinter for the impersonated user, or '' if there is none."""
+    import ctypes
+
+    size = ctypes.c_ulong(0)
+    winspool.GetDefaultPrinterW(None, ctypes.byref(size))
+    if not size.value:
+        return ""
+    buf = ctypes.create_unicode_buffer(size.value)
+    if not winspool.GetDefaultPrinterW(buf, ctypes.byref(size)):
+        return ""
+    return buf.value
+
+
+# --------------------------------------------------------------------------- #
 # Vendor driver packages
 # --------------------------------------------------------------------------- #
 
@@ -400,10 +533,17 @@ class ProvisionReport:
 
     outcomes: Dict[str, str] = field(default_factory=dict)
     skipped: Dict[str, str] = field(default_factory=dict)
-    #: The queue central asked to be default. Recorded, NOT applied -- see the
-    #: module docstring. Reported so central can show the gap honestly instead
-    #: of implying a default that was never set.
+    #: The queue central asked to be default.
     desired_default: Optional[str] = None
+    #: The queue that is ACTUALLY the user's default, read back after setting.
+    #: Populated only when a verifying read agreed -- a write that returned
+    #: success is not evidence, which is the whole reason this is a separate
+    #: field from desired_default.
+    default_applied: Optional[str] = None
+    #: Why the default was not applied, when it was not. Stated for the same
+    #: reason skips are: "central shows a default the user does not have" is the
+    #: failure this module exists to avoid.
+    default_reason: Optional[str] = None
 
     @property
     def ok(self) -> bool:
@@ -476,6 +616,7 @@ def provision(
     prefix: str = MANAGED_PREFIX,
     client: "Optional[WorkstationClient]" = None,
     cache_dir: Optional[str] = None,
+    default_setter=None,
 ) -> ProvisionReport:
     """Converge the spooler onto what central says this machine should have.
 
@@ -507,9 +648,35 @@ def provision(
             skipped[spec["name"]] = f"driver package unusable: {exc}"
 
     outcomes = ws.reconcile(runner, ready, managed_prefix=prefix)
-    return ProvisionReport(
+    report = ProvisionReport(
         outcomes=outcomes, skipped=skipped, desired_default=desired_default
     )
+
+    if desired_default is None:
+        return report
+
+    # Only ever point the default at a queue that actually exists. Setting it to
+    # one that was skipped or errored would be the failure this module is built
+    # around: central reporting a default the user does not have.
+    outcome = outcomes.get(desired_default, "")
+    if not outcome or outcome.startswith("error"):
+        report.default_reason = (
+            f"its queue was not provisioned ({outcome or 'skipped'})"
+        )
+        return report
+
+    setter = default_setter or set_default_printer
+    try:
+        report.default_applied = setter(
+            desired_default,
+            manage_windows_default=bool(assignments.get("manage_default_printer", True)),
+        )
+    except Exception as exc:
+        # Including "nobody is signed in", which is normal at a login screen --
+        # stated rather than swallowed so an operator can tell it apart from a
+        # real failure.
+        report.default_reason = str(exc)
+    return report
 
 
 # --------------------------------------------------------------------------- #
@@ -709,6 +876,13 @@ def run(
                 log.info("skipped %s: %s", queue, why)
             for queue, outcome in report.outcomes.items():
                 log.info("queue %s: %s", queue, outcome)
+            if report.default_applied:
+                log.info("default printer: %s", report.default_applied)
+            elif report.desired_default:
+                log.info(
+                    "default printer %s NOT applied: %s",
+                    report.desired_default, report.default_reason,
+                )
         except Exception as exc:
             log.warning("poll failed, will retry in %ss: %s", interval, exc)
         if once:

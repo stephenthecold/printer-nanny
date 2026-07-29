@@ -148,10 +148,15 @@ def main(argv: Optional[list] = None) -> int:
             print(f"{queue}: {outcome}")
         for queue, why in sorted(report.skipped.items()):
             print(f"{queue}: skipped ({why})")
-        if report.desired_default:
-            # Stated rather than implied: the queue exists, but making it the
-            # user's default is per-user state this service does not write.
-            print(f"default requested: {report.desired_default} (not applied)")
+        if report.default_applied:
+            print(f"default printer: {report.default_applied}")
+        elif report.desired_default:
+            # Stated rather than implied, so "central shows a default the user
+            # does not have" stays impossible.
+            print(
+                f"default requested: {report.desired_default} "
+                f"(NOT applied: {report.default_reason})"
+            )
         return 0 if report.ok else 1
     return 0
 

@@ -308,16 +308,35 @@ here — this section is the only evidence that any of it works.
       Workstations → "Re-imaged PCs keep their printers"** if you would rather a
       re-image always produce a new machine.
 
-## Two gaps to confirm are *reported*, not silently skipped
+## Behaviour to confirm is *reported*, not silently assumed
 
 Both are deliberate. The smoke test is that the client says so rather than
 quietly doing nothing:
 
-- **The user's default printer is not set.** That is per-user registry state and
-  writing it from LocalSystem needs impersonation. The desired default is
-  recorded and reported as *not applied* — claiming a default the user does not
-  have is the failure this codebase keeps warning about. Expect the queue to
-  exist and Windows' own default to be untouched.
+- **The user's default printer IS set**, by impersonating the console session.
+  Verify it *as the signed-in user, not elevated* — the whole point is that it is
+  per-user state:
+
+  ```powershell
+  Get-CimInstance Win32_Printer -Filter "Default=TRUE" | Select-Object Name
+  Get-ItemProperty 'HKCU:\Software\Microsoft\Windows NT\CurrentVersion\Windows' `
+      -Name LegacyDefaultPrinterMode      # 1 = Windows no longer manages it
+  ```
+
+  The client turns **"Let Windows manage my default printer"** off first, because
+  it ships ON and re-points the default at whatever was printed to last — without
+  that, an assigned default appears to apply and then quietly does not. It
+  overrides a user preference, so it is controlled by **Settings → Agents →
+  Workstations → "Set the user's default printer"**.
+
+  Three checks worth doing deliberately, none of which CI can perform:
+  1. With the setting ON, print to a *different* queue, then confirm the assigned
+     default **stays put**. That is the behaviour the whole feature exists for.
+  2. Turn the setting OFF, re-run, and confirm `workstation.log` reports the
+     desired default as **NOT applied with a reason** rather than claiming it.
+  3. Break a queue (unplug the printer, or assign a `driver_required` one with no
+     package) and confirm it **never becomes the default** — central showing a
+     default the user does not have is the failure this path is built to avoid.
 - **Vendor drivers are staged only when a package is uploaded.** With no
   matching package a `driver_required` printer is skipped with a stated reason,
   never bound to a wrong driver — check `workstation.log` and confirm the printer

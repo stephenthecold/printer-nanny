@@ -241,6 +241,15 @@ SPECS: List[Spec] = [
     # Applied once at creation and then owned by the client: editing these
     # never reaches back and rewrites customers who were already set up, which
     # would silently overwrite whatever an operator tuned by hand.
+    Spec("workstation.manage_default_printer", "bool", "Workstations",
+         "Set the user's default printer", True,
+         "Windows 10/11 ship with \"Let Windows manage my default printer\" ON, "
+         "which switches the default to whatever was printed to last -- so an "
+         "assigned default silently will not stick. With this on, the client "
+         "turns that off for the signed-in user and then sets the assigned "
+         "default, verifying it took. That overrides a user-facing Windows "
+         "preference on their behalf; off means the client reports the desired "
+         "default but changes nothing."),
     Spec("workstation.adopt_by_name", "bool", "Workstations",
          "Re-imaged PCs keep their printers", True,
          "A re-imaged PC has lost its identity file, so it enrolls as a stranger. "

@@ -347,3 +347,122 @@ def test_every_powershell_script_is_still_a_constant():
         if attr.startswith("_SCRIPT_"):
             body = getattr(ws, attr)
             assert "{}" not in body and "%s" not in body, attr
+
+
+# ------------------------ the user's default printer ------------------------ #
+
+
+def _default_payload(default_name="Front Desk MFP", manage=True):
+    return {
+        "printers": [_printer(1, default_name, default=True)],
+        "manage_default_printer": manage,
+    }
+
+
+class _Setter:
+    """Stands in for the impersonating Win32 path, which cannot run here."""
+
+    def __init__(self, result=None, error=None):
+        self.result, self.error = result, error
+        self.calls = []
+
+    def __call__(self, name, manage_windows_default=True):
+        self.calls.append((name, manage_windows_default))
+        if self.error:
+            raise self.error
+        return self.result if self.result is not None else name
+
+
+def test_the_default_is_applied_and_reported(monkeypatch):
+    monkeypatch.setattr(ws, "reconcile", lambda runner, desired, managed_prefix="":
+                        {d["name"]: "created" for d in desired})
+    setter = _Setter()
+    report = svc.provision(FakeRunner(), _default_payload(), default_setter=setter)
+
+    assert report.default_applied == report.desired_default
+    assert report.default_reason is None
+    assert setter.calls == [(report.desired_default, True)]
+
+
+def test_the_operator_setting_reaches_the_setter(monkeypatch):
+    """Sent per poll, so turning it off takes effect without reinstalling."""
+    monkeypatch.setattr(ws, "reconcile", lambda runner, desired, managed_prefix="":
+                        {d["name"]: "created" for d in desired})
+    setter = _Setter()
+    svc.provision(FakeRunner(), _default_payload(manage=False), default_setter=setter)
+    assert setter.calls[0][1] is False
+
+
+def test_a_default_is_never_pointed_at_a_queue_that_failed(monkeypatch):
+    """Setting it to a queue that was not provisioned is exactly the failure
+    this module exists to avoid."""
+    monkeypatch.setattr(ws, "reconcile", lambda runner, desired, managed_prefix="":
+                        {d["name"]: "error: boom" for d in desired})
+    setter = _Setter()
+    report = svc.provision(FakeRunner(), _default_payload(), default_setter=setter)
+
+    assert setter.calls == [], "must not try to set a default for a broken queue"
+    assert report.default_applied is None
+    assert "not provisioned" in report.default_reason
+
+
+def test_a_default_is_never_pointed_at_a_skipped_queue(monkeypatch):
+    """A driver_required printer with no package is skipped -- and must not
+    become the default anyway."""
+    monkeypatch.setattr(ws, "reconcile", lambda runner, desired, managed_prefix="": {})
+    payload = {"printers": [_printer(1, "Vendor", "driver_required", default=True)],
+               "manage_default_printer": True}
+    setter = _Setter()
+    report = svc.provision(FakeRunner(), payload, default_setter=setter)
+
+    assert setter.calls == []
+    assert report.default_applied is None
+    assert report.default_reason
+
+
+def test_a_failure_to_set_becomes_a_stated_reason_not_a_crash(monkeypatch):
+    monkeypatch.setattr(ws, "reconcile", lambda runner, desired, managed_prefix="":
+                        {d["name"]: "created" for d in desired})
+    setter = _Setter(error=svc.DefaultPrinterError("nobody is signed in"))
+    report = svc.provision(FakeRunner(), _default_payload(), default_setter=setter)
+
+    assert report.default_applied is None
+    assert report.default_reason == "nobody is signed in"
+    assert report.ok, "the queues provisioned; only the default is in question"
+
+
+def test_a_default_that_did_not_stick_is_not_reported_as_applied(monkeypatch):
+    """The whole reason default_applied is separate from desired_default: a
+    write that returned success is not evidence the user has that default."""
+    monkeypatch.setattr(ws, "reconcile", lambda runner, desired, managed_prefix="":
+                        {d["name"]: "created" for d in desired})
+    setter = _Setter(error=svc.DefaultPrinterError(
+        "default did not stick (wanted X, got Y); Windows may still be managing"))
+    report = svc.provision(FakeRunner(), _default_payload(), default_setter=setter)
+
+    assert report.default_applied is None
+    assert "did not stick" in report.default_reason
+
+
+def test_no_desired_default_means_nothing_is_touched(monkeypatch):
+    """A machine with assignments but no default must not have its user's
+    existing default rewritten."""
+    monkeypatch.setattr(ws, "reconcile", lambda runner, desired, managed_prefix="":
+                        {d["name"]: "created" for d in desired})
+    setter = _Setter()
+    payload = {"printers": [_printer(1, "A", default=False)]}
+    report = svc.provision(FakeRunner(), payload, default_setter=setter)
+
+    assert setter.calls == []
+    assert report.default_applied is None and report.default_reason is None
+
+
+def test_setting_a_default_off_windows_reports_rather_than_raising():
+    """The real setter on a non-Windows host: a stated reason, not a traceback."""
+    with pytest.raises(svc.DefaultPrinterError, match="Windows"):
+        svc.set_default_printer("PN Something")
+
+
+def test_an_empty_default_name_is_refused():
+    with pytest.raises(svc.DefaultPrinterError):
+        svc.set_default_printer("")
