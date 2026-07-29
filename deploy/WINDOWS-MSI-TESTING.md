@@ -318,9 +318,29 @@ quietly doing nothing:
   recorded and reported as *not applied* — claiming a default the user does not
   have is the failure this codebase keeps warning about. Expect the queue to
   exist and Windows' own default to be untouched.
-- **Vendor drivers are not staged.** A `driver_required` printer is skipped with
-  a stated reason, never bound to a wrong driver. Check `workstation.log` for the
-  reason line; the printer should be visibly absent *and* explained.
+- **Vendor drivers are staged only when a package is uploaded.** With no
+  matching package a `driver_required` printer is skipped with a stated reason,
+  never bound to a wrong driver — check `workstation.log` and confirm the printer
+  is visibly absent *and* explained. With a package (Machines → Vendor driver
+  packages), verify the whole path on a real machine, because none of it has run
+  against a real driver store:
+
+  ```powershell
+  Get-Content 'C:\Program Files\Printer Nanny\Workstation\workstation.log' -Tail 40
+  pnputil /enum-drivers | Select-String -Context 0,4 'BRPRF'   # your INF name
+  Get-PrinterDriver -Name '<the driver name you typed on upload>'
+  ```
+
+  The **driver name must match the INF exactly**: staging succeeds and the bind
+  then fails if it does not, which shows up as `Add-PrinterDriver` erroring in
+  the log while `pnputil` reported success. Then print a test page — a bound
+  queue is not a working one.
+
+  Worth testing deliberately, since it is the failure an operator will hit:
+  corrupt the package on the server volume, delete
+  `%PROGRAMDATA%\PrinterNanny\drivers`, and confirm the next poll reports
+  `driver package unusable: ... checksum mismatch` and provisions **nothing**
+  rather than unpacking it.
 
 Also verify an `ipp_disabled` printer is described as **IPP disabled on the
 device (port 631 refused)** and never as a driver problem — that distinction

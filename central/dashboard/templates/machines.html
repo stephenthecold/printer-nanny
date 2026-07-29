@@ -87,6 +87,78 @@
   </form>
 </div>
 
+{# ---------------------------------------------------------------- drivers -- #}
+<div class="{{ c.card_cls() }} mb-8">
+  {{ c.section_title("Vendor driver packages") }}
+  <p class="mb-4 text-sm text-slate-600">
+    For printers Windows' inbox driver can't drive. A package is downloaded,
+    <strong>checksum-verified</strong> and installed as LocalSystem on each machine
+    that needs it — so upload only drivers you trust. Printers with no matching
+    package stay skipped rather than bound to a wrong driver.
+  </p>
+
+  <div class="{{ c.table_wrap() }}">
+    <table class="{{ c.table_cls() }}">
+      <thead class="{{ c.thead_cls() }}">
+        <tr>
+          <th class="{{ c.th_cls() }}">Package</th>
+          <th class="{{ c.th_cls() }}">Windows driver name</th>
+          <th class="{{ c.th_cls() }}">Matches model</th>
+          <th class="{{ c.th_cls() }}">Size</th>
+          <th class="{{ c.th_cls('right') }}"><span class="sr-only">Actions</span></th>
+        </tr>
+      </thead>
+      <tbody>
+        {% for pkg, gone in drivers %}
+        <tr class="{{ c.tr_cls() }}">
+          <td class="{{ c.td_cls() }}">
+            <div class="font-medium text-slate-900">{{ pkg.name }}</div>
+            <div class="font-mono text-xs text-slate-500">{{ pkg.sha256[:16] }}…</div>
+            {% if gone %}
+              <div class="mt-1">{{ c.badge('File missing — re-upload', 'warning') }}</div>
+            {% endif %}
+          </td>
+          <td class="{{ c.td_cls() }}"><code class="text-xs">{{ pkg.driver_name }}</code></td>
+          <td class="{{ c.td_cls() }}">
+            {% if pkg.model %}{{ pkg.model }}{% else %}<span class="text-slate-400">any</span>{% endif %}
+          </td>
+          <td class="{{ c.td_cls() }}">{{ (pkg.size / 1048576) | round(1) }} MB</td>
+          <td class="{{ c.td_cls('right') }}">
+            <form method="post" action="/manage/machines/drivers/{{ pkg.id }}/delete" class="inline">
+              <button type="submit" class="{{ c.btn('danger', 'sm') }}"
+                      aria-label="Delete driver package {{ pkg.name }}">Delete</button>
+            </form>
+          </td>
+        </tr>
+        {% else %}
+          {{ c.empty_row(5, "No driver packages. driver_required printers are skipped.") }}
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+
+  <form method="post" action="/manage/machines/drivers/upload" enctype="multipart/form-data"
+        class="mt-4 grid gap-3 sm:grid-cols-2">
+    <input type="hidden" name="client_id" value="{{ client.id }}">
+    {{ c.field('name', 'Label', placeholder='Brother HL-L2350DW v1.2.3') }}
+    {{ c.field('driver_name', 'Windows driver name', required=True,
+               placeholder='Brother HL-L2350DW series',
+               help='Exactly as it appears in the INF — this is what binds the queue.') }}
+    {{ c.field('inf_relpath', 'INF path inside the archive', required=True,
+               placeholder='x64/BRPRF.INF') }}
+    {{ c.field('model', 'Match printers whose model contains',
+               placeholder='HL-L2350DW',
+               help='Blank matches any driver_required printer for this client. Min 3 characters.') }}
+    <label class="block sm:col-span-2">
+      <span class="text-xs text-slate-500">Package (.zip) <span class="text-red-600" aria-hidden="true">*</span></span>
+      <input type="file" name="package" accept=".zip" required class="{{ c.input_cls() }}">
+    </label>
+    <div class="sm:col-span-2">
+      <button type="submit" class="{{ c.btn('primary') }}">Upload package</button>
+    </div>
+  </form>
+</div>
+
 {# -------------------------------------------------------------- installer -- #}
 <div class="{{ c.card_cls() }} mb-8">
   {{ c.section_title("Windows installer") }}

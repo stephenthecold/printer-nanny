@@ -1072,3 +1072,70 @@ def adopt_by_name(
             return None
 
     return candidate
+
+
+# ----------------------- vendor driver packages ----------------------------- #
+
+#: A shorter tag would match a whole fleet. "HL" appears in every Brother model
+#: string; "HL-L2350DW" identifies one. Enforced on upload AND on match, so a
+#: row that predates the rule cannot quietly bind everything.
+MIN_DRIVER_MODEL_TAG = 3
+
+
+def driver_package_for(db: Session, printer: m.Printer) -> "Optional[m.DriverPackage]":
+    """The package that should drive this printer, or None.
+
+    Matching is a case-insensitive **substring** of ``printers.model``, not
+    equality: the model string comes from SNMP and varies by how the device
+    reports itself ("HL-L2350DW" vs "Brother HL-L2350DW series"), so equality
+    fails on exactly the value the printer actually returns.
+
+    The rules, all of which refuse rather than guess:
+
+    * **Tenant-scoped.** A package belongs to one client and can never drive
+      another's hardware.
+    * **A more specific match wins.** The longest matching tag is taken, so a
+      model-specific package beats a family-wide one without the operator
+      having to order them.
+    * **A tie is refused.** Two equally-specific packages means binding either
+      is a coin flip, and the wrong driver prints garbage -- worse than no queue
+      at all, which is the whole reason driver_required printers were skipped
+      rather than guessed in the first place.
+    * **A package whose file is missing does not match.** After a database
+      restore the rows survive and the bytes do not; returning one would send
+      the workstation to a download that 404s. Reported as "re-upload" instead.
+    """
+    from central import driver_store
+
+    model = (printer.model or "").strip().lower()
+    rows = db.scalars(
+        select(m.DriverPackage).where(m.DriverPackage.client_id == printer.client_id)
+    ).all()
+
+    usable = [r for r in rows if not driver_store.missing(r.stored_at)]
+
+    tagged = []
+    for row in usable:
+        tag = (row.model or "").strip().lower()
+        if len(tag) >= MIN_DRIVER_MODEL_TAG and model and tag in model:
+            tagged.append((len(tag), row))
+
+    if tagged:
+        best = max(t[0] for t in tagged)
+        winners = [r for length, r in tagged if length == best]
+        if len(winners) != 1:
+            import logging
+
+            logging.getLogger(__name__).warning(
+                "printer %s matches %d driver packages equally; refusing to guess",
+                printer.id, len(winners),
+            )
+            return None
+        return winners[0]
+
+    # Fall back to an untagged package -- the operator's "this client only has
+    # the one printer family" case. Still refused when ambiguous.
+    untagged = [r for r in usable if not (r.model or "").strip()]
+    if len(untagged) == 1:
+        return untagged[0]
+    return None

@@ -53,12 +53,17 @@ services:
       # Cache for the NSSM mirror (and other agent install artifacts). Persisted
       # so the upstream download only happens once per central server.
       PN_CACHE_DIR: /var/lib/printer-nanny/cache
+      # Uploaded vendor driver packages. On a volume rather than in the
+      # database so `pg_dump` backups stay small and fast -- the trade,
+      # surfaced in the UI, is that a DB restore does not bring them back.
+      PN_DRIVER_DIR: ${PN_DRIVER_DIR:-/var/lib/printer-nanny/drivers}
     # Exposed on the host so an external reverse proxy (your own Caddy / Nginx /
     # Traefik) can point at it. The bundled `caddy` service below is opt-in.
     ports:
       - "${API_PORT:-8000}:8000"
     volumes:
       - installer_cache:/var/lib/printer-nanny/cache
+      - driver_packages:/var/lib/printer-nanny/drivers
     depends_on:
       db:
         condition: service_healthy
@@ -181,3 +186,4 @@ volumes:
   caddy_data:
   caddy_config:
   installer_cache:
+  driver_packages:

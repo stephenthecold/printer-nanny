@@ -384,6 +384,21 @@ class MachineEnrolled(BaseModel):
     adopted: bool = False
 
 
+class MachineDriverOut(BaseModel):
+    """The vendor driver a driver_required printer needs.
+
+    ``sha256`` is not decoration: the client re-verifies the bytes it downloaded
+    against it before unpacking anything, so a package altered on the volume or
+    in transit never reaches pnputil.
+    """
+
+    package_id: int
+    driver_name: str
+    inf_relpath: str
+    sha256: str
+    size: int
+
+
 class MachinePrinterOut(BaseModel):
     """One queue the workstation should provision."""
 
@@ -393,6 +408,10 @@ class MachinePrinterOut(BaseModel):
     is_default: bool
     driver_tier: Optional[str] = None
     ipp_endpoint: Optional[str] = None
+    #: Present only for driver_required printers that have a usable package.
+    #: Absent means the client skips the queue with a stated reason rather than
+    #: binding a wrong driver.
+    driver: Optional[MachineDriverOut] = None
 
 
 class MachineAssignmentsOut(BaseModel):

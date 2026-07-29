@@ -14,7 +14,7 @@ import tempfile
 from pathlib import Path
 from typing import Optional
 
-from fastapi import APIRouter, Depends, Form, Request
+from fastapi import APIRouter, Depends, File, Form, Request, UploadFile
 from fastapi.responses import FileResponse, HTMLResponse
 from starlette.background import BackgroundTask
 from sqlalchemy import select
@@ -122,6 +122,20 @@ def machines_page(
                     (by_printer.get(a.printer_id), a.is_default)
                 )
 
+    drivers = []
+    if client is not None:
+        from central import driver_store
+
+        for row in db.scalars(
+            select(m.DriverPackage)
+            .where(m.DriverPackage.client_id == client.id)
+            .order_by(m.DriverPackage.name)
+        ):
+            # "missing" is the expected state after restoring a database onto a
+            # fresh host, so it is shown rather than left to be discovered when
+            # a workstation fails to provision.
+            drivers.append((row, driver_store.missing(row.stored_at)))
+
     return _tpl(
         request,
         "machines.html",
@@ -136,6 +150,7 @@ def machines_page(
         flash=_pop_flash(request),
         msi_available=_msi_cap().available,
         msi_reason=_msi_cap().reason,
+        drivers=drivers,
         # Shown exactly once, straight after minting, then gone. Held in the
         # session rather than the database because storing it would defeat the
         # point of hashing it in the first place.
@@ -487,3 +502,106 @@ def build_workstation_msi_route(
         filename=f"printer-nanny-workstation-{safe}.msi",
         background=BackgroundTask(shutil.rmtree, out_dir, ignore_errors=True),
     )
+
+
+@router.post("/machines/drivers/upload")
+async def upload_driver_package(
+    request: Request,
+    client_id: int = Form(...),
+    name: str = Form(""),
+    driver_name: str = Form(...),
+    inf_relpath: str = Form(...),
+    model: str = Form(""),
+    package: UploadFile = File(...),
+    db: Session = Depends(get_db),
+):
+    """Accept a vendor driver package.
+
+    WHAT AN ADMIN IS ACTUALLY DOING HERE
+    ------------------------------------
+    Uploading a binary that the workstation service will unpack and install with
+    ``pnputil`` as LocalSystem on every machine in this client that needs it.
+    That is code execution across a fleet -- it is what driver installation is,
+    and it is why this route is manager-only and audited, why the bytes are
+    checksummed on the way in and re-verified on the machine, and why the client
+    refuses archive entries that escape their target directory.
+    """
+    user = _manager(request, db)
+    if user is None:
+        return _redirect("/login")
+
+    from central import driver_store
+
+    client = db.get(m.Client, client_id)
+    if client is None:
+        _flash(request, "That client no longer exists.")
+        return _redirect("/manage/machines")
+
+    tag = (model or "").strip()
+    if tag and len(tag) < services.MIN_DRIVER_MODEL_TAG:
+        # A 1-2 character tag is a substring of nearly every model string, so it
+        # would bind this driver to the client's whole fleet.
+        _flash(request, "Model match needs at least 3 characters, or leave it blank.")
+        return _redirect(f"/manage/machines?client_id={client.id}")
+
+    row = m.DriverPackage(
+        client_id=client.id,
+        name=(name or "").strip()[:200] or (driver_name or "").strip()[:200],
+        driver_name=(driver_name or "").strip()[:255],
+        inf_relpath=(inf_relpath or "").strip()[:500],
+        model=tag[:200],
+        sha256="",
+        created_by_user_id=user.id,
+    )
+    db.add(row)
+    db.flush()  # need the id: the storage path is built from ids, never a filename
+
+    try:
+        sha, size = driver_store.save(client.id, row.id, package.file)
+    except Exception as exc:  # noqa: BLE001 - an upload failure is a flash, not a 500
+        db.rollback()
+        record(db, request, user, "driver_package.upload",
+               f"client:{client_id}", f"failed: {exc}")
+        db.commit()
+        _flash(request, f"Upload failed: {exc}")
+        return _redirect(f"/manage/machines?client_id={client_id}")
+
+    row.sha256, row.size = sha, size
+    row.stored_at = str(driver_store.path_for(client.id, row.id))
+    record(
+        db, request, user, "driver_package.upload", f"driver_package:{row.id}",
+        # The digest identifies exactly what will run on the fleet, which is the
+        # thing worth being able to check later.
+        f"client={client.id} driver={row.driver_name!r} model={row.model!r} "
+        f"sha256={sha} size={size}",
+    )
+    db.commit()
+    _flash(request, f"Uploaded {row.name} ({size // 1024} KB).")
+    return _redirect(f"/manage/machines?client_id={client.id}")
+
+
+@router.post("/machines/drivers/{package_id}/delete")
+def delete_driver_package(
+    package_id: int,
+    request: Request,
+    db: Session = Depends(get_db),
+):
+    user = _manager(request, db)
+    if user is None:
+        return _redirect("/login")
+
+    from central import driver_store
+
+    row = db.get(m.DriverPackage, package_id)
+    if row is None:
+        _flash(request, "That package no longer exists.")
+        return _redirect("/manage/machines")
+
+    client_id = row.client_id
+    driver_store.delete(row.stored_at)
+    record(db, request, user, "driver_package.delete", f"driver_package:{row.id}",
+           f"client={client_id} driver={row.driver_name!r} sha256={row.sha256}")
+    db.delete(row)
+    db.commit()
+    _flash(request, "Driver package removed. Printers using it are skipped again.")
+    return _redirect(f"/manage/machines?client_id={client_id}")
