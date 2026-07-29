@@ -14,8 +14,12 @@ reopens PrintNightmare. So the service installs on the user's behalf from a
 context that already has the privilege, and Point and Print never enters the
 picture.
 
-WHAT THIS MODULE DELIBERATELY DOES NOT DO
------------------------------------------
+THE TWO THINGS THAT LOOK LIKE SUCCESS WHEN THEY ARE NOT
+-------------------------------------------------------
+Both of these do real work, and both can fail in ways central would otherwise
+record as done. That is why each one verifies, and why each failure becomes a
+stated reason rather than an absence.
+
 **It sets the user's default printer by impersonating them, and verifies it.**
 The default is per-user state, so from LocalSystem the only correct way to touch
 it is to become that user for the duration: ``WTSQueryUserToken`` on the console
