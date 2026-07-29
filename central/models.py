@@ -1340,6 +1340,79 @@ class WorkstationEnrollKey(Base):
         return self.revoked_at is None
 
 
+class DriverPackage(Base):
+    """A vendor driver package an operator uploaded, for printers the Windows
+    inbox class driver cannot drive.
+
+    WHAT THIS FEATURE ACTUALLY IS
+    -----------------------------
+    An operator uploads an archive, and the workstation service unpacks it and
+    runs ``pnputil /add-driver`` **as LocalSystem** on every machine that needs
+    it. That is code execution across a client's fleet, by design -- it is what
+    driver installation *is*. So the controls are not decoration:
+
+    * Upload is admin-only and audited.
+    * ``sha256`` is computed on upload and **re-verified on the workstation**
+      before anything is unpacked, so a package altered on disk or in transit
+      never reaches ``pnputil``.
+    * The bytes live outside the database (see ``stored_at``), under a path
+      built only from integers -- never from an operator-supplied filename.
+    * Extraction on the client refuses entries that escape the target directory,
+      because an archive is attacker-shaped input the moment it is a file
+      somebody uploaded.
+
+    Windows' own requirement that x64 drivers be signed is a real backstop here,
+    but it is Microsoft's control, not ours, and an operator can disable it. It
+    is not what this design leans on.
+
+    MATCHING
+    --------
+    ``model`` is a case-insensitive substring matched against ``printers.model``
+    -- SNMP model strings vary ("HL-L2350DW" vs "Brother HL-L2350DW series"), so
+    exact equality would fail on the reading the device actually returns. A tag
+    must be at least 3 characters, or a short one would match a whole fleet.
+    Two packages matching one printer is refused rather than guessed, the same
+    discipline as machine adoption: an ambiguous driver bind prints garbage.
+    """
+
+    __tablename__ = "driver_packages"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    client_id: Mapped[int] = mapped_column(
+        ForeignKey("clients.id", ondelete="CASCADE"), index=True
+    )
+    #: Operator-facing label ("Brother HL-L2350DW, v1.2.3").
+    name: Mapped[str] = mapped_column(String(200))
+    #: The driver name EXACTLY as Windows knows it, which is what
+    #: ``Add-PrinterDriver -Name`` and ``Get-PrinterDriver`` take. It comes from
+    #: the INF, not from us, so it is operator-supplied and must match or the
+    #: staging step succeeds and the bind then fails.
+    driver_name: Mapped[str] = mapped_column(String(255))
+    #: Path of the .inf INSIDE the archive, relative to its root.
+    inf_relpath: Mapped[str] = mapped_column(String(500))
+    #: Substring matched against printers.model. Blank means "any
+    #: driver_required printer in this client that has no better match".
+    model: Mapped[str] = mapped_column(String(200), default="")
+
+    sha256: Mapped[str] = mapped_column(String(64))
+    size: Mapped[int] = mapped_column(Integer, default=0)
+    #: Absolute path on the central host. Derived from ids only, never from the
+    #: uploaded filename -- a filename is attacker-controlled and a path built
+    #: from one is a directory traversal waiting to happen.
+    stored_at: Mapped[str] = mapped_column(String(1000), default="")
+
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+    created_by_user_id: Mapped[Optional[int]] = mapped_column(
+        ForeignKey("users.id", ondelete="SET NULL"), default=None
+    )
+
+    client: Mapped[Client] = relationship()
+
+    __table_args__ = (
+        Index("ix_driver_packages_client_model", "client_id", "model"),
+    )
+
+
 class Machine(Base):
     """A workstation running the client. Tenant-scoped, like everything else.
 

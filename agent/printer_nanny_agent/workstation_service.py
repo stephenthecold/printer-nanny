@@ -25,21 +25,25 @@ keeps warning about: central reporting a default that the user does not have.
 So the desired default is recorded per queue and reported, and the queue is
 provisioned; making it *the* default is not claimed. See ``ProvisionReport``.
 
-**It does not stage vendor drivers.** ``driver_required`` printers need a driver
-package, and central does not yet carry one per printer. Those queues are
-skipped with a stated reason rather than provisioned wrong -- a queue bound to
-the wrong driver prints garbage, which is worse than no queue at all.
+**It does not stage vendor drivers UNLESS central supplies one.** A
+``driver_required`` printer whose client has a matching uploaded package gets
+that package downloaded, checksum-verified, unpacked and staged with
+``pnputil``. Without a package the queue is still skipped with a stated reason,
+because binding a wrong driver prints garbage -- worse than no queue at all.
 """
 
 from __future__ import annotations
 
+import hashlib
 import json
 import logging
 import os
+import shutil
 import stat
 import tempfile
 import time
 import uuid
+import zipfile
 from dataclasses import dataclass, field
 from typing import Dict, List, Optional, Tuple
 
@@ -241,6 +245,132 @@ def _translate_to_upn(sam: str) -> str:  # pragma: no cover - Windows-only
 
 
 # --------------------------------------------------------------------------- #
+# Vendor driver packages
+# --------------------------------------------------------------------------- #
+
+
+class DriverError(RuntimeError):
+    """A package could not be fetched, verified or unpacked. Never fatal to the
+    poll -- the queue is skipped with the reason and the rest still provision."""
+
+
+def _safe_extract(archive: str, dest: str) -> None:
+    """Unpack a zip, refusing any entry that escapes ``dest``.
+
+    An uploaded archive is attacker-shaped input, and the classic attack is an
+    entry named ``../../Windows/System32/...`` -- extracted naively, that writes
+    outside the temp directory as LocalSystem. Python's ``extractall`` does not
+    protect against this, so every member's resolved destination is checked to
+    be inside the target before anything is written.
+
+    Absolute paths, drive letters and symlink members are refused for the same
+    reason: each is a different spelling of "write somewhere I was not given".
+    """
+    root = os.path.realpath(dest)
+    with zipfile.ZipFile(archive) as zf:
+        for member in zf.infolist():
+            name = member.filename
+            if name.endswith("/"):
+                continue
+            if os.path.isabs(name) or ntpath_is_abs(name):
+                raise DriverError(f"archive entry is an absolute path: {name!r}")
+            target = os.path.realpath(os.path.join(root, name))
+            if target != root and not target.startswith(root + os.sep):
+                raise DriverError(f"archive entry escapes the target dir: {name!r}")
+            # Mode bits carry the symlink flag on zips written by unix tools.
+            if (member.external_attr >> 16) & 0o170000 == 0o120000:
+                raise DriverError(f"archive contains a symlink: {name!r}")
+        zf.extractall(root)
+
+
+def ntpath_is_abs(name: str) -> bool:
+    """Windows-absolute even when we are parsing on POSIX.
+
+    ``os.path.isabs`` on Linux says ``C:\\Windows`` is relative, which is
+    exactly wrong for an archive that will be unpacked on Windows -- the check
+    has to hold wherever the test suite runs, not only on the target.
+    """
+    n = (name or "").replace("/", "\\")
+    return n.startswith("\\") or (len(n) > 1 and n[1] == ":")
+
+
+def fetch_driver(
+    client: "WorkstationClient", driver: dict, cache_dir: str
+) -> str:
+    """Download and verify a package; return the directory it unpacked into.
+
+    Cached by **sha256**, not by package id: the digest is what was verified, so
+    a re-uploaded package under the same id gets a different cache entry rather
+    than silently reusing the old bytes.
+
+    The digest is checked BEFORE the archive is opened. Verifying after
+    unpacking would mean a hostile archive had already been written to disk.
+    """
+    sha = str(driver.get("sha256") or "")
+    if len(sha) != 64:
+        raise DriverError("driver package has no usable checksum")
+
+    unpacked = os.path.join(cache_dir, sha)
+    marker = os.path.join(unpacked, ".pn-ok")
+    if os.path.exists(marker):
+        return unpacked
+
+    os.makedirs(cache_dir, exist_ok=True)
+    archive = os.path.join(cache_dir, sha + ".pkg")
+    client.download_driver(int(driver["package_id"]), archive)
+
+    got = _sha256_file(archive)
+    if got != sha:
+        os.unlink(archive)
+        raise DriverError(
+            "driver package checksum mismatch (expected {}, got {})".format(
+                sha[:12], got[:12]
+            )
+        )
+
+    shutil.rmtree(unpacked, ignore_errors=True)
+    os.makedirs(unpacked, exist_ok=True)
+    try:
+        _safe_extract(archive, unpacked)
+    except Exception:
+        shutil.rmtree(unpacked, ignore_errors=True)
+        raise
+    finally:
+        try:
+            os.unlink(archive)
+        except OSError:
+            pass
+
+    with open(marker, "w", encoding="utf-8") as fp:
+        fp.write(sha)
+    return unpacked
+
+
+def _sha256_file(path: str) -> str:
+    digest = hashlib.sha256()
+    with open(path, "rb") as fp:
+        for chunk in iter(lambda: fp.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def inf_path_in(unpacked: str, inf_relpath: str) -> str:
+    """Resolve the INF inside an unpacked package, refusing to leave it.
+
+    ``inf_relpath`` is operator-typed, so it gets the same treatment as an
+    archive member: a path that resolves outside the package would hand pnputil
+    an arbitrary file on the workstation.
+    """
+    root = os.path.realpath(unpacked)
+    target = os.path.realpath(os.path.join(root, inf_relpath.replace("\\", os.sep)))
+    if target != root and not target.startswith(root + os.sep):
+        raise DriverError(f"inf path escapes the package: {inf_relpath!r}")
+    if not os.path.isfile(target):
+        raise DriverError(f"inf not found in package: {inf_relpath!r}")
+    return target
+
+
+# --------------------------------------------------------------------------- #
 # Turning assignments into queue specs
 # --------------------------------------------------------------------------- #
 
@@ -317,7 +447,19 @@ def build_specs(
                 continue
             specs.append({"name": name, "tier": "driverless", "uri": uri})
         elif tier == "driver_required":
-            skipped[name] = "needs a vendor driver; no driver package configured"
+            driver = printer.get("driver")
+            if not driver:
+                skipped[name] = "needs a vendor driver; no driver package configured"
+            elif not printer.get("ip"):
+                skipped[name] = "needs a vendor driver but central sent no address"
+            else:
+                specs.append({
+                    "name": name,
+                    "tier": "vendor",
+                    "host": printer["ip"],
+                    "driver": driver["driver_name"],
+                    "package": driver,
+                })
         elif tier == "ipp_disabled":
             skipped[name] = "IPP is disabled on the device (port 631 refused)"
         elif tier in ("unreachable", "error"):
@@ -332,10 +474,39 @@ def provision(
     runner: ws.PowerShellRunner,
     assignments: dict,
     prefix: str = MANAGED_PREFIX,
+    client: "Optional[WorkstationClient]" = None,
+    cache_dir: Optional[str] = None,
 ) -> ProvisionReport:
-    """Converge the spooler onto what central says this machine should have."""
+    """Converge the spooler onto what central says this machine should have.
+
+    Driver packages are resolved here rather than inside ``reconcile`` so that a
+    package that will not download, verify or unpack becomes a **skip with a
+    reason** rather than a queue failure -- the operator needs to know the
+    driver is the problem, not the printer.
+    """
     specs, skipped, desired_default = build_specs(assignments, prefix)
-    outcomes = ws.reconcile(runner, specs, managed_prefix=prefix)
+
+    ready = []
+    for spec in specs:
+        pkg = spec.pop("package", None)
+        if pkg is None:
+            ready.append(spec)
+            continue
+        if client is None:
+            skipped[spec["name"]] = "needs a vendor driver but no way to fetch it"
+            continue
+        try:
+            unpacked = fetch_driver(
+                client, pkg, cache_dir or os.path.join(default_state_dir(), "drivers")
+            )
+            spec["inf"] = inf_path_in(unpacked, pkg.get("inf_relpath") or "")
+            ready.append(spec)
+        except Exception as exc:
+            # Stated, never silent: an operator seeing "skipped" needs to know
+            # whether to re-upload the package or fix the printer.
+            skipped[spec["name"]] = f"driver package unusable: {exc}"
+
+    outcomes = ws.reconcile(runner, ready, managed_prefix=prefix)
     return ProvisionReport(
         outcomes=outcomes, skipped=skipped, desired_default=desired_default
     )
@@ -391,6 +562,23 @@ class WorkstationClient:
         )
         resp.raise_for_status()
         return resp.json()
+
+    def download_driver(self, package_id: int, dest: str) -> None:
+        """Stream a package to disk.
+
+        Streamed rather than held in memory: these are up to 512 MB, and a
+        workstation service that spikes half a gigabyte of RSS to install a
+        printer driver is one an admin kills.
+        """
+        url = (
+            f"{self._base}/api/v1/workstations/{self._machine_id}"
+            f"/drivers/{int(package_id)}"
+        )
+        with self._client.stream("GET", url) as resp:
+            resp.raise_for_status()
+            with open(dest, "wb") as fp:
+                for chunk in resp.iter_bytes(1024 * 1024):
+                    fp.write(chunk)
 
     def checkin(self, name: str) -> dict:
         resp = self._client.post(
@@ -475,7 +663,7 @@ def poll_once(
     offline instead.
     """
     payload = client.assignments(user=user)
-    report = provision(runner, payload, prefix)
+    report = provision(runner, payload, prefix, client=client)
     try:
         client.checkin(computer_name)
     except Exception as exc:

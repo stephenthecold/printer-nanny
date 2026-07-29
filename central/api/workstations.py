@@ -154,6 +154,7 @@ def machine_assignments(
                     else None
                 ),
                 ipp_endpoint=printer.ipp_endpoint,
+                driver=_driver_for(db, printer),
             )
         )
         if is_default:
@@ -166,6 +167,65 @@ def machine_assignments(
         ),
         default_printer_id=default_id,
         printers=printers,
+    )
+
+
+def _driver_for(db: Session, printer: m.Printer) -> "Optional[s.MachineDriverOut]":
+    """Attach a vendor driver only where one is actually needed and usable.
+
+    Deliberately not sent for driverless printers: Windows picks the inbox class
+    driver for those, and handing the client a vendor package as well would give
+    it a choice it has no business making.
+    """
+    tier = printer.driver_tier_override or printer.driver_tier
+    if tier != m.DriverTier.driver_required:
+        return None
+
+    pkg = services.driver_package_for(db, printer)
+    if pkg is None:
+        return None
+    return s.MachineDriverOut(
+        package_id=pkg.id,
+        driver_name=pkg.driver_name,
+        inf_relpath=pkg.inf_relpath,
+        sha256=pkg.sha256,
+        size=pkg.size,
+    )
+
+
+@router.get("/{machine_id}/drivers/{package_id}")
+def download_driver(
+    package_id: int,
+    machine: m.Machine = Depends(authenticated_machine),
+    db: Session = Depends(get_db),
+):
+    """Serve a driver package to an enrolled machine.
+
+    Tenant-scoped against the MACHINE's client, not a caller-supplied one -- a
+    machine must never be able to pull another customer's driver package by
+    guessing an id. A package belonging to another client is a plain 404, the
+    same answer as one that does not exist, so this cannot be used to probe
+    which ids are real.
+    """
+    from fastapi.responses import FileResponse
+
+    from central import driver_store
+
+    pkg = db.get(m.DriverPackage, package_id)
+    if pkg is None or pkg.client_id != machine.client_id:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "No such driver package")
+    if driver_store.missing(pkg.stored_at):
+        # The row survived a database restore and the bytes did not. A distinct
+        # code because it is an operator action (re-upload), not a client bug.
+        raise HTTPException(
+            status.HTTP_410_GONE, "Driver package file is missing; re-upload it"
+        )
+
+    return FileResponse(
+        path=pkg.stored_at,
+        media_type="application/octet-stream",
+        # Named from the id, never from anything an operator typed.
+        filename=f"driver-{pkg.id}.pkg",
     )
 
 

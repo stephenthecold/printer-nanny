@@ -515,9 +515,22 @@ above `PowerShellRunner` uses a fake, which is exactly the blindness that let
 tier 1 ship broken. Two deliberate gaps, both reported rather than silently
 skipped: it does **not** set the user's default printer (per-user registry state
 needing impersonation from LocalSystem — claiming a default the user lacks is
-the failure this codebase keeps warning about), and it does **not** stage vendor
-drivers, so `driver_required` printers are skipped with a reason rather than
-bound to a wrong driver. The providers are unit-tested against mocked
+the failure this codebase keeps warning about). It **does** stage vendor drivers:
+an admin uploads a package on the Machines page and the client downloads it,
+**re-verifies its SHA-256 before unpacking anything**, extracts it refusing any
+entry that escapes the target directory, and stages it with `pnputil` as
+LocalSystem. That is deliberate fleet-wide code execution — which is what driver
+installation *is* — so upload is manager-only and audited with the digest, the
+download is scoped to the requesting machine's own client (a foreign package id
+is a plain 404, not a 403, so it can't be used to probe), packages are cached by
+digest rather than id, and a package that will not fetch, verify or unpack
+becomes a **skip with a stated reason** rather than a wrong-driver bind. Matching
+is a case-insensitive substring of `printers.model` (SNMP strings vary), longest
+tag wins, minimum 3 characters, and an equal tie is **refused rather than
+guessed**. The bytes live on a volume (`central/driver_store.py`) not in the
+database, so `pg_dump` backups stay small — the trade, surfaced in the UI rather
+than left to be discovered, is that **a database restore does not bring driver
+packages back**. The providers are unit-tested against mocked
 transports, **not** against real tenants.
 - **The workstation client never interpolates a value into PowerShell.** Printer
   names, locations and comments come from devices on customer LANs and from
