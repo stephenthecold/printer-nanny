@@ -11,13 +11,13 @@ end-to-end smoke, found **seven** defects).
 Python 3.9.6, no Homebrew — including an actual `installer -pkg` of a `.pkg`
 built by `pkgbuild` on that machine, the LaunchDaemon loaded by launchd and
 running as root, and a queue provisioned and a console user's default set by that
-daemon. That run found an **eighth** defect, which is described below and which
-nothing short of an install could have found: enrollment sat outside the poll
-loop's retry handler, so a central it could not resolve killed the process,
-launchd respawned it every 60s, and the daemon log grew ~9.8 MB/day of
-tracebacks. What is *still* unverified is listed at the end: **a page has never
-come out**, and MDM, a non-English Mac, fast user switching and a
-directory-bound Mac remain untouched.
+daemon — **and a page has come out of a real printer.** That run found an
+**eighth** defect, which is described below and which nothing short of an install
+could have found: enrollment sat outside the poll loop's retry handler, so a
+central it could not resolve killed the process, launchd respawned it every 60s,
+and the daemon log grew ~9.8 MB/day of tracebacks. What is *still* unverified is
+listed at the end: MDM, notarization, a non-English Mac, fast user switching, the
+login-window case, a directory-bound Mac and Intel hardware remain untouched.
 
 | | **Site agent** | **Workstation client** |
 |---|---|---|
@@ -303,8 +303,18 @@ unchecked is genuinely outstanding.
 
 - [x] A `driverless` printer assigned to the machine appears within one poll.
       *(Created by the root LaunchDaemon, not by a hand-run client.)*
-- [ ] It prints a test page. *(Nothing short of this proves the path works.)*
-      **Still outstanding** — no printer was reachable from the test host.
+- [x] It prints a test page. *(Nothing short of this proves the path works.)*
+      **Done 2026-07-30**, and it is the only item here that could not be
+      substituted for: a Brother MFC-L8900CDW at
+      `ipp://BRW30C9AB0B3F71.local.:631/ipp/print`, queue provisioned by the root
+      LaunchDaemon, PPD generated from the device's own attributes
+      (`MFC-L8900CDW series - IPP Everywhere`), job ~39s in `now printing`, then
+      completed with nothing in `error_log`. Two things made it evidence rather
+      than a green log line: the device's **real supply telemetry** came back
+      through the queue during the print (`marker-types=toner,toner,toner,toner`,
+      `marker-levels=0,20,20,20`, `printer-state-reasons=toner-low-warning`),
+      which no loopback or synthetic queue produces — and the **paper was
+      confirmed by hand**.
 - [x] `lpstat -v` shows the URI central sent.
 - [x] The queue is **not shared** (`lpoptions -p NAME | tr ' ' '\n' | grep shared`
       → `printer-is-shared=false`). A shared queue advertises a workstation's
