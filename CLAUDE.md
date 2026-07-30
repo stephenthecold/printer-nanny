@@ -655,10 +655,35 @@ launchd *requires* the plist to be world-readable, so the key lives in a 0600
 `workstation.toml` and only its path is in the plist.
 `tests/test_macos_deployment.py` asserts that against both the reviewable plist
 and the one the installer generates, since they are two files and only one ships.
+
+**On Windows that rule is only half-applied, and the missing half undoes it.**
+Verified on a real install 2026-07-30: the MSI lays `workstation.toml` down in
+`C:\Program Files\Printer Nanny\Workstation\` and sets **no ACL at all** — no
+`LockPermissions`, no `MsiLockPermissionsEx`, no custom action, and
+`msi_builder.py` has no permission handling of any kind. `icacls` on the installed
+file reports `BUILTIN\Users:(I)(RX)` — inherited from Program Files — plus
+`ALL APPLICATION PACKAGES:(I)(RX)`. So the enrollment key is moved off the command
+line, where any logged-in user could read it, into a file **any logged-in user can
+also read**. The same holds for the agent MSI, whose `config.toml` carries an API
+key or claim code to the same tree. The correct code already exists in the sibling
+installer: `deploy/install-agent.ps1` calls `SetAccessRuleProtection($true,$false)`
+and restricts to SYSTEM + Administrators, commented "api_key is a secret" — the MSI
+path never got it, and macOS enforces the equivalent with 0700/0600. **The fix is
+not a one-liner**: `wixl` rejects WiX's `<Permission>` element outright
+(`unhandled child File node Permission`), so it needs a post-processed
+`LockPermissions` table, a service-side tightening on first run (which leaves a
+window), or moving the credential out of Program Files.
+
 A build that fails rolls the key back,
 since a key minted for an installer that never existed is a live credential
-nobody holds. It has **never run against a real spooler** — every test
-above `PowerShellRunner` uses a fake, which is exactly the blindness that let
+nobody holds. As of **2026-07-30 it HAS run against a real spooler**: the MSI was
+built, installed with `msiexec /qn` on Windows 11 (ARM64, under x64 emulation —
+the bundled runtime is `python-3.12.10-embed-amd64` and there is no ARM64 build),
+the service enrolled as LocalSystem, `scripts/windows_provision_check.py` passed
+against a real Brother (port `WSD-…` that Windows chose, monitor **not** Standard
+TCP/IP, inbox IPP class driver), and the service provisioned a queue that
+converged. That run found the **default-printer defect** below. Everything above
+`PowerShellRunner` still uses a fake in CI, which is the blindness that let
 tier 1 ship broken. It **sets the user's default printer** by impersonating the
 console session (`WTSQueryUserToken` → `ImpersonateLoggedOnUser` → Win32
 `SetDefaultPrinter`,
@@ -673,8 +698,25 @@ that off an assigned default appears to apply and then quietly does not. Turning
 it off overrides a user-facing preference, so it is a setting
 (`workstation.manage_default_printer`, sent per poll so an operator can change
 their mind without reinstalling) and the outcome is reported per machine. A
-default is **never** pointed at a queue that was skipped or errored. It **does**
-stage vendor drivers:
+default is **never** pointed at a queue that was skipped or errored.
+
+**And that write is where the feature was broken, for as long as it existed.**
+`_stop_windows_managing_default` wrote `LegacyDefaultPrinterMode` through
+`HKEY_CURRENT_USER` "while impersonating, so it lands in that user's hive" — but
+HKCU resolves against the **process** token, not the thread's, so in a session-0
+service running as LocalSystem it never leaves SYSTEM's hive. Under NSSM on a real
+Windows 11 machine it raised `[WinError 5] Access is denied`, and because the
+write runs *before* `SetDefaultPrinter` it took the whole feature down: with the
+shipped default (that setting is ON) an assigned default **never applied at
+all**. Isolated by flipping `manage_default_printer` off, which made the same poll
+succeed. `RegOpenCurrentUser` resolves the **thread** token's hive and fixes it —
+verified in the service context, with `LegacyDefaultPrinterMode=1` landing in the
+console user's hive where it had stayed 0. Two traps worth keeping: the identical
+call **succeeds outside the service**, so only the service context reaches it; and
+reading the result back with a tool running as SYSTEM reads SYSTEM's default, not
+the user's — check `HKEY_USERS\<sid>\…\Windows\Device` instead. That is the same
+"verify as the right user" rule the macOS backend documents, learned again from
+the other side. It **does** stage vendor drivers:
 an admin uploads a package on the Machines page and the client downloads it,
 **re-verifies its SHA-256 before unpacking anything**, extracts it refusing any
 entry that escapes the target directory, and stages it with `pnputil` as

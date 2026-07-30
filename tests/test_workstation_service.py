@@ -197,6 +197,49 @@ def test_the_same_uid_is_sent_on_re_enrollment(tmp_path):
     assert central.enroll_calls[0][1] == uid
 
 
+# ---------------- the default printer writes the RIGHT user's hive ---------- #
+#
+# _stop_windows_managing_default cannot be exercised off Windows, so these are
+# structural assertions in the same spirit as the _SCRIPT_* placeholder tests:
+# they pin the one call that made the difference. HKEY_CURRENT_USER resolves
+# against the PROCESS token, so in a session-0 service running as LocalSystem it
+# stays on SYSTEM's hive however the thread is impersonating. Measured on a real
+# Windows 11 box under NSSM: [WinError 5], raised before SetDefaultPrinter, so
+# with the shipped default an assigned default never applied at all.
+
+
+def test_the_default_printer_write_follows_the_impersonated_user():
+    import ast
+    import inspect
+
+    src = inspect.getsource(svc._stop_windows_managing_default)
+    # Compare the CODE, not the prose: the docstring names the wrong constant on
+    # purpose, to explain why it is wrong.
+    tree = ast.parse(src.strip())
+    body = tree.body[0].body
+    if isinstance(body[0], ast.Expr) and isinstance(body[0].value, ast.Constant):
+        body = body[1:]  # drop the docstring
+    code = "\n".join(ast.unparse(n) for n in body)
+
+    assert "RegOpenCurrentUser" in code, (
+        "the LegacyDefaultPrinterMode write must resolve the THREAD token's hive"
+    )
+    assert "HKEY_CURRENT_USER" not in code, (
+        "HKEY_CURRENT_USER follows the process token, not the impersonation -- "
+        "in a session-0 service it is SYSTEM's hive, and the write is refused"
+    )
+
+
+def test_the_registry_write_runs_before_the_default_is_set():
+    """Ordering is why this defect was total rather than partial: anything the
+    registry write raises takes the whole feature down with it."""
+    import inspect
+
+    src = inspect.getsource(svc._windows_set_default_printer)
+    assert "if manage_windows_default:" in src
+    assert src.index("if manage_windows_default:") < src.index("SetDefaultPrinterW")
+
+
 # ------------------- enrollment is inside the retry loop -------------------- #
 #
 # These cover a defect found by installing on a real Mac and nothing else: the
