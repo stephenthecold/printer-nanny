@@ -792,6 +792,36 @@ transports, **not** against real tenants.
   on 2019**, so tier 1 probes for it and refuses outright when missing. (The
   Server 2016→2025 matrix elsewhere is about the *site agent* MSI, which is an
   SNMP poller and never touches this path.)
+- **A fourth instance, and the check itself did not catch it (2026-07-30).** The
+  MSI was installed on real Windows 11 and the service provisioned a queue
+  against a real Brother. `windows_provision_check.py` **passed** — port not
+  derived, monitor not Standard TCP/IP, inbox IPP class driver, second pass a
+  no-op — and the queue **could not print**. `PrintService/Operational` (off by
+  default, so enable it before believing a queue works) recorded
+  `id=842 … Win32 error code returned by the print processor: 0x80004005` and
+  **no `id=307` "Document printed"**. The job spooled, failed, and was discarded
+  while `PrinterStatus=Normal`, `DetectedErrorState=0`, zero jobs pending. Raw
+  bytes to the same device on TCP/9100 from the same VM printed fine, so the
+  device and the network path were never in question. Two things made it
+  invisible:
+  - **The disproof was reading a label, not the transport.** `port_detail`
+    returned only `Description`, and on a `-IppURL` queue `Description = "IPP
+    Port"` while `PortMonitor = "WSD Port Monitor"`. Both the client and the
+    check asserted against the description, so any non-Standard-TCP/IP *string*
+    passed. Now fixed: `port_transport()` prefers the monitor, and the check
+    prints description, monitor and host address separately.
+  - **The port is identity-addressed, not address-addressed.** Its registry
+    entry is `Printer UUID = e3248000-…` with `Install Protocol = 1` and an
+    empty `PrinterHostAddress`. `Add-Printer -IppURL` uses the URL to query the
+    device at creation and then stores a UUID it must re-resolve by discovery at
+    print time. WS-Discovery is link-local (and 5357 was filtered to this
+    device), so across a routed subnet, a NAT or a VPN the queue converges clean
+    forever and cannot print. **That is the normal MSP topology** — workstations
+    printing to printers on another VLAN — so this is not an exotic case.
+  The general lesson, for the fourth time: a queue that exists, lists and
+  converges is not a queue that prints, and every proxy for "it works" that does
+  not involve paper has now failed at least once. **The only sufficient check is
+  a printed page**, and `windows_provision_check.py` says so but cannot do it.
 - **Nothing above the seam could have caught that.** `tests/windows/` never
   called `ensure_driverless_queue` — all 15 spooler tests drove `_converge` with
   `port_name_for("127.0.0.1")` and a local driver, so an `ipp://` URI never once

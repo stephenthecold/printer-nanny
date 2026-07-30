@@ -120,8 +120,13 @@ def main(argv: Optional[List[str]] = None) -> int:
             )
 
         detail = ws.port_detail(runner, state.port) if state.port else {}
-        print("      monitor: {}".format(detail.get("description") or "(none)"))
-        if ws.STANDARD_TCP_MONITOR in (detail.get("description") or "").lower():
+        # Description and PortMonitor are different fields and they DISAGREE on a
+        # -IppURL queue: description "IPP Port", monitor "WSD Port Monitor". Print
+        # both, and assert against the monitor -- the description is a label.
+        print("      description: {}".format(detail.get("description") or "(none)"))
+        print("      monitor:     {}".format(detail.get("monitor") or "(none)"))
+        print("      host address: {}".format(detail.get("host_address") or "(none -- identity-addressed)"))
+        if ws.STANDARD_TCP_MONITOR in ws.port_transport(detail):
             failures.append(
                 "port is on the Standard TCP/IP monitor, which speaks only "
                 "RAW/LPR -- this queue cannot carry IPP"
