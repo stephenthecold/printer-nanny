@@ -83,12 +83,65 @@ class ServiceError(RuntimeError):
     """Enrollment or configuration failed in a way retrying will not fix."""
 
 
+class DefaultPrinterError(RuntimeError):
+    """The default could not be set or could not be verified. Never fatal --
+    the queues are already provisioned; only the default is in question.
+
+    Lives here rather than in a backend because every backend raises it and the
+    orchestrator catches it; putting it in one platform module would make the
+    others import that platform to raise their own errors.
+    """
+
+
+def _platform():
+    """The backend for this OS, resolved per call so tests can substitute one."""
+    from printer_nanny_agent import platforms
+
+    return platforms.current()
+
+
+def _platform_runner():
+    """The command seam this OS's backend needs, or None where it needs none.
+
+    Windows supplies ``PowerShellRunner``; CUPS is driven by argv with no shell,
+    so macOS needs nothing. Asked of the backend rather than branched on here,
+    because a Mac constructing a PowerShellRunner -- which silently falls back to
+    the literal string "powershell" when it finds none -- is an object that
+    exists only to be ignored.
+    """
+    factory = getattr(_platform(), "make_runner", None)
+    return factory() if factory else None
+
+
+def default_state_dir() -> str:
+    """Where per-machine identity and credentials live, per platform.
+
+    ProgramData on Windows, /Library/Application Support on macOS -- in both
+    cases a machine-wide location an upgrade does not replace, because a client
+    that forgets its credential has to re-enroll to recover.
+    """
+    return _platform().default_state_dir()
+
+
+def console_user() -> Optional[str]:
+    """Who is signed in, as central identifies them, or None at the login screen."""
+    return _platform().console_user()
+
+
+def set_default_printer(name: str, *, manage_windows_default: bool = True) -> str:
+    """Make ``name`` the console user's default, verified. Raises on every
+    failure path with a stated reason."""
+    return _platform().set_default_printer(
+        name, manage_windows_default=manage_windows_default
+    )
+
+
 # --------------------------------------------------------------------------- #
 # Machine identity
 # --------------------------------------------------------------------------- #
 
 
-def default_state_dir() -> str:
+def _windows_state_dir() -> str:
     """Where the machine's identity and credentials live.
 
     ProgramData, not the install directory: an upgrade replaces program files
@@ -184,7 +237,7 @@ def machine_uid(state_dir: Optional[str] = None) -> str:
 # --------------------------------------------------------------------------- #
 
 
-def console_user() -> Optional[str]:
+def _windows_console_user() -> Optional[str]:
     """The UPN of whoever is at the console, or None at the login screen.
 
     Two Windows calls, because neither alone is enough. ``WTSQuerySessionInformation``
@@ -266,11 +319,6 @@ def _translate_to_upn(sam: str) -> str:  # pragma: no cover - Windows-only
 # --------------------------------------------------------------------------- #
 
 
-class DefaultPrinterError(RuntimeError):
-    """The default could not be set or could not be verified. Never fatal --
-    the queues are already provisioned; only the default is in question."""
-
-
 #: HKCU value that decides whether Windows re-points the default at whatever was
 #: printed to last. Absent or 0 means Windows manages it (the shipped default),
 #: 1 means the user's choice stands.
@@ -278,7 +326,9 @@ _LEGACY_MODE_KEY = r"Software\Microsoft\Windows NT\CurrentVersion\Windows"
 _LEGACY_MODE_VALUE = "LegacyDefaultPrinterMode"
 
 
-def set_default_printer(name: str, *, manage_windows_default: bool = True) -> str:
+def _windows_set_default_printer(
+    name: str, *, manage_windows_default: bool = True
+) -> str:
     """Make ``name`` the console user's default. Returns the verified name.
 
     Runs the whole thing **impersonating that user**, because the default is
@@ -631,11 +681,22 @@ def provision(
     """
     specs, skipped, desired_default = build_specs(assignments, prefix)
 
+    backend = _platform()
     ready = []
     for spec in specs:
         pkg = spec.pop("package", None)
         if pkg is None:
             ready.append(spec)
+            continue
+        if not getattr(backend, "SUPPORTS_VENDOR_DRIVERS", False):
+            # Downloading and unpacking a Windows driver archive on a platform
+            # that cannot stage it accomplishes nothing and unpacks untrusted
+            # bytes for no reason. Stated as a skip, which is what it is -- an
+            # unimplemented feature, not a failure of this printer.
+            skipped[spec["name"]] = (
+                f"needs a vendor driver; staging them is not supported on "
+                f"{getattr(backend, 'NAME', 'this platform')} yet"
+            )
             continue
         if client is None:
             skipped[spec["name"]] = "needs a vendor driver but no way to fetch it"
@@ -651,7 +712,24 @@ def provision(
             # whether to re-upload the package or fix the printer.
             skipped[spec["name"]] = f"driver package unusable: {exc}"
 
-    outcomes = ws.reconcile(runner, ready, managed_prefix=prefix)
+    outcomes = backend.provision_queues(runner, ready, managed_prefix=prefix)
+
+    # Report every queue under the name it actually has ON THE MACHINE.
+    #
+    # ``build_specs`` names queues for Windows, which accepts them verbatim. CUPS
+    # does not -- it rejects spaces outright -- so the macOS backend derives its
+    # own name and keys its outcomes by that. Without normalising here, one report
+    # carried two naming conventions and ``outcomes.get(desired_default)`` below
+    # missed **every time**: on a Mac the assigned default could never be applied,
+    # and the reason given was "its queue was not provisioned (skipped)" even when
+    # the queue had been created perfectly. Found by an end-to-end smoke against a
+    # real scheduler; nothing above the seam could see it, because the fake
+    # backend the unit tests use echoes the names it was handed.
+    name_of = getattr(backend, "queue_name", None) or (lambda value: value)
+    skipped = {name_of(key): why for key, why in skipped.items()}
+    if desired_default is not None:
+        desired_default = name_of(desired_default)
+
     report = ProvisionReport(
         outcomes=outcomes, skipped=skipped, desired_default=desired_default
     )
@@ -864,7 +942,7 @@ def run(
     import socket
 
     name = computer_name or os.environ.get("COMPUTERNAME") or socket.gethostname()
-    runner = runner or ws.PowerShellRunner()
+    runner = runner or _platform_runner()
     client = WorkstationClient(base_url, verify_tls=verify_tls)
     ensure_enrolled(
         client, enroll_key=enroll_key, computer_name=name, state_dir=state_dir

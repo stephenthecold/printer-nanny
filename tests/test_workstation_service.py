@@ -22,6 +22,23 @@ import pytest
 
 from printer_nanny_agent import workstation as ws
 from printer_nanny_agent import workstation_service as svc
+from printer_nanny_agent.platforms import windows as windows_backend
+
+
+@pytest.fixture(autouse=True)
+def _windows_backend(monkeypatch):
+    """Drive the orchestrator through the WINDOWS backend, on whatever host.
+
+    These tests have always exercised the Windows path -- before the platform
+    seam existed they reached it by monkeypatching ``ws.reconcile``. Now that
+    backend selection is explicit, so is this: without it the suite would pick
+    the "unsupported" backend on a Linux runner and assert nothing about either
+    real implementation.
+
+    ``platforms.windows.provision_queues`` looks ``ws.reconcile`` up at call
+    time, so the existing per-test monkeypatches still take effect through it.
+    """
+    monkeypatch.setattr(svc, "_platform", lambda: windows_backend)
 
 
 class FakeRunner:

@@ -28,6 +28,14 @@ from central.security import (
     hash_password,
 )
 from printer_nanny_agent import workstation_service as svc
+from printer_nanny_agent.platforms import windows as windows_backend
+
+
+@pytest.fixture(autouse=True)
+def _windows_backend(monkeypatch):
+    """Driver staging is the Windows pnputil path, so drive that backend
+    explicitly rather than whatever the test host happens to be."""
+    monkeypatch.setattr(svc, "_platform", lambda: windows_backend)
 
 
 # --------------------------------- helpers --------------------------------- #

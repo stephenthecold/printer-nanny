@@ -43,4 +43,25 @@ jobs:
           python -m pip install --upgrade pip
           pip install ./agent
           printer-nanny-agent --version
+          printer-nanny-workstation --help > /dev/null
           python -c "import printer_nanny_agent.poller, printer_nanny_agent.runner"
+          # Every subpackage, imported by name. setuptools' packages.find picks
+          # new ones up automatically, but a mistake there fails at INSTALL time
+          # on a customer's machine and nowhere else -- the providers/ layer
+          # already shipped broken once for exactly this reason. Importing each
+          # platform module explicitly also proves none of them needs its own OS
+          # to import, which is what lets the client fail with a sentence on a
+          # box that is neither Windows nor macOS.
+          python -c "
+          import printer_nanny_agent.providers
+          import printer_nanny_agent.platforms as p
+          from printer_nanny_agent.platforms import macos, unsupported, windows
+          import printer_nanny_agent.workstation, printer_nanny_agent.workstation_service
+          for backend in (macos, windows, unsupported):
+              for attr in ('NAME', 'SUPPORTS_VENDOR_DRIVERS', 'queue_name',
+                           'default_state_dir', 'console_user',
+                           'provision_queues', 'set_default_printer'):
+                  assert hasattr(backend, attr), (backend.NAME, attr)
+          assert p.current() is unsupported, p.current().NAME
+          print('agent package imports cleanly:', p.current().NAME)
+          "

@@ -1,0 +1,77 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  LaunchDaemon for the macOS workstation client. Installed by
+  deploy/install-workstation-macos.sh, which is the supported path; this file is
+  what that script writes, kept in the repo so it is reviewable.
+
+  A LaunchDaemon in /Library/LaunchDaemons, NOT a LaunchAgent in
+  ~/Library/LaunchAgents. Three reasons, each of which rules the Agent out:
+
+    * lpadmin needs root (or the lpadmin group), and queues are machine-wide. A
+      per-user Agent would provision a queue only while that user is logged in.
+    * the machine's credential lives in /Library/Application Support/PrinterNanny
+      and must not be readable by the user whose printers it manages.
+    * the client sets the CONSOLE user's default printer by running lpoptions as
+      that user. An Agent already running as one person could not switch to
+      whoever is at the console after a fast user switch.
+
+  Contrast the site agent's plist next door, which IS a LaunchAgent: it only
+  polls printers over SNMP and needs no privilege at all.
+
+  WHY THE KEY IS NOT IN THIS FILE
+  ===============================
+  ProgramArguments and EnvironmentVariables are readable by any local user
+  (launchctl print system/com.printernanny.workstation), and launchd requires
+  this plist to be world readable. So the enrollment key lives in
+  workstation.toml at mode 0600 under the state directory, and only its *path*
+  appears here. Same rule as the Windows service, whose command line is likewise
+  readable by any logged in user.
+-->
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.printernanny.workstation</string>
+
+    <key>ProgramArguments</key>
+    <array>
+        <string>/usr/local/bin/printer-nanny-workstation</string>
+        <string>--config</string>
+        <string>/Library/Application Support/PrinterNanny/workstation.toml</string>
+    </array>
+
+    <!-- Root: lpadmin, the state directory, and running lpoptions as the
+         console user all need it. -->
+    <key>UserName</key>
+    <string>root</string>
+
+    <key>RunAtLoad</key>
+    <true/>
+
+    <!-- The client polls forever on its own interval, so a clean exit means
+         something went wrong. SuccessfulExit false restarts it on failure but
+         not on a deliberate stop, so launchctl bootout actually stops it
+         instead of fighting launchd. -->
+    <key>KeepAlive</key>
+    <dict>
+        <key>SuccessfulExit</key>
+        <false/>
+    </dict>
+
+    <!-- launchd's default is 1s, which turns a bad enrollment key into a restart
+         loop that buries the reason. The CLI exits 2 for a terminal enrollment
+         failure; 60s makes that legible in the log. -->
+    <key>ThrottleInterval</key>
+    <integer>60</integer>
+
+    <!-- Not LowPriorityIO or a Nice value: converging queues is interactive from
+         the user's point of view, since they are waiting to be able to print. -->
+    <key>ProcessType</key>
+    <string>Interactive</string>
+
+    <key>StandardOutPath</key>
+    <string>/Library/Logs/PrinterNanny/workstation.log</string>
+    <key>StandardErrorPath</key>
+    <string>/Library/Logs/PrinterNanny/workstation.log</string>
+</dict>
+</plist>
