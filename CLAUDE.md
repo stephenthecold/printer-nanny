@@ -498,9 +498,9 @@ different levels of proof:
 - **The site agent and the whole central surface run in production.** Treat these
   as verified.
 - **The macOS workstation client is verified against a real CUPS scheduler, a
-  real `pkgbuild`, and — since 2026-07-30 — a real Mac, including an actual
-  `installer -pkg` and the LaunchDaemon running as root.** A page has still never
-  come out of a printer. See below for exactly which parts.
+  real `pkgbuild`, and — since 2026-07-30 — a real Mac: an actual
+  `installer -pkg`, the LaunchDaemon running as root, and a page out of a real
+  printer.** See below for exactly which parts, and what is still untouched.
 - **The Windows workstation client has never executed against a real spooler,
   driver store or console session.** Queue provisioning, driver staging, the
   default printer, the MSI — every test above `PowerShellRunner` uses a fake,
@@ -543,11 +543,20 @@ re-raises, because terminal is not transient. Note the trap left behind:
 manager will not loop — but the plist's `KeepAlive{SuccessfulExit=false}` restarts
 on any non-zero exit, so on macOS it loops anyway.
 
-What is **still** unverified: **printing a page** — nothing above gets near it, and
-no printer was reachable from the test host. Also a non-English system locale, fast
-user switching, the login-window case, a directory-bound (AD/Entra) Mac, MDM
-interaction, notarization (needs a Developer ID certificate), Intel hardware, and
-the vendor-driver `pkg` shape with `allow_macos_pkg_install` enabled.
+**And a page came out**, which is the one item nothing else substitutes for: a
+Brother MFC-L8900CDW, on a queue the root daemon provisioned, with a PPD CUPS
+generated from that device's own IPP attributes. What makes it evidence rather
+than a green log line is that the device's **real supply telemetry came back
+through the queue while it printed** (`marker-levels=0,20,20,20`,
+`toner-low-warning`) — a loopback or synthetic queue cannot produce that — and the
+paper was confirmed by hand. So the tier-1 failure this codebase has now shipped
+three times (a queue that exists, lists, converges clean and cannot print) is
+excluded on macOS by observation rather than by inference.
+
+What is **still** unverified: a non-English system locale, fast user switching,
+the login-window case, a directory-bound (AD/Entra) Mac, MDM interaction,
+notarization (needs a Developer ID certificate), Intel hardware, and the
+vendor-driver `pkg` shape with `allow_macos_pkg_install` enabled.
 `deploy/MACOS-CLIENT-TESTING.md` tracks the list, with the done items marked and
 dated.
 
