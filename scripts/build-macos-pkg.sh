@@ -83,7 +83,15 @@ command -v productbuild >/dev/null || die "productbuild not found; install the X
 [ -x "$SCRIPTS/postinstall" ] || die "no executable postinstall at $SCRIPTS/postinstall"
 
 mkdir -p "$OUT_DIR"
-COMPONENT="$OUT_DIR/${PKG_NAME}-component.pkg"
+# The component package is an INTERMEDIATE and is kept out of $OUT_DIR, so that
+# directory only ever holds something shippable. It is installable on its own but
+# carries no Distribution -- so no volume-check and no product identity -- which
+# means an operator who picks it by mistake installs onto an OS the real installer
+# would have refused. Leaving two .pkg files side by side under one name is how
+# that mistake gets made.
+BUILD_DIR="$OUT_DIR/.build"
+mkdir -p "$BUILD_DIR"
+COMPONENT="$BUILD_DIR/${PKG_NAME}-component.pkg"
 DISTRIBUTION="$OUT_DIR/${PKG_NAME}-${VERSION}.pkg"
 SIGNED="$OUT_DIR/${PKG_NAME}-${VERSION}-signed.pkg"
 FINAL="$DISTRIBUTION"
@@ -125,7 +133,7 @@ pkgbuild \
   "$COMPONENT"
 
 say "productbuild"
-DIST_XML="$OUT_DIR/distribution.xml"
+DIST_XML="$BUILD_DIR/distribution.xml"
 cat > "$DIST_XML" <<XML
 <?xml version="1.0" encoding="utf-8"?>
 <installer-gui-script minSpecVersion="1">
@@ -149,7 +157,7 @@ cat > "$DIST_XML" <<XML
 XML
 productbuild \
   --distribution "$DIST_XML" \
-  --package-path "$OUT_DIR" \
+  --package-path "$BUILD_DIR" \
   "$DISTRIBUTION"
 
 if [ "$MODE" = "unsigned" ]; then

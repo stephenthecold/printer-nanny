@@ -515,3 +515,19 @@ def test_the_workflow_deletes_the_signing_keychain():
     body = WORKFLOW.read_text()
     assert "create-keychain" in body
     assert "delete-keychain" in body
+
+
+def test_the_component_package_is_kept_out_of_the_output_directory():
+    """It is installable but carries no Distribution -- so no volume-check and no
+    product identity -- which means an operator who picks it by mistake installs
+    onto an OS the real installer would have refused. Two .pkg files side by side
+    under one name is how that mistake gets made."""
+    body = BUILD_SH.read_text()
+    assert 'BUILD_DIR="$OUT_DIR/.build"' in body
+    assert 'COMPONENT="$BUILD_DIR/' in body
+    assert '--package-path "$BUILD_DIR"' in body
+
+
+def test_the_workflow_refuses_more_than_one_shippable_package():
+    body = WORKFLOW.read_text()
+    assert "holds more than one .pkg" in body

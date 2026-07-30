@@ -117,7 +117,11 @@ jobs:
       - name: Inspect the .pkg Apple's tooling produced
         run: |
           cd work
-          PKG=$(ls out/*.pkg | grep -v component | head -1)
+          # out/ now holds exactly one .pkg: the component intermediate lives in
+          # out/.build so it cannot be mistaken for the installer.
+          PKG=$(ls out/*.pkg)
+          [ "$(ls out/*.pkg | wc -l)" -eq 1 ] \
+            || { echo "::error::out/ holds more than one .pkg; which is the installer?"; exit 1; }
           echo "built: $PKG"
           echo "--- identifier / version / payload, per pkgutil ---"
           pkgutil --expand "$PKG" expanded
