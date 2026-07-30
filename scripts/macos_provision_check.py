@@ -414,6 +414,89 @@ def _clear_default(user: str) -> None:
         os.unlink(path)
 
 
+def check_vendor_drivers(c: Checks, ppd_path: str) -> None:
+    """The vendor-PPD path against a real scheduler.
+
+    The check that matters: `lpadmin -P` exits **0** for a PPD naming a filter
+    that is not installed, producing a queue that is created, listed, converged
+    and unable to print. cupsd knows -- `printer-state-reasons` carries
+    `cups-missing-filter-warning` -- so the bind is verified against its verdict
+    and unwound when it fails. Everything here is that claim, tested both ways.
+    """
+    print("\n== vendor drivers: a bind is only a success if cupsd agrees ==")
+
+    # A PPD whose filters resolve. Proven clean only when the BASELINE filter set
+    # is complete, so establish that first or the whole section proves nothing.
+    good = PREFIX + "Vendor_Good"
+    macos.remove_queue(good) if good in macos.list_queues() else None
+    try:
+        outcome = macos.ensure_vendor_queue(good, FAKE_A, ppd_path)
+    except Exception as exc:  # noqa: BLE001
+        c.eq("a good vendor PPD binds", f"{type(exc).__name__}: {exc}", "created")
+        return
+    c.eq("a good vendor PPD binds", outcome, "created")
+    c.truthy("the queue exists", good in macos.list_queues(), "present")
+    c.eq("it points where central said", macos.queue_uri(good), FAKE_A)
+    c.eq("cupsd reports no missing filter", macos.missing_filters(good), False)
+
+    # No network: unlike -m everywhere, a PPD bind never contacts the printer.
+    started = time.monotonic()
+    c.eq("a converged vendor queue is 'unchanged'",
+         macos.ensure_vendor_queue(good, FAKE_A, ppd_path), "unchanged")
+    c.pred("...and costs nothing", time.monotonic() - started,
+           lambda s: s < 2.0, "under 2s")
+    macos.remove_queue(good)
+
+    # THE ONE THAT MATTERS. A PPD naming a filter that does not exist.
+    bad_ppd = "/tmp/pn-check-missing-filter.ppd"
+    with open(bad_ppd, "w") as fp:
+        fp.write(MINIMAL_PPD.replace(
+            '*cupsFilter: "application/vnd.cups-postscript 0 -"',
+            '*cupsFilter: "application/vnd.cups-raster 100 rastertopnnope"',
+        ))
+    # Prove the PPD really does name a filter, so a pass is not vacuous.
+    body = open(bad_ppd).read()
+    c.truthy("the hostile PPD really names a nonexistent filter",
+             "rastertopnnope" in body, "the filter is in the PPD")
+
+    bad = PREFIX + "Vendor_Bad"
+    try:
+        got = macos.ensure_vendor_queue(bad, FAKE_A, bad_ppd)
+        c.eq("a PPD with a missing filter is refused", got, "DriverStagingError")
+    except macos.DriverStagingError as exc:
+        c.pred("a PPD with a missing filter is refused", str(exc),
+               lambda s: "missing filter" in s, "an error naming the missing filter")
+    except Exception as exc:  # noqa: BLE001
+        c.eq("a PPD with a missing filter is refused",
+             f"{type(exc).__name__}: {exc}", "DriverStagingError")
+    # The whole point: the queue must NOT be left behind, or it converges as
+    # "unchanged" forever while being unable to print.
+    c.truthy("...and the unusable queue was removed", bad not in macos.list_queues(),
+             "absent")
+
+    # A failed REPAIR unwinds to the previous URI rather than deleting a queue
+    # the user has -- same contract as the driverless path.
+    repair = PREFIX + "Vendor_Repair"
+    macos.ensure_vendor_queue(repair, FAKE_A, ppd_path)
+    try:
+        macos.ensure_vendor_queue(repair, FAKE_B, bad_ppd)
+        c.eq("a failed vendor repair is refused", "it succeeded", "DriverStagingError")
+    except macos.DriverStagingError:
+        c.truthy("a failed vendor repair is refused", True, "DriverStagingError")
+    c.eq("...and the URI was restored", macos.queue_uri(repair), FAKE_A)
+    c.eq("...and cupsd is still happy with it", macos.missing_filters(repair), False)
+    macos.remove_queue(repair)
+    os.unlink(bad_ppd)
+
+    # The system-PPD path's guard, against the real filesystem.
+    for hostile in ("/etc/shadow", "/tmp/x.ppd", "relative.ppd", ""):
+        try:
+            macos._resolve_system_ppd(hostile)
+            c.eq(f"system PPD {hostile!r} refused", "accepted", "DriverStagingError")
+        except macos.DriverStagingError:
+            c.truthy(f"system PPD {hostile!r} refused", True, "refused")
+
+
 def check_default_printer(c: Checks, user: str) -> None:
     print(f"\n== the default printer, written and read back as {user} ==")
     queue = PREFIX + "Default"
@@ -549,6 +632,7 @@ def main(argv=None) -> int:
         check_convergence(c, ppd_path, args.dead_uri)
         check_prefix_scoping(c)
         check_budget(c, args.dead_uri)
+        check_vendor_drivers(c, ppd_path)
         if args.as_user:
             check_default_printer(c, args.as_user)
         else:

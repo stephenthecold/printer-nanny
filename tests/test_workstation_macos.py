@@ -18,6 +18,7 @@ the unwind, the budget.
 
 from __future__ import annotations
 
+import hashlib
 import subprocess
 
 import pytest
@@ -778,32 +779,415 @@ def test_a_failed_queue_reports_the_real_reason_not_skipped(macos_provision, fak
 
 
 def test_skips_are_keyed_by_the_machines_name_too(macos_provision, fake):
-    """Otherwise central shows one printer twice under two spellings."""
+    """Otherwise central shows one printer twice under two spellings.
+
+    Uses a payload central would refuse to send -- a driver with no kind -- because
+    what is under test is the KEY, and every well-formed vendor payload now
+    reaches the queue path instead of the skip path.
+    """
     svc = macos_provision
     report = svc.provision(
-        None, _assignments(tier="driver_required", driver={"id": 1, "driver_name": "Brother QL-820NWB", "sha256": "x"}), "PN "
+        None,
+        _assignments(tier="driver_required", driver=None),
+        "PN ",
     )
     assert list(report.skipped) == ["PN_Front_Desk_MFP_(7)"]
-    assert "macos" in report.skipped["PN_Front_Desk_MFP_(7)"].lower()
 
 
-def test_a_mac_never_downloads_a_windows_driver_package(macos_provision, fake):
-    """It cannot stage it, so fetching and unpacking it is untrusted bytes
-    expanded for no reason."""
+# --------------------------------------------------------------------------- #
+# Vendor drivers: staging
+# --------------------------------------------------------------------------- #
+
+
+def _driver(kind, ref, **extra):
+    d = {
+        "package_id": 1,
+        "driver_name": "Acme 9000",
+        "inf_relpath": "",
+        "sha256": "b" * 64,
+        "size": 10,
+        "kind": kind,
+        "ref": ref,
+    }
+    d.update(extra)
+    return d
+
+
+def test_a_system_driver_is_never_downloaded(macos_provision, fake, monkeypatch):
+    """It has no bytes by design -- the vendor package came from MDM and central
+    recorded only the PPD path. A download would 404 forever."""
     svc = macos_provision
 
     class Boom:
         def download_driver(self, *a, **kw):
-            pytest.fail("a driver package was fetched on macOS")
+            pytest.fail("a system driver was downloaded")
 
+    monkeypatch.setattr(
+        macos, "_resolve_system_ppd", lambda ref: "/Library/Printers/acme.ppd"
+    )
     report = svc.provision(
         None,
-        _assignments(tier="driver_required", driver={"id": 1, "driver_name": "Brother QL-820NWB", "sha256": "x"}),
+        _assignments(
+            tier="driver_required",
+            driver=_driver("system", "/Library/Printers/acme.ppd"),
+        ),
         "PN ",
         client=Boom(),
     )
-    assert report.skipped
-    assert not report.outcomes
+    assert report.outcomes == {"PN_Front_Desk_MFP_(7)": "created"}
+    assert not report.skipped
+
+
+def test_a_pkg_driver_is_refused_when_the_setting_is_off(macos_provision, fake, tmp_path):
+    """A .pkg runs arbitrary root scripts, so it is opted into rather than
+    inherited from whoever may upload."""
+    svc = macos_provision
+    blob, digest = _zip_bytes({"Acme.pkg": "not really a package"})
+    payload = _assignments(
+        tier="driver_required",
+        driver=_driver("pkg", "/Library/Printers/a.ppd", sha256=digest),
+    )
+    payload["allow_macos_pkg_install"] = False
+    report = svc.provision(
+        None, payload, "PN ",
+        client=_FakeDownloader(blob), cache_dir=str(tmp_path),
+    )
+    outcome = report.outcomes["PN_Front_Desk_MFP_(7)"]
+    assert outcome.startswith("error:")
+    assert "turned off" in outcome
+
+
+def test_a_pkg_driver_is_installed_when_the_setting_is_on(
+    macos_provision, fake, tmp_path, monkeypatch
+):
+    svc = macos_provision
+    ran = []
+    monkeypatch.setattr(macos, "install_pkg", lambda p: ran.append(p))
+    monkeypatch.setattr(
+        macos, "_resolve_system_ppd", lambda ref: "/Library/Printers/a.ppd"
+    )
+    monkeypatch.setattr(macos, "_ppd_present", lambda ref: False)
+    fake.replies[("lpoptions", "-p")] = "printer-state-reasons=none"
+    blob, digest = _zip_bytes({"Acme.pkg": "not really a package"})
+    payload = _assignments(
+        tier="driver_required",
+        driver=_driver("pkg", "/Library/Printers/a.ppd", sha256=digest),
+    )
+    payload["allow_macos_pkg_install"] = True
+    report = svc.provision(
+        None, payload, "PN ",
+        client=_FakeDownloader(blob), cache_dir=str(tmp_path),
+    )
+    assert report.outcomes["PN_Front_Desk_MFP_(7)"] == "created"
+    assert len(ran) == 1 and ran[0].endswith("Acme.pkg")
+
+
+def test_a_tampered_package_never_reaches_the_installer(
+    macos_provision, fake, tmp_path, monkeypatch
+):
+    """The digest is checked BEFORE the archive is opened, so altered bytes never
+    become a root install."""
+    monkeypatch.setattr(
+        macos, "install_pkg", lambda p: pytest.fail("installed a tampered package")
+    )
+    svc = macos_provision
+    blob, _digest = _zip_bytes({"Acme.pkg": "x"})
+    payload = _assignments(
+        tier="driver_required",
+        driver=_driver("pkg", "/Library/Printers/a.ppd", sha256="c" * 64),
+    )
+    payload["allow_macos_pkg_install"] = True
+    report = svc.provision(
+        None, payload, "PN ",
+        client=_FakeDownloader(blob), cache_dir=str(tmp_path),
+    )
+    assert "checksum mismatch" in report.skipped["PN_Front_Desk_MFP_(7)"]
+
+
+def test_a_ppd_driver_binds_the_ppd_from_the_package(
+    macos_provision, fake, tmp_path
+):
+    """The whole shared path for real: download, verify, unpack, resolve the PPD
+    inside the archive, bind it, verify cupsd is happy."""
+    svc = macos_provision
+    fake.replies[("lpstat", "-v")] = ""
+    fake.replies[("lpoptions", "-p")] = "printer-state-reasons=none"
+    blob, digest = _zip_bytes({"drivers/acme.ppd": '*PPD-Adobe: "4.3"\n'})
+    report = svc.provision(
+        None,
+        _assignments(
+            tier="driver_required",
+            driver=_driver("ppd", "drivers/acme.ppd", sha256=digest),
+        ),
+        "PN ",
+        client=_FakeDownloader(blob),
+        cache_dir=str(tmp_path),
+    )
+    assert report.outcomes["PN_Front_Desk_MFP_(7)"] == "created"
+    bind = [c for c in fake.flat() if "-P " in c][0]
+    assert bind.endswith("drivers/acme.ppd -E")
+
+
+def _zip_bytes(members):
+    """A deterministic zip and its digest, so the SHARED fetch path -- download,
+    re-verify the checksum, refuse escaping entries, unpack -- runs for real
+    rather than being stubbed out. A mismatched digest here is indistinguishable
+    from a tampered package, which is the point."""
+    import io
+    import zipfile
+
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w") as zf:
+        for name, body in members.items():
+            zf.writestr(name, body)
+    blob = buf.getvalue()
+    return blob, hashlib.sha256(blob).hexdigest()
+
+
+class _FakeDownloader:
+    def __init__(self, blob):
+        self.blob = blob
+        self.calls = 0
+
+    def download_driver(self, package_id, dest):
+        self.calls += 1
+        with open(dest, "wb") as fp:
+            fp.write(self.blob)
+
+
+def test_an_unknown_driver_kind_is_refused_with_a_reason(
+    macos_provision, fake, tmp_path
+):
+    svc = macos_provision
+    blob, digest = _zip_bytes({"a.ppd": "x"})
+    report = svc.provision(
+        None,
+        _assignments(tier="driver_required", driver=_driver("dmg", "x", sha256=digest)),
+        "PN ",
+        client=_FakeDownloader(blob),
+        cache_dir=str(tmp_path),
+    )
+    outcome = report.outcomes["PN_Front_Desk_MFP_(7)"]
+    assert outcome.startswith("error:")
+    assert "unknown driver kind" in outcome
+
+
+def test_a_ppd_that_escapes_the_package_is_refused(tmp_path):
+    with pytest.raises(macos.DriverStagingError, match="escapes the package"):
+        macos._resolve_in_package(str(tmp_path), "../../etc/cups/cupsd.conf")
+
+
+def test_a_ppd_missing_from_the_package_is_refused(tmp_path):
+    with pytest.raises(macos.DriverStagingError, match="not found in the package"):
+        macos._resolve_in_package(str(tmp_path), "nope.ppd")
+
+
+def test_an_empty_ref_is_refused(tmp_path):
+    with pytest.raises(macos.DriverStagingError, match="does not say which file"):
+        macos._resolve_in_package(str(tmp_path), "")
+
+
+@pytest.mark.parametrize(
+    "ref",
+    [
+        "/etc/shadow",
+        "/tmp/evil.ppd",
+        "relative/path.ppd",
+        "",
+        "/Users/alice/.ssh/id_rsa",
+    ],
+)
+def test_a_system_ppd_outside_the_allowed_roots_is_refused(ref):
+    """`lpadmin -P` copies whatever it is handed into /etc/cups/ppd as root, so an
+    unconstrained operator-typed path is "read any root-readable file"."""
+    with pytest.raises(macos.DriverStagingError):
+        macos._resolve_system_ppd(ref)
+
+
+def test_a_symlink_out_of_an_allowed_root_is_refused(tmp_path, monkeypatch):
+    """realpath BEFORE the root check, or a symlink inside an allowed directory
+    smuggles an arbitrary file through."""
+    secret = tmp_path / "secret"
+    secret.write_text("x")
+    link = tmp_path / "link.ppd"
+    link.symlink_to(secret)
+    monkeypatch.setattr(macos, "_SYSTEM_PPD_ROOTS", (str(tmp_path) + "/link",))
+    with pytest.raises(macos.DriverStagingError, match="not under a directory"):
+        macos._resolve_system_ppd(str(link))
+
+
+def test_the_sole_installer_rule_refuses_ambiguity(tmp_path):
+    (tmp_path / "one.pkg").write_text("")
+    (tmp_path / "two.pkg").write_text("")
+    with pytest.raises(macos.DriverStagingError, match="refusing to guess"):
+        macos._sole_installer_in(str(tmp_path))
+
+
+def test_the_sole_installer_rule_refuses_none(tmp_path):
+    with pytest.raises(macos.DriverStagingError, match="no .pkg found"):
+        macos._sole_installer_in(str(tmp_path))
+
+
+def test_the_sole_installer_is_found_in_a_subdirectory(tmp_path):
+    sub = tmp_path / "Acme" / "inner"
+    sub.mkdir(parents=True)
+    target = sub / "Acme.pkg"
+    target.write_text("")
+    assert macos._sole_installer_in(str(tmp_path)) == str(target)
+
+
+def test_a_pkg_already_installed_is_not_reinstalled(monkeypatch, tmp_path):
+    """Otherwise a vendor package is reinstalled as root every five minutes."""
+    ran = []
+    monkeypatch.setattr(macos, "install_pkg", lambda p: ran.append(p))
+    monkeypatch.setattr(macos, "_resolve_system_ppd", lambda ref: str(tmp_path / "a.ppd"))
+    (tmp_path / "a.ppd").write_text("")
+    got = macos.stage_driver({
+        "driver_kind": "pkg",
+        "driver_ref": str(tmp_path / "a.ppd"),
+        "unpacked": str(tmp_path),
+        "allow_pkg_install": True,
+    })
+    assert got == str(tmp_path / "a.ppd")
+    assert ran == []
+
+
+def test_a_pkg_not_yet_installed_is_installed_once(monkeypatch, tmp_path):
+    ran = []
+    monkeypatch.setattr(macos, "install_pkg", lambda p: ran.append(p))
+    (tmp_path / "Acme.pkg").write_text("")
+    calls = {"n": 0}
+
+    def resolve(ref):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            raise macos.DriverStagingError("not there yet")
+        return "/Library/Printers/acme.ppd"
+
+    monkeypatch.setattr(macos, "_resolve_system_ppd", resolve)
+    got = macos.stage_driver({
+        "driver_kind": "pkg",
+        "driver_ref": "/Library/Printers/acme.ppd",
+        "unpacked": str(tmp_path),
+        "allow_pkg_install": True,
+    })
+    assert got == "/Library/Printers/acme.ppd"
+    assert ran == [str(tmp_path / "Acme.pkg")]
+
+
+# --------------------------------------------------------------------------- #
+# Vendor drivers: the bind must be verified, not assumed
+# --------------------------------------------------------------------------- #
+
+
+def test_a_vendor_bind_is_verified_against_cupsds_own_verdict(fake):
+    """lpadmin exits 0 for a PPD whose filters are absent, producing a queue that
+    is created, listed, converged and unable to print. cupsd says so in
+    printer-state-reasons, so that is what decides."""
+    fake.replies[("lpstat", "-v")] = ""
+    fake.replies[("lpoptions", "-p")] = "printer-state-reasons=none copies=1"
+    assert macos.ensure_vendor_queue("PN_A", URI, "/Library/Printers/a.ppd") == "created"
+    assert f"/usr/sbin/lpadmin -p PN_A -v {URI} -P /Library/Printers/a.ppd -E" in fake.flat()
+
+
+def test_a_bad_ppd_never_touches_the_real_queue_at_all(fake):
+    """The strongest form of "a failed change changes nothing".
+
+    Binding first and unwinding after CANNOT work here, and the live-scheduler
+    check proved it: `lpadmin -P` exits 0 having already replaced the PPD, so
+    restoring the URI leaves the queue on its old address with the new broken
+    PPD -- right URI, so it converges forever; broken PPD, so it cannot print.
+    The tier-1 failure, reintroduced by an incomplete unwind. So the PPD is tried
+    on a throwaway queue and the real one is only touched once it is proven.
+    """
+    fake.replies[("lpstat", "-v")] = ""
+    fake.replies[("lpoptions", "-p")] = (
+        "printer-state-reasons=cups-missing-filter-warning copies=1"
+    )
+    with pytest.raises(macos.DriverStagingError, match="missing filter"):
+        macos.ensure_vendor_queue("PN_A", URI, "/Library/Printers/a.ppd")
+    # Only the probe queue was ever created, and it was removed.
+    probe = macos.ppd_probe_name("/Library/Printers/a.ppd")
+    assert f"/usr/sbin/lpadmin -x {probe}" in fake.flat()
+    assert not [c for c in fake.flat() if " -p PN_A " in c]
+
+
+def test_a_bad_ppd_on_a_REPAIR_leaves_the_working_queue_alone(fake):
+    """A user with a working queue keeps it. No URI change, no re-bind, no
+    removal -- there is nothing to unwind because nothing was done."""
+    fake.replies[("lpstat", "-v")] = f"device for PN_A: {OTHER}\n"
+    fake.replies[("lpoptions", "-p")] = (
+        "printer-state-reasons=cups-missing-filter-warning"
+    )
+    with pytest.raises(macos.DriverStagingError):
+        macos.ensure_vendor_queue("PN_A", URI, "/Library/Printers/a.ppd")
+    assert not [c for c in fake.flat() if " -p PN_A " in c]
+    assert not [c for c in fake.flat() if "-x PN_A" in c]
+
+
+def test_the_probe_queue_is_removed_even_when_the_bind_fails(fake):
+    """Otherwise a dead probe queue accumulates in the user's printer list."""
+    fake.replies[("lpstat", "-v")] = ""
+    fake.replies[("lpadmin", "-P")] = macos.CupsError("lpadmin exited 1: bad ppd")
+    assert macos.ppd_is_usable("/Library/Printers/a.ppd") is False
+    probe = macos.ppd_probe_name("/Library/Printers/a.ppd")
+    assert f"/usr/sbin/lpadmin -x {probe}" in fake.flat()
+
+
+def test_the_probe_queue_carries_the_managed_prefix(fake):
+    """So a probe stranded by a kill is something reconcile will clean up, not an
+    orphan nobody owns."""
+    probe = macos.ppd_probe_name("/Library/Printers/Acme 9000.ppd")
+    assert probe.startswith(macos.cups_queue_prefix("PN "))
+    assert probe.endswith("_pnprobe")
+    assert len(probe) <= 127
+    # Two different PPDs must not collide on one probe name.
+    assert probe != macos.ppd_probe_name("/Library/Printers/Other.ppd")
+
+
+def test_the_probe_never_contacts_the_real_printer(fake):
+    """It exists to test a local file. Pointing it at the device would be a
+    connection attempt for no reason -- and would fail for a sleeping printer."""
+    fake.replies[("lpstat", "-v")] = ""
+    fake.replies[("lpoptions", "-p")] = "printer-state-reasons=none"
+    macos.ensure_vendor_queue("PN_A", "ipp://10.0.0.5:631/ipp/print", "/x/a.ppd")
+    probe_bind = [c for c in fake.flat() if "_pnprobe" in c and "-P" in c][0]
+    assert "10.0.0.5" not in probe_bind
+    assert "127.0.0.1" in probe_bind
+
+
+def test_an_unreadable_state_is_treated_as_a_failure(fake):
+    """If we cannot tell whether the filters resolve, we must not claim they do --
+    the opposite default reports a queue as working on a command that did not
+    run."""
+    fake.replies[("lpstat", "-v")] = ""
+    fake.replies[("lpoptions", "-p")] = macos.CupsError("boom")
+    with pytest.raises(macos.DriverStagingError):
+        macos.ensure_vendor_queue("PN_A", URI, "/Library/Printers/a.ppd")
+
+
+def test_a_converged_vendor_queue_costs_nothing(fake):
+    fake.replies[("lpstat", "-v")] = f"device for PN_A: {URI}\n"
+    assert macos.ensure_vendor_queue("PN_A", URI, "/Library/Printers/a.ppd") == "unchanged"
+    assert not [c for c in fake.flat() if "lpadmin" in c]
+    # Not re-verified either: the filters were checked when it was created, and a
+    # per-poll re-check spends a call to re-answer a question that only changes
+    # when somebody uninstalls the driver.
+    assert not [c for c in fake.flat() if "lpoptions" in c]
+
+
+def test_a_vendor_queue_is_unshared(fake):
+    fake.replies[("lpstat", "-v")] = ""
+    fake.replies[("lpoptions", "-p")] = "printer-state-reasons=none"
+    macos.ensure_vendor_queue("PN_A", URI, "/Library/Printers/a.ppd")
+    assert "/usr/sbin/lpadmin -p PN_A -o printer-is-shared=false" in fake.flat()
+
+
+def test_install_pkg_gets_a_longer_timeout_than_a_cups_call(fake):
+    macos.install_pkg("/tmp/a.pkg")
+    argv, _user, timeout = fake.calls[0]
+    assert argv == ["/usr/sbin/installer", "-pkg", "/tmp/a.pkg", "-target", "/"]
+    assert timeout > macos._TIMEOUT
 
 
 def test_a_mac_builds_no_powershell_runner(monkeypatch):

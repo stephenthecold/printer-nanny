@@ -1082,8 +1082,26 @@ def adopt_by_name(
 MIN_DRIVER_MODEL_TAG = 3
 
 
-def driver_package_for(db: Session, printer: m.Printer) -> "Optional[m.DriverPackage]":
-    """The package that should drive this printer, or None.
+def _driver_bytes_present(row: "m.DriverPackage") -> bool:
+    """Whether this package's payload is where it should be.
+
+    A ``system`` macOS package deliberately has none: the vendor ``.pkg`` was
+    pushed by MDM and this row records only the absolute path of the PPD it
+    installed. Running it through the missing-file check would disqualify every
+    such package on every poll, so the exemption is stated here rather than
+    special-cased at each call site.
+    """
+    from central import driver_store
+
+    if row.platform == "macos" and row.macos_kind == "system":
+        return True
+    return not driver_store.missing(row.stored_at)
+
+
+def driver_package_for(
+    db: Session, printer: m.Printer, platform: str = "windows"
+) -> "Optional[m.DriverPackage]":
+    """The package that should drive this printer on ``platform``, or None.
 
     Matching is a case-insensitive **substring** of ``printers.model``, not
     equality: the model string comes from SNMP and varies by how the device
@@ -1104,15 +1122,27 @@ def driver_package_for(db: Session, printer: m.Printer) -> "Optional[m.DriverPac
     * **A package whose file is missing does not match.** After a database
       restore the rows survive and the bytes do not; returning one would send
       the workstation to a download that 404s. Reported as "re-upload" instead.
-    """
-    from central import driver_store
+      A ``system`` macOS package is exempt: it has no bytes by design, because
+      the driver was installed out of band by MDM and only its PPD path is
+      recorded here.
 
+    * **Platform scopes the candidates BEFORE specificity is compared**, and that
+      ordering is a correctness requirement rather than a filter for tidiness. A
+      client holding both a Windows and a macOS package tagged for one printer
+      produces two equally-specific matches, which the ambiguity rule above
+      correctly refuses -- so adding macOS packages to a client would have
+      silently stopped the Windows staging that already worked. Scoping first
+      means the two platforms cannot collide at all.
+    """
     model = (printer.model or "").strip().lower()
     rows = db.scalars(
-        select(m.DriverPackage).where(m.DriverPackage.client_id == printer.client_id)
+        select(m.DriverPackage).where(
+            m.DriverPackage.client_id == printer.client_id,
+            m.DriverPackage.platform == platform,
+        )
     ).all()
 
-    usable = [r for r in rows if not driver_store.missing(r.stored_at)]
+    usable = [r for r in rows if _driver_bytes_present(r)]
 
     tagged = []
     for row in usable:

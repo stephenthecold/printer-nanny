@@ -502,3 +502,204 @@ def test_deleting_a_package_removes_the_bytes_too(db, tmp_path):
     _login().post(f"/manage/machines/drivers/{pkg.id}/delete", follow_redirects=False)
     assert db.scalar(select(m.DriverPackage)) is None
     assert not os.path.exists(stored), "the binary must not outlive its row"
+
+
+# --------------------------------------------------------------------------- #
+# Per-platform packages
+# --------------------------------------------------------------------------- #
+#
+# The defect this section exists for: matching is by model substring, so a client
+# holding a Windows AND a macOS package tagged for one printer produces two
+# equally-specific matches -- which the ambiguity rule correctly refuses. Adding
+# macOS support would therefore have SILENTLY BROKEN the Windows staging that
+# already worked. Platform scopes the candidates before specificity is compared.
+
+
+def _macos_package(db, client, tmp_path, *, kind, ref, model="HL-L2350DW"):
+    os.environ["PN_DRIVER_DIR"] = str(tmp_path)
+    row = m.DriverPackage(
+        client_id=client.id, name="mac pkg", driver_name="Acme 9000",
+        inf_relpath="", model=model, platform="macos",
+        macos_kind=kind, macos_ref=ref, sha256="", size=0,
+    )
+    db.add(row)
+    db.flush()
+    if kind != "system":
+        blob = _zip_bytes([(ref, b'*PPD-Adobe: "4.3"\n')])
+        sha, size = driver_store.save(client.id, row.id, io.BytesIO(blob))
+        row.sha256, row.size = sha, size
+        row.stored_at = str(driver_store.path_for(client.id, row.id))
+    db.commit()
+    return row
+
+
+def test_a_windows_package_is_the_default_platform(db, tmp_path):
+    """Every package uploaded before macOS support is a Windows one, and the
+    migration backfills them that way."""
+    client, printer = _client_with_printer(db, "Acme1", "10.9.0.1", model="HL-L2350DW")
+    row, _ = _package(db, client, tmp_path)
+    assert row.platform == "windows"
+    assert row.macos_kind is None
+
+
+def test_a_macos_package_does_not_shadow_the_windows_one(db, tmp_path):
+    """Both tagged for the same model. Before platform scoping this was an
+    ambiguous match and BOTH platforms got nothing."""
+    client, printer = _client_with_printer(db, "Acme2", "10.9.0.2", model="HL-L2350DW")
+    win, _ = _package(db, client, tmp_path)
+    mac = _macos_package(db, client, tmp_path, kind="ppd", ref="acme.ppd")
+
+    assert services.driver_package_for(db, printer, "windows") is win
+    assert services.driver_package_for(db, printer, "macos") is mac
+
+
+def test_matching_defaults_to_windows(db, tmp_path):
+    client, printer = _client_with_printer(db, "Acme3", "10.9.0.3", model="HL-L2350DW")
+    win, _ = _package(db, client, tmp_path)
+    _macos_package(db, client, tmp_path, kind="ppd", ref="acme.ppd")
+    assert services.driver_package_for(db, printer) is win
+
+
+def test_a_mac_with_no_macos_package_gets_nothing_not_the_windows_one(
+    db, tmp_path
+):
+    """Handing a Mac a Windows driver archive is worse than handing it nothing."""
+    client, printer = _client_with_printer(db, "Acme4", "10.9.0.4", model="HL-L2350DW")
+    _package(db, client, tmp_path)
+    assert services.driver_package_for(db, printer, "macos") is None
+
+
+def test_ambiguity_is_still_refused_within_one_platform(db, tmp_path):
+    client, printer = _client_with_printer(db, "Acme5", "10.9.0.5", model="HL-L2350DW")
+    _macos_package(db, client, tmp_path, kind="ppd", ref="a.ppd")
+    _macos_package(db, client, tmp_path, kind="ppd", ref="b.ppd")
+    assert services.driver_package_for(db, printer, "macos") is None
+
+
+def test_a_system_package_matches_although_it_has_no_bytes(db, tmp_path):
+    """The vendor package came from MDM, so this row records only a PPD path.
+    Running it through the missing-file check would disqualify it every poll."""
+    client, printer = _client_with_printer(db, "Acme6", "10.9.0.6", model="HL-L2350DW")
+    mac = _macos_package(
+        db, client, tmp_path, kind="system",
+        ref="/Library/Printers/PPDs/Contents/Resources/Acme.gz",
+    )
+    assert mac.stored_at == ""
+    assert services.driver_package_for(db, printer, "macos") is mac
+
+
+def test_a_macos_package_whose_bytes_are_missing_does_not_match(db, tmp_path):
+    """Unlike `system`, a `ppd` package does have bytes -- and after a database
+    restore the row survives while they do not."""
+    client, printer = _client_with_printer(db, "Acme7", "10.9.0.7", model="HL-L2350DW")
+    mac = _macos_package(db, client, tmp_path, kind="ppd", ref="a.ppd")
+    os.unlink(mac.stored_at)
+    assert services.driver_package_for(db, printer, "macos") is None
+
+
+def test_the_api_offers_the_package_for_the_platform_the_client_states(
+    db, tmp_path
+):
+    client, printer = _client_with_printer(db, "Acme8", "10.9.0.8", model="HL-L2350DW")
+    printer.driver_tier = m.DriverTier.driver_required
+    win, _ = _package(db, client, tmp_path)
+    mac = _macos_package(db, client, tmp_path, kind="ppd", ref="acme.ppd")
+    db.commit()
+
+    enrolled = _enrolled(db, client)
+    machine_id, key = enrolled["machine_id"], enrolled["api_key"]
+    db.add(m.PrinterAssignment(printer_id=printer.id, machine_id=machine_id))
+    db.commit()
+    tc = TestClient(app)
+    hdr = {"Authorization": f"Bearer {key}"}
+
+    win_body = tc.get(
+        f"/api/v1/workstations/{machine_id}/assignments?platform=windows", headers=hdr
+    ).json()
+    mac_body = tc.get(
+        f"/api/v1/workstations/{machine_id}/assignments?platform=macos", headers=hdr
+    ).json()
+    none_body = tc.get(
+        f"/api/v1/workstations/{machine_id}/assignments", headers=hdr
+    ).json()
+
+    def driver_of(body):
+        for p in body["printers"]:
+            if p["printer_id"] == printer.id:
+                return p["driver"]
+        return None
+
+    assert driver_of(win_body)["package_id"] == win.id
+    assert driver_of(win_body)["kind"] is None
+    assert driver_of(mac_body)["package_id"] == mac.id
+    assert driver_of(mac_body)["kind"] == "ppd"
+    assert driver_of(mac_body)["ref"] == "acme.ppd"
+    # No platform stated: a client older than macOS support, all of which are
+    # Windows. Falling back to nothing would break existing installs.
+    assert driver_of(none_body)["package_id"] == win.id
+
+
+def test_an_unknown_platform_falls_back_to_windows(db, tmp_path):
+    """Rather than 400-ing a client we may not have shipped yet."""
+    client, printer = _client_with_printer(db, "Acme9", "10.9.0.9", model="HL-L2350DW")
+    printer.driver_tier = m.DriverTier.driver_required
+    win, _ = _package(db, client, tmp_path)
+    db.commit()
+    enrolled = _enrolled(db, client)
+    machine_id, key = enrolled["machine_id"], enrolled["api_key"]
+    db.add(m.PrinterAssignment(printer_id=printer.id, machine_id=machine_id))
+    db.commit()
+    body = TestClient(app).get(
+        f"/api/v1/workstations/{machine_id}/assignments?platform=solaris",
+        headers={"Authorization": f"Bearer {key}"},
+    ).json()
+    assert body["printers"][0]["driver"]["package_id"] == win.id
+
+
+def test_the_platform_is_recorded_for_the_ui_but_not_trusted(db, tmp_path):
+    """A stored platform can be stale -- a PC re-imaged as a Mac keeps its row
+    through adoption -- so the driver decision reads the request, not the row."""
+    client, printer = _client_with_printer(db, "Acme10", "10.9.0.10", model="HL-L2350DW")
+    printer.driver_tier = m.DriverTier.driver_required
+    win, _ = _package(db, client, tmp_path)
+    mac = _macos_package(db, client, tmp_path, kind="ppd", ref="acme.ppd")
+    db.commit()
+    enrolled = _enrolled(db, client)
+    machine_id, key = enrolled["machine_id"], enrolled["api_key"]
+    db.add(m.PrinterAssignment(printer_id=printer.id, machine_id=machine_id))
+    db.commit()
+    hdr = {"Authorization": f"Bearer {key}"}
+    tc = TestClient(app)
+
+    # Recorded by CHECK-IN, not by the assignments GET -- a read path that writes
+    # is a surprise, and check-in runs on the same cadence.
+    tc.post(f"/api/v1/workstations/{machine_id}/checkin",
+            json={"name": "MAC-1", "platform": "macos"}, headers=hdr)
+    db.expire_all()
+    assert db.get(m.Machine, machine_id).platform == "macos"
+
+    # The assignments GET must not write, even when it disagrees with the row.
+    tc.get(f"/api/v1/workstations/{machine_id}/assignments?platform=windows",
+           headers=hdr)
+    db.expire_all()
+    assert db.get(m.Machine, machine_id).platform == "macos"
+
+    # The row now says macos. A Windows client asking must still get Windows.
+    body = tc.get(
+        f"/api/v1/workstations/{machine_id}/assignments?platform=windows", headers=hdr
+    ).json()
+    assert body["printers"][0]["driver"]["package_id"] == win.id
+    assert mac.id != win.id
+
+
+def test_the_pkg_install_gate_is_off_by_default(db, tmp_path):
+    """A .pkg runs arbitrary root scripts, so it must be opted into rather than
+    inherited from whoever may upload."""
+    client, printer = _client_with_printer(db, "Acme11", "10.9.0.11", model="HL-L2350DW")
+    enrolled = _enrolled(db, client)
+    machine_id, key = enrolled["machine_id"], enrolled["api_key"]
+    body = TestClient(app).get(
+        f"/api/v1/workstations/{machine_id}/assignments",
+        headers={"Authorization": f"Bearer {key}"},
+    ).json()
+    assert body["allow_macos_pkg_install"] is False

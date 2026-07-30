@@ -56,6 +56,9 @@ def enroll_workstation(
         raise HTTPException(status.HTTP_401_UNAUTHORIZED, "Invalid enrollment key")
 
     machine, api_key, created, adopted = result
+    plat = (payload.platform or "").strip().lower()
+    if plat in ("windows", "macos"):
+        machine.platform = plat
     # Adoption gets its own action rather than sharing "reenroll". One machine
     # taking over another record's printers by name is a different event from a
     # known machine refreshing its key, and an operator asking "why does this PC
@@ -89,6 +92,7 @@ def enroll_workstation(
 def machine_assignments(
     machine: m.Machine = Depends(authenticated_machine),
     user: Optional[str] = None,
+    platform: Optional[str] = None,
     db: Session = Depends(get_db),
 ) -> s.MachineAssignmentsOut:
     """What this machine should provision for the signed-in person.
@@ -106,7 +110,20 @@ def machine_assignments(
     An unmatched or absent user is **not** an error. A workstation at the login
     screen, or one where a person has not been synced yet, still gets the
     machine's own printers -- that is the entire point of a machine assignment.
+
+    ``platform`` decides which vendor driver package is offered, and it is taken
+    from the REQUEST rather than from ``machines.platform``. The stored column can
+    be stale -- a PC re-imaged as a Mac keeps its row through adoption -- and a
+    stale platform would hand a Mac a Windows driver archive. Absent means a
+    client older than macOS driver support, and every one of those in the field is
+    Windows, so that is what it falls back to; a macOS client always states it.
     """
+    asked = (platform or "").strip().lower()
+    driver_platform = asked if asked in ("windows", "macos") else "windows"
+    # Deliberately NOT recorded here. This is a GET, and a read path that writes
+    # is both a surprise and a commit per poll per machine; check-in already
+    # records the platform on the same cadence and is a POST. What this handler
+    # does with the value is decide, not remember.
     printers: list = []
     default_id: Optional[int] = None
 
@@ -154,7 +171,7 @@ def machine_assignments(
                     else None
                 ),
                 ipp_endpoint=printer.ipp_endpoint,
-                driver=_driver_for(db, printer),
+                driver=_driver_for(db, printer, driver_platform),
             )
         )
         if is_default:
@@ -162,10 +179,19 @@ def machine_assignments(
 
     from central.runtime import load_settings
 
+    _settings = load_settings(db)
     return s.MachineAssignmentsOut(
         machine_id=machine.id,
         manage_default_printer=bool(
-            load_settings(db).get("workstation.manage_default_printer", True)
+            _settings.get("workstation.manage_default_printer", True)
+        ),
+        # Sent per poll rather than baked into the installer, so an operator can
+        # withdraw the permission without touching every Mac. Default OFF: a
+        # .pkg runs arbitrary pre/postinstall scripts as root, which is broader
+        # than pnputil, so an existing manager permission must not silently
+        # widen into it.
+        allow_macos_pkg_install=bool(
+            _settings.get("workstation.allow_macos_pkg_install", False)
         ),
         resolved_for=(
             (end_user.upn or end_user.email) if end_user is not None else None
@@ -175,7 +201,9 @@ def machine_assignments(
     )
 
 
-def _driver_for(db: Session, printer: m.Printer) -> "Optional[s.MachineDriverOut]":
+def _driver_for(
+    db: Session, printer: m.Printer, platform: str = "windows"
+) -> "Optional[s.MachineDriverOut]":
     """Attach a vendor driver only where one is actually needed and usable.
 
     Deliberately not sent for driverless printers: Windows picks the inbox class
@@ -186,7 +214,7 @@ def _driver_for(db: Session, printer: m.Printer) -> "Optional[s.MachineDriverOut
     if tier != m.DriverTier.driver_required:
         return None
 
-    pkg = services.driver_package_for(db, printer)
+    pkg = services.driver_package_for(db, printer, platform)
     if pkg is None:
         return None
     return s.MachineDriverOut(
@@ -195,6 +223,11 @@ def _driver_for(db: Session, printer: m.Printer) -> "Optional[s.MachineDriverOut
         inf_relpath=pkg.inf_relpath,
         sha256=pkg.sha256,
         size=pkg.size,
+        # macOS only, and named for what they are rather than reusing
+        # inf_relpath: a PPD path in a field called "inf" is how the next person
+        # writes code that treats it like one.
+        kind=pkg.macos_kind,
+        ref=pkg.macos_ref,
     )
 
 
@@ -250,5 +283,11 @@ def machine_checkin(
     clean = (payload.name or "").strip()[:255]
     if clean:
         machine.name = clean
+    plat = (payload.platform or "").strip().lower()
+    if plat in ("windows", "macos"):
+        # Recorded for the operator's list, never read back for the driver
+        # decision -- see machine_assignments for why that has to come from the
+        # request instead.
+        machine.platform = plat
     db.commit()
     return s.MachineCheckinOut(machine_id=machine.id, ok=True)

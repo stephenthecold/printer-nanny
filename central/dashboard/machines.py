@@ -510,9 +510,12 @@ async def upload_driver_package(
     client_id: int = Form(...),
     name: str = Form(""),
     driver_name: str = Form(...),
-    inf_relpath: str = Form(...),
+    inf_relpath: str = Form(""),
     model: str = Form(""),
-    package: UploadFile = File(...),
+    platform: str = Form("windows"),
+    macos_kind: str = Form(""),
+    macos_ref: str = Form(""),
+    package: Optional[UploadFile] = File(None),
     db: Session = Depends(get_db),
 ):
     """Accept a vendor driver package.
@@ -537,6 +540,37 @@ async def upload_driver_package(
         _flash(request, "That client no longer exists.")
         return _redirect("/manage/machines")
 
+    plat = (platform or "windows").strip().lower()
+    if plat not in ("windows", "macos"):
+        _flash(request, "Unknown platform.")
+        return _redirect(f"/manage/machines?client_id={client.id}")
+
+    kind = (macos_kind or "").strip().lower() if plat == "macos" else ""
+    ref = (macos_ref or "").strip()
+    if plat == "macos":
+        if kind not in ("ppd", "pkg", "system"):
+            _flash(request, "Choose how the macOS driver is supplied.")
+            return _redirect(f"/manage/machines?client_id={client.id}")
+        if not ref:
+            _flash(
+                request,
+                "A macOS package needs the PPD path: inside the archive for a "
+                "PPD, or the absolute installed path for MDM/.pkg.",
+            )
+            return _redirect(f"/manage/machines?client_id={client.id}")
+        # `system` records a path to a driver an MDM already installed, so there
+        # is nothing to upload -- and requiring a file would make the operator
+        # invent one.
+        if kind != "system" and package is None:
+            _flash(request, "That macOS driver kind needs a package file.")
+            return _redirect(f"/manage/machines?client_id={client.id}")
+        if kind == "system" and (ref.startswith("..") or not ref.startswith("/")):
+            _flash(request, "An installed PPD path must be absolute.")
+            return _redirect(f"/manage/machines?client_id={client.id}")
+    elif package is None or not inf_relpath.strip():
+        _flash(request, "A Windows package needs a file and an INF path.")
+        return _redirect(f"/manage/machines?client_id={client.id}")
+
     tag = (model or "").strip()
     if tag and len(tag) < services.MIN_DRIVER_MODEL_TAG:
         # A 1-2 character tag is a substring of nearly every model string, so it
@@ -550,11 +584,28 @@ async def upload_driver_package(
         driver_name=(driver_name or "").strip()[:255],
         inf_relpath=(inf_relpath or "").strip()[:500],
         model=tag[:200],
+        platform=plat,
+        macos_kind=kind or None,
+        macos_ref=ref[:1000] or None,
         sha256="",
         created_by_user_id=user.id,
     )
     db.add(row)
     db.flush()  # need the id: the storage path is built from ids, never a filename
+
+    if plat == "macos" and kind == "system":
+        # No bytes at all. Recorded and audited exactly like an upload, because
+        # it is the same decision -- which driver a fleet of Macs binds -- reached
+        # without us carrying the payload.
+        record(
+            db, request, user, "driver_package.record",
+            f"driver_package:{row.id}",
+            f"client={client.id} platform=macos kind=system ppd={row.macos_ref!r} "
+            f"model={row.model!r}",
+        )
+        db.commit()
+        _flash(request, f"Recorded {row.name} (MDM-installed PPD, no upload).")
+        return _redirect(f"/manage/machines?client_id={client.id}")
 
     try:
         sha, size = driver_store.save(client.id, row.id, package.file)
@@ -572,8 +623,9 @@ async def upload_driver_package(
         db, request, user, "driver_package.upload", f"driver_package:{row.id}",
         # The digest identifies exactly what will run on the fleet, which is the
         # thing worth being able to check later.
-        f"client={client.id} driver={row.driver_name!r} model={row.model!r} "
-        f"sha256={sha} size={size}",
+        f"client={client.id} platform={row.platform} "
+        f"kind={row.macos_kind or 'inf'} driver={row.driver_name!r} "
+        f"model={row.model!r} sha256={sha} size={size}",
     )
     db.commit()
     _flash(request, f"Uploaded {row.name} ({size // 1024} KB).")
