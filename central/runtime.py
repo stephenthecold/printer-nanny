@@ -265,6 +265,17 @@ SPECS: List[Spec] = [
          "a re-image -- adopting it would steal a working PC's identity and the "
          "two would fight over it forever. Raise this if you re-image slowly; "
          "lower it only if you understand that trade."),
+    Spec("workstation.allow_macos_pkg_install", "bool", "Workstations",
+         "Let Macs install vendor .pkg drivers", False,
+         "macOS has no pnputil, so a full vendor driver arrives as a .pkg. With "
+         "this on, a Mac runs `installer -pkg` on a package you uploaded, as "
+         "root. Off (the default) it binds PPDs only -- either a .ppd from your "
+         "package, or one your MDM already installed -- and reports a .pkg "
+         "package as a stated skip. This is deliberately a separate decision "
+         "from who may upload: a .pkg runs arbitrary pre/postinstall scripts as "
+         "root, which is a wider grant than the Windows path, so it is opted "
+         "into rather than inherited. Uploads are audited with their digest "
+         "either way."),
     Spec("onboarding.apply_defaults", "bool", "Onboarding defaults",
          "Apply defaults to new clients", True,
          "When a client is created through Onboard, give it the starting alert "

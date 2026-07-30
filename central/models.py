@@ -1388,11 +1388,49 @@ class DriverPackage(Base):
     #: the INF, not from us, so it is operator-supplied and must match or the
     #: staging step succeeds and the bind then fails.
     driver_name: Mapped[str] = mapped_column(String(255))
-    #: Path of the .inf INSIDE the archive, relative to its root.
+    #: Path of the .inf INSIDE the archive, relative to its root. Windows only;
+    #: blank on a macOS package, which points at its payload with ``macos_ref``.
     inf_relpath: Mapped[str] = mapped_column(String(500))
     #: Substring matched against printers.model. Blank means "any
     #: driver_required printer in this client that has no better match".
     model: Mapped[str] = mapped_column(String(200), default="")
+
+    #: Which OS this package drives. **Load-bearing for matching, not a label.**
+    #: Matching is by model substring, and a client that has both a Windows and a
+    #: macOS package for one printer would otherwise produce two equally-specific
+    #: matches -- which this code correctly refuses as ambiguous, silently
+    #: breaking the Windows staging that used to work. So the platform scopes the
+    #: candidate set before specificity is ever compared. Defaults to
+    #: ``windows``, which is what every package uploaded before macOS support is.
+    platform: Mapped[str] = mapped_column(String(16), default="windows")
+
+    #: macOS only. How this package becomes a usable driver, and the three
+    #: differ in what they cost and what they can reach:
+    #:
+    #: * ``ppd``    -- the archive holds a .ppd (or .ppd.gz); the client extracts
+    #:                 it and binds it with ``lpadmin -P``. Adds NO code
+    #:                 execution beyond the lpadmin we already run. Sufficient
+    #:                 for PostScript devices, which is most office MFPs.
+    #: * ``system`` -- no upload at all: the vendor .pkg was pushed by MDM (Jamf,
+    #:                 Mosyle, Kandji) and ``macos_ref`` is the absolute path of
+    #:                 the PPD it installed. Zero code execution, and the only
+    #:                 option that reaches a full vendor driver *with* its
+    #:                 filters. Costs an out-of-band step.
+    #: * ``pkg``    -- the archive holds a vendor .pkg the client installs with
+    #:                 ``installer -pkg``. Self-contained, and the widest blast
+    #:                 radius by far: a .pkg runs arbitrary pre/postinstall
+    #:                 scripts as root, which is broader than Windows'
+    #:                 ``pnputil /add-driver``. Gated behind
+    #:                 ``workstation.allow_macos_pkg_install``, default off, so
+    #:                 an existing manager permission does not silently widen.
+    macos_kind: Mapped[Optional[str]] = mapped_column(String(16), default=None)
+
+    #: macOS only. For ``ppd``/``pkg`` the path INSIDE the archive; for
+    #: ``system`` an absolute path on the Mac. Both are operator-typed and both
+    #: are validated on the client -- an archive-relative path that escapes its
+    #: directory, or a system path outside the directories PPDs legitimately
+    #: live in, is refused rather than handed to a root command.
+    macos_ref: Mapped[Optional[str]] = mapped_column(String(1000), default=None)
 
     sha256: Mapped[str] = mapped_column(String(64))
     size: Mapped[int] = mapped_column(Integer, default=0)
@@ -1410,6 +1448,31 @@ class DriverPackage(Base):
 
     __table_args__ = (
         Index("ix_driver_packages_client_model", "client_id", "model"),
+        # Matching always filters by platform first, so the index that serves it
+        # has to carry the platform -- see `platform` above for why that filter
+        # is a correctness requirement and not an optimisation.
+        Index(
+            "ix_driver_packages_client_platform", "client_id", "platform", "model"
+        ),
+        CheckConstraint(
+            "platform IN ('windows', 'macos')",
+            name="ck_driver_packages_platform",
+        ),
+        # A macOS package must say HOW it becomes a driver, and a Windows one must
+        # not pretend to. Shape is what a CHECK can state; whether the ref
+        # resolves is the client's job.
+        #
+        # The explicit IS NOT NULL is load-bearing. `NULL IN ('ppd',...)` is NULL
+        # under SQL's three-valued logic, not FALSE, so without it
+        # `(platform='macos' AND NULL)` is NULL, the whole OR is NULL, and a CHECK
+        # evaluating to NULL **passes** -- verified: a macOS row with no kind was
+        # accepted. Same trap as the parity bug in the assignment CHECK.
+        CheckConstraint(
+            "(platform = 'windows' AND macos_kind IS NULL) OR "
+            "(platform = 'macos' AND macos_kind IS NOT NULL AND "
+            "macos_kind IN ('ppd', 'pkg', 'system'))",
+            name="ck_driver_packages_macos_kind",
+        ),
     )
 
 
@@ -1468,6 +1531,16 @@ class Machine(Base):
     #: assignment history is worth keeping, and a machine that resolves to
     #: nothing stops provisioning immediately.
     active: Mapped[bool] = mapped_column(Boolean, default=True)
+
+    #: ``windows`` / ``macos``, as reported by the client. For the UI only.
+    #:
+    #: The driver decision deliberately does NOT read this column: it uses the
+    #: platform the requesting client states on the request itself. A stored
+    #: value can be stale -- a machine re-imaged from Windows to macOS keeps its
+    #: row through adoption -- and a stale platform here would hand a Mac a
+    #: Windows driver package. Nullable because a client older than macOS support
+    #: never reports one; absent means "not yet known", never "windows".
+    platform: Mapped[Optional[str]] = mapped_column(String(16), default=None)
 
     last_seen_at: Mapped[Optional[datetime]] = mapped_column(
         DateTime(timezone=True), default=None

@@ -3,8 +3,9 @@
 The macOS sibling of `WINDOWS-MSI-TESTING.md`. Same structure, same honesty: what
 is proven, by what, and what is still outstanding.
 
-**Status.** The queue and default-printer logic is verified against a **real CUPS
-scheduler** (see below — that verification, plus the required end-to-end smoke, found six defects). What is *not*
+**Status.** The queue, vendor-driver and default-printer logic is verified against
+a **real CUPS scheduler** (see below — that verification, plus the required
+end-to-end smoke, has now found **seven** defects). What is *not*
 verified is a **real Mac**: launchd, `/dev/console`, `dscl`, a real printer, and
 MDM interaction have never been exercised. Treat the manual smoke section as
 outstanding work, not as a record of work already done.
@@ -100,6 +101,13 @@ A **fifth** is verified there too, though it was found by reading the code:
 `cups_queue_name` strips trailing underscores, so the shipped `MANAGED_PREFIX =
 "PN "` sanitised to `"PN"` — which matches a user's own `PNMyPrinter` and would
 have deleted it, the precise failure the prefix exists to prevent.
+
+A **seventh** was the same failure a third time, introduced by the fix for the
+third one: binding a vendor PPD replaces the queue's PPD *before* cupsd's verdict
+exists, so restoring the URI on failure left the queue on its old address with the
+new broken PPD — right URI, converges forever, cannot print. A PPD is now tried on
+a throwaway probe queue and the real queue is only touched once it is proven. The
+general rule: **if a failed operation cannot be undone, do not start it.**
 
 A **sixth** needed the end-to-end smoke rather than this script, because it lives
 *above* the `_run` seam and so no fake could show it: `skipped` and
@@ -232,18 +240,61 @@ Everything in this section is **outstanding**.
 
 ### 5. Things that must be reported, not silently assumed
 
-- [ ] A `driver_required` printer is **skipped with a stated reason** naming
-      macOS, and no queue is created for it. Vendor driver staging is Windows-only
-      today; macOS deprecated vendor PPDs in 10.14 and vendor packages are `.pkg`
-      installers, so `pnputil` has no analogue.
-- [ ] A `driver_required` printer does **not** cause a Windows driver package to
-      be downloaded onto the Mac.
+- [ ] A `driver_required` printer with **no macOS package** is skipped with a
+      stated reason, and no queue is created for it.
+- [ ] A `driver_required` printer does **not** cause a *Windows* driver package to
+      be downloaded onto the Mac — check the Machines page shows the Mac as
+      `macos`, then confirm nothing appears under
+      `/Library/Application Support/PrinterNanny/drivers`.
 - [ ] An unreachable printer produces an error naming the address, and the poll
       still checks in.
 - [ ] Ten unreachable printers do not stop the poll completing; the ones not
       reached say so.
 
-### 6. Uninstall
+### 6. Vendor drivers
+
+Three shapes, and they need testing separately because they differ in privilege
+rather than in outcome.
+
+**MDM-installed PPD (`system`) — the recommended path.**
+
+- [ ] Push a vendor driver `.pkg` with your MDM (Jamf/Mosyle/Kandji).
+- [ ] Find the PPD it installed, usually under
+      `/Library/Printers/PPDs/Contents/Resources/`.
+- [ ] Record it on the Machines page: platform macOS, kind "PPD my MDM already
+      installed", and that absolute path. **No file upload.**
+- [ ] The queue appears within one poll, and **prints a test page**.
+- [ ] `lpoptions -p <queue> | tr ' ' '\n' | grep state-reasons` does **not**
+      contain `cups-missing-filter-warning`.
+
+**A `.ppd` in an uploaded package.**
+
+- [ ] Upload a zip containing a `.ppd`, with its path inside the archive.
+- [ ] For a **PostScript** printer this should produce a working queue with no
+      vendor package installed at all. Print a page.
+- [ ] For a printer needing vendor filters, the queue is **refused** with an error
+      naming the missing filter — *not* created. This is the check that matters:
+      confirm no queue is left behind, and that the next poll retries rather than
+      reporting it converged.
+
+**A vendor `.pkg` (off by default).**
+
+- [ ] With `workstation.allow_macos_pkg_install` **off**, a `pkg` package is a
+      stated error mentioning the setting, and `installer` never runs.
+- [ ] Turn it on. The client installs the package as root and binds the PPD path
+      you recorded.
+- [ ] A **second** poll does not reinstall it — check the install log
+      (`/var/log/install.log`) has one entry, not one per poll.
+- [ ] An archive containing two `.pkg` files is **refused** rather than guessed.
+
+**Guards worth confirming by hand**, since they protect a root command:
+
+- [ ] A system PPD path outside `/Library/Printers/` etc. is refused.
+- [ ] A symlink inside an allowed directory pointing elsewhere is refused
+      (`realpath` runs before the root check).
+- [ ] A `.ppd` path that escapes the archive is refused.
+
+### 7. Uninstall
 
     sudo bash deploy/install-workstation-macos.sh --uninstall
 

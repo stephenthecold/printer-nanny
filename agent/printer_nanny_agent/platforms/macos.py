@@ -75,11 +75,17 @@ and ignored here, which is why the parameter keeps its Windows-specific name:
 renaming it to something neutral would imply this backend honours a setting it
 does not have.
 
-Vendor drivers are NOT staged here yet. macOS deprecated vendor PPDs in 10.14
-and vendor packages are ``.pkg`` installers rather than driver stores, so the
-Windows ``pnputil`` path has no direct analogue; ``driver_required`` printers are
-skipped with a stated reason, exactly as they were on Windows before a package
-existed.
+VENDOR DRIVERS
+--------------
+There is no ``pnputil``, so a ``driver_required`` printer is driven by binding a
+**PPD** -- from our package, from one an MDM already installed, or from a vendor
+``.pkg`` we install ourselves when the operator has opted in. See the "Vendor
+drivers" section further down for the three shapes and, more importantly, for the
+fifth instance of this codebase's recurring failure: binding a PPD whose filters
+are absent yields a queue that is created, listed, converged and unable to print,
+with ``lpadmin`` exiting 0 throughout. cupsd answers that question itself via
+``printer-state-reasons``, so every vendor bind is verified against its verdict
+and unwound when it fails.
 """
 
 from __future__ import annotations
@@ -95,10 +101,10 @@ log = logging.getLogger(__name__)
 
 NAME = "macos"
 
-#: macOS deprecated vendor PPDs in 10.14 and vendor packages are ``.pkg``
-#: installers rather than a driver store, so ``pnputil`` has no analogue here.
-#: A ``driver_required`` printer is a stated skip, never a wrong-driver bind.
-SUPPORTS_VENDOR_DRIVERS = False
+#: Vendor drivers ARE staged here, by binding a PPD -- see the "Vendor drivers"
+#: section below for the three shapes and why a bind is verified against cupsd's
+#: own missing-filter verdict before it is called a success.
+SUPPORTS_VENDOR_DRIVERS = True
 
 #: Where a LaunchDaemon can write and an ordinary user cannot. /Library rather
 #: than /var: it is the documented location for machine-wide application state
@@ -443,6 +449,352 @@ def remove_queue(name: str) -> None:
     _run([_LPADMIN, "-x", name])
 
 
+# --------------------------------------------------------------------------- #
+# Vendor drivers
+# --------------------------------------------------------------------------- #
+#
+# macOS has no pnputil, and the three shapes a vendor driver arrives in differ in
+# what they cost rather than in what they achieve:
+#
+#   ppd     a .ppd (or .ppd.gz) inside the package we downloaded. Bound with
+#           `lpadmin -P`. No code execution beyond the lpadmin we already run.
+#   system  no download at all: the vendor .pkg was pushed by MDM and `ref` is
+#           the absolute path of the PPD it installed. The only option that
+#           reaches a full vendor driver WITH its filters at zero privilege.
+#   pkg     a vendor .pkg we install with `installer -pkg`. Self-contained and by
+#           far the widest blast radius -- a .pkg runs arbitrary pre/postinstall
+#           scripts as root, broader than `pnputil /add-driver`. Gated.
+#
+# THE FAILURE THIS SECTION IS BUILT AROUND
+# ----------------------------------------
+# A PPD names the filters that convert print data for the device. Bind a PPD
+# whose filters are not installed and `lpadmin` exits **0**: the queue is
+# created, is listed, matches what central wants, converges as "unchanged"
+# forever -- and cannot print. That is the tier-1 failure a third time, and it is
+# the *normal* outcome of binding a vendor PPD without the vendor's package.
+#
+# cupsd answers the question itself. `printer-state-reasons` carries
+# `cups-missing-filter-warning` exactly when a filter the PPD names is absent,
+# and is clean otherwise. Verified against a live scheduler: clean for a PPD with
+# no filters and for one naming a filter that exists, set for a missing
+# `*cupsFilter` and for a missing `*cupsFilter2`. So every vendor bind is
+# verified against cupsd's own verdict and unwound if it fails.
+#
+# One caveat worth carrying: that verdict is only meaningful when the baseline
+# filter set is complete. On a box missing CUPS's own `commandtops`, cupsd flags
+# the warning on *every* queue and the check silently stops discriminating --
+# which is why scripts/macos_cups_testbed.sh checks for it and says so.
+
+#: Where PPDs legitimately live. A ``system`` reference is operator-typed and is
+#: handed to a root command, so it is constrained to these roots rather than
+#: trusted: `lpadmin -P` copies whatever it is given into /etc/cups/ppd, so an
+#: unconstrained path turns a text field into "read any root-readable file and
+#: expose it to the lp group". Restricting it costs an operator nothing -- an MDM
+#: puts vendor PPDs in the first entry -- and removes the primitive entirely.
+_SYSTEM_PPD_ROOTS = (
+    "/Library/Printers/",
+    "/System/Library/Frameworks/ApplicationServices.framework/",
+    "/usr/share/cups/model/",
+    "/usr/share/ppd/",
+    "/Library/Application Support/PrinterNanny/ppd/",
+)
+
+_INSTALLER = "/usr/sbin/installer"
+
+#: `installer` unpacks and runs scripts; a big vendor package on a slow disk is
+#: not quick. Distinct from the IPP query budget because it is not a network wait.
+_INSTALL_TIMEOUT = 600
+
+
+class DriverStagingError(RuntimeError):
+    """A vendor driver could not be staged. Always carries a reason an operator
+    can act on -- "needs a driver" with no cause sends a technician nowhere."""
+
+
+def _resolve_in_package(unpacked: str, ref: str) -> str:
+    """Resolve ``ref`` inside the unpacked package, refusing to leave it.
+
+    Same treatment as an archive member, and for the same reason: ``ref`` is
+    operator-typed, and a path resolving outside the package would hand a root
+    command an arbitrary file on the Mac.
+    """
+    if not (ref or "").strip():
+        raise DriverStagingError("the package does not say which file to use")
+    root = os.path.realpath(unpacked)
+    target = os.path.realpath(os.path.join(root, ref.replace("\\", os.sep)))
+    if target != root and not target.startswith(root + os.sep):
+        raise DriverStagingError(f"path escapes the package: {ref!r}")
+    if not os.path.isfile(target):
+        raise DriverStagingError(f"not found in the package: {ref!r}")
+    return target
+
+
+def _resolve_system_ppd(ref: str) -> str:
+    """Validate an operator-supplied absolute PPD path on this Mac."""
+    ref = (ref or "").strip()
+    if not ref.startswith("/"):
+        raise DriverStagingError(
+            f"a system PPD path must be absolute, got {ref!r}"
+        )
+    target = os.path.realpath(ref)
+    # realpath first, then check the roots: a symlink inside an allowed root
+    # pointing at /etc/shadow would otherwise pass.
+    if not any(target.startswith(root) for root in _SYSTEM_PPD_ROOTS):
+        raise DriverStagingError(
+            f"{target!r} is not under a directory PPDs live in; "
+            "expected one of " + ", ".join(_SYSTEM_PPD_ROOTS)
+        )
+    if not os.path.isfile(target):
+        raise DriverStagingError(f"no PPD at {target!r}; is the MDM payload installed?")
+    return target
+
+
+def install_pkg(pkg_path: str) -> None:
+    """Install a vendor ``.pkg`` on the whole system.
+
+    Deliberately fleet-wide root code execution -- which is what installing a
+    vendor driver *is* -- so it is reached only when central says the operator
+    opted in, and only for bytes whose SHA-256 was re-verified before the archive
+    was opened.
+    """
+    _run([_INSTALLER, "-pkg", pkg_path, "-target", "/"], timeout=_INSTALL_TIMEOUT)
+
+
+def missing_filters(name: str) -> bool:
+    """Whether cupsd says this queue's PPD names a filter it cannot find.
+
+    ``printer-state-reasons`` is an IPP keyword list, not prose, so it does not
+    translate -- unlike almost everything else this module reads.
+    """
+    try:
+        out = _run([_LPOPTIONS, "-p", name])
+    except CupsError as exc:
+        # Cannot tell, so do not claim it is fine. Treated as a failure by the
+        # caller, which unwinds -- the opposite default would report a queue as
+        # working on the strength of a command that did not run.
+        log.warning("could not read state reasons for %s: %s", name, exc)
+        return True
+    return "cups-missing-filter-warning" in out
+
+
+def _bind_ppd(name: str, uri: str, ppd_path: str) -> None:
+    _run([_LPADMIN, "-p", name, "-v", uri, "-P", ppd_path, "-E"])
+
+
+#: Suffix for the throwaway queue a PPD is tried on before the real one is
+#: touched. Deliberately keeps the managed prefix at the front, so if this process
+#: is killed mid-probe the leftover is something ``reconcile`` will remove rather
+#: than an orphan nobody owns.
+_PROBE_SUFFIX = "_pnprobe"
+
+
+def ppd_is_usable(ppd_path: str) -> bool:
+    """Whether cupsd can actually run this PPD, tried on a throwaway queue.
+
+    WHY THIS IS NOT DONE ON THE REAL QUEUE
+    --------------------------------------
+    Because a failed vendor repair otherwise cannot be unwound, and the first
+    version of this code proved it. ``lpadmin -p N -v URI -P bad.ppd`` exits **0**
+    -- it has already replaced the queue's PPD by the time the missing-filter
+    verdict is available. Restoring the *URI* then leaves the queue on its old
+    address carrying the **new, broken** PPD: right URI, so it converges as
+    "unchanged" forever; broken PPD, so it cannot print. That is the tier-1
+    failure a third time, reintroduced by an incomplete unwind, and it was caught
+    by the live-scheduler check and by nothing else.
+
+    Rejected alternative: snapshot ``/etc/cups/ppd/NAME.ppd`` before binding and
+    restore it on failure. It works, but it makes a *correctness* path depend on
+    a CUPS-internal file location -- acceptable for an error message, not for
+    this.
+
+    So the PPD is tried somewhere harmless first. A bind is a local operation
+    (~13ms, no network), so the extra round trip costs nothing and only happens
+    when a queue actually needs changing -- a converged queue never gets here.
+    """
+    probe = ppd_probe_name(ppd_path)
+    try:
+        # A loopback URI: this queue is never printed to, and pointing it at the
+        # real device would be a needless connection attempt.
+        _bind_ppd(probe, "ipp://127.0.0.1:631/ipp/probe", ppd_path)
+    except CupsError as exc:
+        log.warning("could not try %s on a probe queue: %s", ppd_path, exc)
+        _discard(probe)
+        return False
+    try:
+        return not missing_filters(probe)
+    finally:
+        _discard(probe)
+
+
+def ppd_probe_name(ppd_path: str) -> str:
+    """A stable, valid probe queue name. Derived from the PPD's basename so two
+    printers being provisioned in one pass cannot collide on it."""
+    stem = os.path.basename(ppd_path).split(".")[0]
+    return cups_queue_name("PN_" + stem)[: 127 - len(_PROBE_SUFFIX)] + _PROBE_SUFFIX
+
+
+def ensure_vendor_queue(
+    name: str,
+    uri: str,
+    ppd_path: str,
+    known: Optional[Dict[str, str]] = None,
+) -> str:
+    """Create or repair one queue driven by a vendor PPD.
+
+    Converges like the driverless path, and unwinds like it: a failed repair
+    restores the previous URI, a failed create removes the carcass. The extra
+    step is the filter verification above -- a bind that leaves cupsd complaining
+    about a missing filter is **removed**, because a queue that cannot print is
+    worse than no queue, and reporting it as created is the exact lie this
+    codebase is organised against.
+
+    Unlike ``-m everywhere`` this costs no network, so it needs no budget: the
+    PPD is a local file and ``lpadmin`` does not contact the printer.
+    """
+    if known is None:
+        known = list_queue_uris()
+
+    existing = name in known
+    previous = known.get(name)
+
+    # An existing queue on the right URI is left alone. Note what is NOT checked
+    # here: the filters. They were verified when the queue was created, and a
+    # re-verify every poll would spend an lpoptions call per queue to re-answer a
+    # question whose answer only changes when somebody uninstalls the driver --
+    # at which point the next repair catches it.
+    if existing and previous == uri:
+        return "unchanged"
+
+    # Tried somewhere harmless BEFORE the real queue is touched. See
+    # ppd_is_usable: binding first and unwinding after cannot work, because
+    # lpadmin has already replaced the PPD by the time cupsd's verdict exists.
+    if not ppd_is_usable(ppd_path):
+        raise DriverStagingError(
+            "cupsd reports a missing filter for this PPD -- the vendor driver it "
+            "belongs to is not installed on this Mac. Push the vendor package "
+            "with your MDM and record its installed PPD path, or turn on .pkg "
+            "install for this client."
+        )
+
+    try:
+        _bind_ppd(name, uri, ppd_path)
+    except CupsError:
+        if existing and previous:
+            # Safe here in a way it would not be above: the PPD was already
+            # proven usable, so a failure at this point is lpadmin refusing the
+            # change outright rather than a half-applied one.
+            try:
+                _set_uri(name, previous)
+            except CupsError as undo:
+                log.warning(
+                    "queue %s left on %s after a failed bind: %s", name, uri, undo
+                )
+        else:
+            _discard(name)
+        raise
+
+    if missing_filters(name):
+        # Belt and braces: the probe said this PPD was fine, so reaching here
+        # means the real queue disagrees with the probe. Unwinding is all that can
+        # be done, and it is stated rather than reported as success.
+        _discard(name)
+        raise DriverStagingError(
+            "the PPD verified on a probe queue but cupsd reports a missing filter "
+            "on the real one; the queue was removed rather than left unable to "
+            "print"
+        )
+
+    if not existing:
+        try:
+            _run([_LPADMIN, "-p", name, "-o", "printer-is-shared=false"])
+        except CupsError as exc:
+            log.warning("could not unshare %s: %s", name, exc)
+        return "created"
+    return "updated"
+
+
+def stage_driver(spec: dict) -> str:
+    """Turn a spec's driver payload into a PPD path on this Mac.
+
+    Returns the absolute PPD path. Raises ``DriverStagingError`` with a stated
+    reason for every refusal, because "needs a vendor driver" without a cause is
+    what makes an operator distrust the whole feature.
+    """
+    kind = (spec.get("driver_kind") or "").strip().lower()
+    ref = spec.get("driver_ref") or ""
+
+    if kind == "system":
+        return _resolve_system_ppd(ref)
+
+    unpacked = spec.get("unpacked") or ""
+    if not unpacked:
+        raise DriverStagingError("the driver package was not downloaded")
+
+    if kind == "ppd":
+        return _resolve_in_package(unpacked, ref)
+
+    if kind == "pkg":
+        if not spec.get("allow_pkg_install"):
+            raise DriverStagingError(
+                "this driver is a vendor .pkg and installing those is turned off "
+                "for this client (Settings -> Workstations)"
+            )
+        # For `pkg`, `ref` is the path of the PPD the package INSTALLS -- the same
+        # meaning it has for `system`, because both end up binding an
+        # already-installed PPD and differ only in who installed it. That keeps
+        # one operator field instead of two, and the installer itself is found in
+        # the archive rather than named:
+        if _ppd_present(ref):
+            # Already installed: a rerun after a failed queue bind, or simply the
+            # next poll. Skipping the install is what makes this convergent --
+            # otherwise a vendor package is reinstalled as root every 5 minutes.
+            log.info("vendor package already installed; PPD present at %s", ref)
+        else:
+            install_pkg(_sole_installer_in(unpacked))
+        return _resolve_system_ppd(ref)
+
+    raise DriverStagingError(f"unknown driver kind {kind!r}")
+
+
+def _ppd_present(ref: str) -> bool:
+    """Whether the PPD this package installs is already there. Validation
+    failures count as absent, so a bad path leads to the strict check's stated
+    error rather than being read as "installed"."""
+    try:
+        return os.path.isfile(_resolve_system_ppd(ref))
+    except DriverStagingError:
+        return False
+
+
+def _sole_installer_in(unpacked: str) -> str:
+    """The one ``.pkg``/``.mpkg`` in the package, refusing zero or several.
+
+    Not named by the operator because they already name the *installed PPD*, and
+    a second field to say "and the installer is here" is a field to get wrong.
+    Ambiguity is refused rather than resolved -- the same rule as an ambiguous
+    driver match: running the wrong installer as root is not a coin flip worth
+    taking.
+    """
+    found = []
+    root = os.path.realpath(unpacked)
+    for base, _dirs, files in os.walk(root):
+        for entry in files:
+            if entry.lower().endswith((".pkg", ".mpkg")):
+                found.append(os.path.join(base, entry))
+    if not found:
+        raise DriverStagingError(
+            "no .pkg found in the uploaded package; a 'pkg' driver must contain "
+            "the vendor installer (unwrap the .dmg first)"
+        )
+    if len(found) > 1:
+        names = ", ".join(sorted(os.path.relpath(f, root) for f in found)[:4])
+        raise DriverStagingError(
+            f"{len(found)} installers found in the package ({names}); refusing to "
+            "guess which to run"
+        )
+    return found[0]
+
+
 def provision_queues(
     runner, desired: Sequence[dict], managed_prefix: str = ""
 ) -> Dict[str, str]:
@@ -474,12 +826,19 @@ def provision_queues(
         name = cups_queue_name(spec["name"])
         wanted.add(name)
         if spec.get("tier") != "driverless":
-            # Vendor drivers are not staged on macOS yet. Stated, never a
-            # silently missing queue.
-            outcomes[name] = (
-                "error: vendor drivers are not supported on macOS yet; "
-                "this printer needs one"
-            )
+            # A vendor-driven queue. Costs no network -- the PPD is a local file
+            # and lpadmin does not contact the printer -- so it consumes no
+            # budget and is never starved by sleeping devices.
+            try:
+                ppd = stage_driver(spec)
+                outcomes[name] = ensure_vendor_queue(
+                    name, spec["uri"], ppd, known=known
+                )
+            except (DriverStagingError, CupsError) as exc:
+                # Stated with its reason, never a silently missing queue and
+                # never a queue that exists and cannot print.
+                log.warning("vendor queue %s failed: %s", name, exc)
+                outcomes[name] = f"error: {exc}"
             continue
         if known.get(name) == spec["uri"]:
             # No network, so no budget consumed -- the steady state is free.

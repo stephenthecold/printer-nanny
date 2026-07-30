@@ -366,6 +366,9 @@ class MachineEnrollIn(BaseModel):
     enroll_key: str
     machine_uid: str
     name: Optional[str] = None
+    #: ``windows`` / ``macos``, recorded for the UI. Not trusted for the driver
+    #: decision, which reads the platform stated on each assignments request.
+    platform: Optional[str] = None
 
 
 class MachineEnrolled(BaseModel):
@@ -397,6 +400,16 @@ class MachineDriverOut(BaseModel):
     inf_relpath: str
     sha256: str
     size: int
+    #: macOS only: how this package becomes a driver -- ``ppd`` (bind a PPD from
+    #: the archive), ``pkg`` (install a vendor .pkg), or ``system`` (bind a PPD
+    #: an MDM already installed, so there are no bytes to fetch). Null on
+    #: Windows, where ``inf_relpath`` is the pointer.
+    kind: Optional[str] = None
+    #: macOS only: the path inside the archive for ``ppd``/``pkg``, or an
+    #: absolute path on the Mac for ``system``. Named for what it is rather than
+    #: reusing ``inf_relpath`` -- a PPD path in a field called "inf" is how the
+    #: next person writes code that treats it like one.
+    ref: Optional[str] = None
 
 
 class MachinePrinterOut(BaseModel):
@@ -426,10 +439,21 @@ class MachineAssignmentsOut(BaseModel):
     #: for the signed-in user. Sent per poll rather than baked into the
     #: installer so an operator can change their mind without reinstalling.
     manage_default_printer: bool = True
+    #: Whether this client's Macs may run ``installer -pkg`` for a vendor driver.
+    #: Default **false**, and separate from the manager permission that allows
+    #: the upload: a .pkg runs arbitrary pre/postinstall scripts as root, which
+    #: is a wider grant than Windows' ``pnputil /add-driver``, so it must be
+    #: opted into rather than inherited. Sent per poll so it can be withdrawn
+    #: without touching every Mac.
+    allow_macos_pkg_install: bool = False
 
 
 class MachineCheckinIn(BaseModel):
     name: Optional[str] = None
+    #: ``windows`` / ``macos``, for the UI. Optional because a client older than
+    #: macOS support never sends one, and absent must read as "not yet known"
+    #: rather than defaulting to a platform we then act on.
+    platform: Optional[str] = None
 
 
 class MachineCheckinOut(BaseModel):

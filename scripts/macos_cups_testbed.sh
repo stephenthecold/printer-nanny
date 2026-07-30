@@ -37,6 +37,29 @@ have_cupsd() {
   command -v cupsd >/dev/null 2>&1 || [ -x /usr/sbin/cupsd ]
 }
 
+# The vendor-driver checks hinge on cupsd's own `cups-missing-filter-warning`
+# verdict, which is only meaningful when the BASELINE filter set is complete.
+# With cups-core-drivers absent, cupsd cannot find `commandtops` and flags the
+# warning on every queue -- so a good PPD and a PPD naming a nonexistent vendor
+# filter look identical, and the check silently proves nothing while still
+# passing. That is the failure mode this whole file exists to avoid, so it is
+# checked rather than assumed.
+warn_if_filters_incomplete() {
+  local missing=""
+  for f in commandtops pstops rastertopwg; do
+    [ -x "/usr/lib/cups/filter/$f" ] || missing="$missing $f"
+  done
+  if [ -n "$missing" ]; then
+    echo
+    echo "WARNING: the CUPS filter baseline is incomplete (missing:$missing)."
+    echo "  cupsd will then flag cups-missing-filter-warning on EVERY queue, so the"
+    echo "  vendor-driver checks cannot tell a good PPD from a broken one -- they"
+    echo "  will pass without proving anything. Install them first:"
+    echo "    apt-get install -y cups-core-drivers cups-filters"
+    echo
+  fi
+}
+
 start() {
   require_root
   if ! have_cupsd; then
@@ -107,6 +130,7 @@ EOF
   fi
   chmod 666 /run/cups/cups.sock
 
+  warn_if_filters_incomplete
   echo
   echo "scheduler up at /run/cups/cups.sock (state in $ROOT)"
   echo "now:  sudo PYTHONPATH=agent python3 scripts/macos_provision_check.py --as-user $TEST_USER"

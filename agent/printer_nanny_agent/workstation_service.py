@@ -100,6 +100,17 @@ def _platform():
     return platforms.current()
 
 
+def _platform_name() -> str:
+    """What this client tells central it is, for the driver decision.
+
+    Taken from the backend rather than ``sys.platform`` so a test that
+    substitutes a backend substitutes this too -- otherwise a macOS-backend test
+    would ask central for Windows drivers and the mismatch would only show up on
+    a real Mac.
+    """
+    return str(getattr(_platform(), "NAME", "") or "")
+
+
 def _platform_runner():
     """The command seam this OS's backend needs, or None where it needs none.
 
@@ -653,6 +664,16 @@ def build_specs(
                     "host": printer["ip"],
                     "driver": driver["driver_name"],
                     "package": driver,
+                    # Carried for backends that bind a driver rather than
+                    # staging one into a store. Windows ignores all three; the
+                    # macOS backend needs the URI because a CUPS queue is
+                    # addressed by device-uri, not by a port it built.
+                    "uri": uri or "",
+                    "driver_kind": driver.get("kind") or "",
+                    "driver_ref": driver.get("ref") or "",
+                    "allow_pkg_install": bool(
+                        assignments.get("allow_macos_pkg_install", False)
+                    ),
                 })
         elif tier == "ipp_disabled":
             skipped[name] = "IPP is disabled on the device (port 631 refused)"
@@ -688,6 +709,12 @@ def provision(
         if pkg is None:
             ready.append(spec)
             continue
+        if (pkg.get("kind") or "") == "system":
+            # No bytes by design: the vendor package was installed out of band by
+            # MDM and central recorded only the PPD path. Downloading nothing is
+            # the point, so this must not fall through to fetch_driver.
+            ready.append(spec)
+            continue
         if not getattr(backend, "SUPPORTS_VENDOR_DRIVERS", False):
             # Downloading and unpacking a Windows driver archive on a platform
             # that cannot stage it accomplishes nothing and unpacks untrusted
@@ -705,7 +732,14 @@ def provision(
             unpacked = fetch_driver(
                 client, pkg, cache_dir or os.path.join(default_state_dir(), "drivers")
             )
-            spec["inf"] = inf_path_in(unpacked, pkg.get("inf_relpath") or "")
+            spec["unpacked"] = unpacked
+            if pkg.get("inf_relpath"):
+                # Windows resolves its INF here, where the zip-slip guard lives.
+                # A macOS payload is resolved by the backend instead, because
+                # what counts as a valid path differs by kind (inside the archive
+                # for a .ppd, an allowlisted system directory for a PPD an MDM
+                # installed) and only the backend knows which.
+                spec["inf"] = inf_path_in(unpacked, pkg["inf_relpath"])
             ready.append(spec)
         except Exception as exc:
             # Stated, never silent: an operator seeing "skipped" needs to know
@@ -794,7 +828,12 @@ class WorkstationClient:
     def enroll(self, enroll_key: str, uid: str, name: str) -> dict:
         resp = self._client.post(
             f"{self._base}/api/v1/workstations/enroll",
-            json={"enroll_key": enroll_key, "machine_uid": uid, "name": name},
+            json={
+                "enroll_key": enroll_key,
+                "machine_uid": uid,
+                "name": name,
+                "platform": _platform_name(),
+            },
         )
         if resp.status_code == 401:
             # Central deliberately does not say whether the key is unknown or
@@ -804,7 +843,14 @@ class WorkstationClient:
         return resp.json()
 
     def assignments(self, user: Optional[str] = None) -> dict:
-        params = {"user": user} if user else None
+        # The platform travels on every request rather than being read from the
+        # machine row, so central's driver choice is based on what this client
+        # actually is now. A stored value can be stale -- a PC re-imaged as a Mac
+        # keeps its row through adoption -- and a stale platform means a Mac is
+        # handed a Windows driver archive.
+        params = {"platform": _platform_name()}
+        if user:
+            params["user"] = user
         resp = self._client.get(
             f"{self._base}/api/v1/workstations/{self._machine_id}/assignments",
             params=params,
@@ -832,7 +878,7 @@ class WorkstationClient:
     def checkin(self, name: str) -> dict:
         resp = self._client.post(
             f"{self._base}/api/v1/workstations/{self._machine_id}/checkin",
-            json={"name": name},
+            json={"name": name, "platform": _platform_name()},
         )
         resp.raise_for_status()
         return resp.json()
@@ -903,6 +949,7 @@ def poll_once(
     computer_name: str,
     prefix: str = MANAGED_PREFIX,
     user: Optional[str] = None,
+    state_dir: Optional[str] = None,
 ) -> ProvisionReport:
     """One cycle: ask, converge, check in.
 
@@ -910,9 +957,18 @@ def poll_once(
     machine that is failing to provision is exactly the one an operator needs to
     see as alive, and skipping the check-in on failure would make it look
     offline instead.
+
+    ``state_dir`` is threaded down to the driver cache so ``--state-dir`` moves
+    the whole footprint. Without it the cache silently used the platform default
+    while identity used the override -- harmless on a real install where the two
+    coincide, and confusing the moment somebody runs the client by hand against a
+    scratch directory, which is exactly when they are debugging something else.
     """
     payload = client.assignments(user=user)
-    report = provision(runner, payload, prefix, client=client)
+    report = provision(
+        runner, payload, prefix, client=client,
+        cache_dir=os.path.join(state_dir, "drivers") if state_dir else None,
+    )
     try:
         client.checkin(computer_name)
     except Exception as exc:
@@ -952,7 +1008,8 @@ def run(
     while True:
         try:
             report = poll_once(
-                client, runner, computer_name=name, prefix=prefix, user=console_user()
+                client, runner, computer_name=name, prefix=prefix,
+                user=console_user(), state_dir=state_dir,
             )
             for queue, why in report.skipped.items():
                 log.info("skipped %s: %s", queue, why)

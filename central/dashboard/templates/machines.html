@@ -91,10 +91,10 @@
 <div class="{{ c.card_cls() }} mb-8">
   {{ c.section_title("Vendor driver packages") }}
   <p class="mb-4 text-sm text-slate-600">
-    For printers Windows' inbox driver can't drive. A package is downloaded,
-    <strong>checksum-verified</strong> and installed as LocalSystem on each machine
-    that needs it — so upload only drivers you trust. Printers with no matching
-    package stay skipped rather than bound to a wrong driver.
+    For printers the inbox driverless path can't drive. A package is downloaded,
+    <strong>checksum-verified</strong> and staged as root on each machine that
+    needs it — so upload only drivers you trust. Printers with no matching package
+    for their machine's platform stay skipped rather than bound to a wrong driver.
   </p>
 
   <div class="{{ c.table_wrap() }}">
@@ -102,7 +102,8 @@
       <thead class="{{ c.thead_cls() }}">
         <tr>
           <th class="{{ c.th_cls() }}">Package</th>
-          <th class="{{ c.th_cls() }}">Windows driver name</th>
+          <th class="{{ c.th_cls() }}">Driver name</th>
+          <th class="{{ c.th_cls() }}">Platform</th>
           <th class="{{ c.th_cls() }}">Matches model</th>
           <th class="{{ c.th_cls() }}">Size</th>
           <th class="{{ c.th_cls('right') }}"><span class="sr-only">Actions</span></th>
@@ -120,6 +121,9 @@
           </td>
           <td class="{{ c.td_cls() }}"><code class="text-xs">{{ pkg.driver_name }}</code></td>
           <td class="{{ c.td_cls() }}">
+            {{ pkg.platform }}{% if pkg.macos_kind %} / {{ pkg.macos_kind }}{% endif %}
+          </td>
+          <td class="{{ c.td_cls() }}">
             {% if pkg.model %}{{ pkg.model }}{% else %}<span class="text-slate-400">any</span>{% endif %}
           </td>
           <td class="{{ c.td_cls() }}">{{ (pkg.size / 1048576) | round(1) }} MB</td>
@@ -131,7 +135,7 @@
           </td>
         </tr>
         {% else %}
-          {{ c.empty_row(5, "No driver packages. driver_required printers are skipped.") }}
+          {{ c.empty_row(6, "No driver packages. driver_required printers are skipped.") }}
         {% endfor %}
       </tbody>
     </table>
@@ -141,18 +145,43 @@
         class="mt-4 grid gap-3 sm:grid-cols-2">
     <input type="hidden" name="client_id" value="{{ client.id }}">
     {{ c.field('name', 'Label', placeholder='Brother HL-L2350DW v1.2.3') }}
-    {{ c.field('driver_name', 'Windows driver name', required=True,
+    {{ c.field('driver_name', 'Driver name', required=True,
                placeholder='Brother HL-L2350DW series',
-               help='Exactly as it appears in the INF — this is what binds the queue.') }}
-    {{ c.field('inf_relpath', 'INF path inside the archive', required=True,
+               help='On Windows, exactly as it appears in the INF — this is what binds the queue.') }}
+    {% call c.select_field('platform', 'Platform') %}
+      <option value="windows">Windows (staged with pnputil)</option>
+      <option value="macos">macOS (binds a PPD)</option>
+    {% endcall %}
+    {{ c.field('inf_relpath', 'Windows: INF path inside the archive',
                placeholder='x64/BRPRF.INF') }}
+    {% call c.select_field('macos_kind', 'macOS: how the driver is supplied') %}
+      <option value="">— (Windows package) —</option>
+      <option value="system">PPD my MDM already installed (no upload)</option>
+      <option value="ppd">A .ppd inside the archive</option>
+      <option value="pkg">A vendor .pkg inside the archive (must be enabled)</option>
+    {% endcall %}
+    {{ c.field('macos_ref', 'macOS: PPD path',
+               placeholder='/Library/Printers/PPDs/Contents/Resources/Acme9000.gz',
+               help='For "a .ppd inside the archive", the path within it. For the other two, the absolute path of the installed PPD.') }}
     {{ c.field('model', 'Match printers whose model contains',
                placeholder='HL-L2350DW',
-               help='Blank matches any driver_required printer for this client. Min 3 characters.') }}
+               help='Blank matches any driver_required printer for this client, on this platform. Min 3 characters.') }}
     <label class="block sm:col-span-2">
-      <span class="text-xs text-slate-500">Package (.zip) <span class="text-red-600" aria-hidden="true">*</span></span>
-      <input type="file" name="package" accept=".zip" required class="{{ c.input_cls() }}">
+      <span class="text-xs text-slate-500">Package (.zip)</span>
+      <input type="file" name="package" accept=".zip" class="{{ c.input_cls() }}">
+      <span class="text-xs text-slate-500">
+        Required except for an MDM-installed PPD, which records a path rather than
+        carrying bytes.
+      </span>
     </label>
+    <p class="sm:col-span-2 text-xs text-slate-600">
+      On macOS there is no <code>pnputil</code>, so a queue is driven by binding a
+      PPD. A PPD whose vendor filters are not installed produces a queue that
+      cannot print, so the client checks with cupsd before committing and reports a
+      stated error rather than a broken queue. Installing a vendor
+      <code>.pkg</code> runs its scripts as root and is off until you turn it on
+      under Settings → Workstations.
+    </p>
     <div class="sm:col-span-2">
       <button type="submit" class="{{ c.btn('primary') }}">Upload package</button>
     </div>

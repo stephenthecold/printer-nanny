@@ -155,7 +155,7 @@ enforced; none of them is optional.
   `WINDOWS-MSI-TESTING.md` (build + Server 2016→2025 smoke) and
   `MACOS-CLIENT-TESTING.md` (real-CUPS verification + the outstanding real-Mac
   smoke).
-- `tests/` — pytest suite (~1635 tests; ~6min end-to-end on Postgres-less SQLite).
+- `tests/` — pytest suite (~1675 tests; ~6min end-to-end on Postgres-less SQLite).
   `test_compose_deployment.py` / `test_install_update.py` cover the deployment
   contract above; both skip cleanly where the docker CLI is absent.
   `test_macos_deployment.py` does the same for the LaunchDaemon plist and its
@@ -494,8 +494,8 @@ The **macOS** half of that client sits one notch better and it is worth being
 precise about why. Its CUPS logic *is* verified against a real scheduler —
 `scripts/macos_cups_testbed.sh` stands up a throwaway `cupsd` on any Linux box
 and `scripts/macos_provision_check.py` drives the backend through it, which found
-**five shipped defects** the unit tests had all passed over, and the required
-end-to-end smoke found a **sixth** (see the conventions above; two of them made
+**six shipped defects** the unit tests had all passed over, and the required
+end-to-end smoke found a **seventh** (see the conventions above; two of them made
 the assigned default printer impossible in different ways, and another was the
 tier-1 bug in CUPS clothing). What is still unverified is a
 **Mac**: launchd, `/dev/console`, `dscl`, a real printer, a non-English system
@@ -716,6 +716,20 @@ transports, **not** against real tenants.
     300s poll interval) so a rack of sleeping printers cannot outlast a cycle.
     What the budget skips it **says** — a queue silently absent from the outcomes
     reads to central as a queue that was never assigned.
+  - **A seventh, and the same failure yet again: an unwind that cannot unwind.**
+    Vendor drivers on macOS mean binding a PPD, and `lpadmin -p N -v URI -P bad.ppd`
+    exits **0** — it has already replaced the queue's PPD by the time cupsd's
+    verdict exists. So the first version restored the *URI* on failure and left the
+    queue on its old address carrying the new **broken** PPD: right URI, so it
+    converges as "unchanged" forever; broken PPD, so it cannot print. Tier 1, a
+    third time, reintroduced *by the fix for the second time*. Caught by the
+    live-scheduler check and nothing else. A PPD is now tried on a throwaway probe
+    queue first (a local bind, ~13ms, no network) and the real queue is touched
+    only once it is proven — so a failure changes nothing because nothing was
+    done. Rejected: snapshotting `/etc/cups/ppd/NAME.ppd` to restore later, which
+    works but makes a *correctness* path depend on a CUPS-internal file location.
+    The general rule: **if a failed operation cannot be undone, do not start it —
+    test it somewhere disposable.**
   - One more, found the same way: **a prefix is not a name.** `cups_queue_name`
     strips trailing underscores, so the shipped `MANAGED_PREFIX = "PN "`
     sanitised to `"PN"` — which matches a user's own `PNMyPrinter` and would
@@ -737,6 +751,45 @@ transports, **not** against real tenants.
   assume its own is authoritative. Nothing above the seam could see this, because
   the fake backend the unit tests use echoes the names it is handed — the same
   blind spot as tier 1, one layer up.
+- **cupsd will tell you whether a driver actually works, if you ask.** Binding a
+  vendor PPD whose filters are not installed is the *normal* outcome of uploading
+  a PPD without the vendor's package, and it yields a queue that is created,
+  listed, converged and unable to print. `printer-state-reasons` carries
+  `cups-missing-filter-warning` exactly then, and is an IPP keyword list rather
+  than prose so it does not translate. Verified both ways: clean for a PPD with no
+  filters and for one naming a filter that exists, set for a missing `*cupsFilter`
+  and a missing `*cupsFilter2`. The catch that makes this worth writing down —
+  the verdict is only meaningful when the **baseline** filter set is complete. On a
+  box missing CUPS's own `commandtops`, cupsd flags every queue and the check
+  silently stops discriminating while still passing, so
+  `scripts/macos_cups_testbed.sh` checks for it and says so.
+- **macOS vendor drivers are three shapes, and the safe one needs no privilege.**
+  `system` records the absolute path of a PPD an MDM already installed — zero code
+  execution, and the only option that reaches a full vendor driver *with* its
+  filters; it has **no bytes at all**, so it is exempt from the missing-file check
+  that disqualifies a package whose payload is gone. `ppd` extracts a `.ppd` from
+  an uploaded archive. `pkg` runs `installer -pkg` as root, which executes
+  arbitrary pre/postinstall scripts — genuinely broader than `pnputil /add-driver`
+  — so it is gated behind `workstation.allow_macos_pkg_install`, **default off**,
+  a separate decision from who may upload. For `pkg` the operator names the
+  *installed* PPD path (same meaning as `system`) and the installer is found in the
+  archive by the unambiguous-or-refuse rule; an already-present PPD skips the
+  install, without which a vendor package would be reinstalled as root every poll.
+  An operator-typed system path is constrained to the directories PPDs live in and
+  `realpath`d **before** the check, since `lpadmin -P` copies whatever it is handed
+  into `/etc/cups/ppd` — unconstrained, that text field is "read any root-readable
+  file".
+- **`driver_packages.platform` is a correctness requirement, not a label.**
+  Matching is by model substring, so a client holding both a Windows and a macOS
+  package for one printer yields two equally-specific matches — which the
+  ambiguity rule correctly refuses, meaning **adding macOS support would have
+  silently stopped the Windows staging that already worked.** Platform scopes the
+  candidates before specificity is compared. The machine's platform travels on
+  each assignments request rather than being read from `machines.platform`: a
+  stored value goes stale when a PC is re-imaged as a Mac and keeps its row through
+  adoption, and a stale platform hands a Mac a Windows driver archive. The column
+  exists for the UI and is written by **check-in**, not by the assignments GET — a
+  read path that writes is both a surprise and a commit per poll.
 - **`scripts/macos_cups_testbed.sh` makes that verification reproducible without
   a Mac**, which is why the defects above were findable at all. CUPS is CUPS: the
   same daemon, the same client tools, the same exit codes, the same translated
