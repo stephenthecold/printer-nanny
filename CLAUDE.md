@@ -810,14 +810,20 @@ transports, **not** against real tenants.
     check asserted against the description, so any non-Standard-TCP/IP *string*
     passed. Now fixed: `port_transport()` prefers the monitor, and the check
     prints description, monitor and host address separately.
-  - **The port is identity-addressed, not address-addressed.** Its registry
-    entry is `Printer UUID = e3248000-…` with `Install Protocol = 1` and an
-    empty `PrinterHostAddress`. `Add-Printer -IppURL` uses the URL to query the
-    device at creation and then stores a UUID it must re-resolve by discovery at
-    print time. WS-Discovery is link-local (and 5357 was filtered to this
-    device), so across a routed subnet, a NAT or a VPN the queue converges clean
-    forever and cannot print. **That is the normal MSP topology** — workstations
-    printing to printers on another VLAN — so this is not an exotic case.
+  - **The port is identity-addressed, not address-addressed** — its registry
+    entry is `Printer UUID = e3248000-…`, `Install Protocol = 1`, and an empty
+    `PrinterHostAddress`. That is a real and surprising property of an
+    `-IppURL` queue, **but it is NOT why this one could not print.** The first
+    reading of this defect blamed it, reasoning that a UUID must be re-resolved
+    by link-local discovery and so could not survive a routed hop. That was
+    tested afterwards and is **wrong** — see the experiments in
+    `deploy/WINDOWS-MSI-TESTING.md`. `-IppURL` prints across a routed hop
+    perfectly well, and Windows negotiates the document format correctly. What
+    actually fails is this **specific device**: the queue is created, reports
+    healthy, and the job dies in the print processor, while the very same device
+    prints from CUPS over the same IPP endpoint and from the same Windows box
+    over raw 9100. The lesson that survives is the one below, not a theory about
+    routing.
   The general lesson, for the fourth time: a queue that exists, lists and
   converges is not a queue that prints, and every proxy for "it works" that does
   not involve paper has now failed at least once. **The only sufficient check is
