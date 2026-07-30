@@ -133,6 +133,16 @@ enforced; none of them is optional.
     provider sequences four passes internally (maintenance blob → live
     alert + history events → PJL → EWS), skipping the network fallbacks
     once exact percentages exist.
+  - `platforms/` — the **only** per-OS code in the workstation client:
+    `windows.py` (a thin re-export of the hardware-proven spooler code),
+    `macos.py` (CUPS), `unsupported.py` (a backend, not an exception — the
+    client must run on a dev box far enough to fail with a sentence).
+    Everything else — enrollment, the machine GUID, the poll loop, spec
+    mapping, driver fetch/verify, `ProvisionReport` and every skip reason — is
+    identical everywhere and stays in `workstation_service`. A backend declares
+    what it can do (`SUPPORTS_VENDOR_DRIVERS`, an optional `make_runner`) rather
+    than the orchestrator branching on `sys.platform`, so a Mac neither builds a
+    PowerShell runner nor unpacks a Windows driver archive it cannot stage.
   - `mdns.py` — optional Bonjour/DNS-SD discovery (`agent[mdns]` extras).
   - `updater.py` — self-update via `update_agent` command; writes
     `.pn-update-result.json` so the dashboard can show success/failure.
@@ -140,11 +150,18 @@ enforced; none of them is optional.
   `Base.metadata.create_all()`, so **the ORM metadata is what builds a fresh DB** —
   an index declared only in a later migration is silently absent on new installs.
   Declare indexes in the model's `__table_args__` and mirror them in the migration.
-- `deploy/` — Caddyfile, installer scripts (`install-agent.sh`/`.ps1`), sample
-  systemd unit, and `WINDOWS-MSI-TESTING.md` (build + Server 2016→2025 smoke).
-- `tests/` — pytest suite (~1111 tests; ~3min end-to-end on Postgres-less SQLite).
+- `deploy/` — Caddyfile, installer scripts (`install-agent.sh`/`.ps1`,
+  `install-workstation-macos.sh`), sample systemd unit and launchd plists, plus
+  `WINDOWS-MSI-TESTING.md` (build + Server 2016→2025 smoke) and
+  `MACOS-CLIENT-TESTING.md` (real-CUPS verification + the outstanding real-Mac
+  smoke).
+- `tests/` — pytest suite (~1635 tests; ~6min end-to-end on Postgres-less SQLite).
   `test_compose_deployment.py` / `test_install_update.py` cover the deployment
   contract above; both skip cleanly where the docker CLI is absent.
+  `test_macos_deployment.py` does the same for the LaunchDaemon plist and its
+  installer — a malformed plist is refused by launchd in silence, and a
+  credential in `ProgramArguments` is readable by every local user, so neither
+  failure shows up anywhere at runtime.
 
 ## Conventions
 - Python 3.12 in Docker; code stays 3.9-compatible (`from __future__ import
@@ -464,14 +481,27 @@ enforced; none of them is optional.
 
 ## Status
 **Every feature described below is built. What is NOT done is verification on
-real Windows**, and that distinction is the only one worth carrying at the top of
-this section: the site agent and the whole central surface run in production, and
-the workstation client — queue provisioning, driver staging, the default printer,
-the MSI — has never executed against a real spooler, driver store or console
-session. Every test above `PowerShellRunner` uses a fake, which is exactly the
-blindness that let tier 1 ship broken for its entire existence. Treat
-`deploy/WINDOWS-MSI-TESTING.md` as the outstanding work, not as documentation of
-work already done.
+real workstations**, and that distinction is the only one worth carrying at the
+top of this section: the site agent and the whole central surface run in
+production, and the workstation client — queue provisioning, driver staging, the
+default printer, the MSI — has never executed against a real Windows spooler,
+driver store or console session. Every test above `PowerShellRunner` uses a fake,
+which is exactly the blindness that let tier 1 ship broken for its entire
+existence. Treat `deploy/WINDOWS-MSI-TESTING.md` as the outstanding work, not as
+documentation of work already done.
+
+The **macOS** half of that client sits one notch better and it is worth being
+precise about why. Its CUPS logic *is* verified against a real scheduler —
+`scripts/macos_cups_testbed.sh` stands up a throwaway `cupsd` on any Linux box
+and `scripts/macos_provision_check.py` drives the backend through it, which found
+**five shipped defects** the unit tests had all passed over, and the required
+end-to-end smoke found a **sixth** (see the conventions above; two of them made
+the assigned default printer impossible in different ways, and another was the
+tier-1 bug in CUPS clothing). What is still unverified is a
+**Mac**: launchd, `/dev/console`, `dscl`, a real printer, a non-English system
+locale and MDM interaction have never run. `deploy/MACOS-CLIENT-TESTING.md` is
+that outstanding list. And a green real-CUPS run still does not prove a page comes
+out — only `--printer-uri` against real hardware gets near that.
 
 **Print management** (the Printix-shaped half, feature-complete): end users,
 groups, and per-user / per-group printer assignment with a deterministic
@@ -502,12 +532,29 @@ enrollment key gets you: a holder who names their machine after a stale record
 inherits its printers, where enrollment alone previously granted nothing. That is
 the trade the setting exists to let an operator decline.
 
-The Windows workstation client is feature-complete and unverified:
-`workstation_service.py` mints the machine GUID, enrolls against a client-scoped
-key (`workstation_enroll_keys`, revocable, mints a per-machine credential),
-polls `/api/v1/workstations/{id}/assignments`, converges the spooler through
-`workstation.reconcile`, and checks in. Entry point
-`printer-nanny-workstation`. The per-client **MSI** is built from the Machines
+The workstation client runs on **Windows and macOS from one codebase**, and the
+seam is narrow on purpose: `workstation_service.py` mints the machine GUID,
+enrolls against a client-scoped key (`workstation_enroll_keys`, revocable, mints
+a per-machine credential), polls `/api/v1/workstations/{id}/assignments`,
+converges queues through the platform backend, and checks in. Entry point
+`printer-nanny-workstation` on both. Only three things are genuinely OS-specific
+— where state lives, who is at the console, and how a queue and a user's default
+printer are made — so those live in `platforms/` and everything else is shared. A
+second macOS client would have duplicated enrollment, adoption, the
+verify-then-report rule and every skip reason, and per this repo's own lesson the
+duplicate is the one that drifts. On macOS the daemon is a **LaunchDaemon**, not a
+LaunchAgent: `lpadmin` needs root, queues are machine-wide, the machine's
+credential must not be readable by the user whose printers it manages, and the
+client has to be able to become whoever is at the console *now* (after a fast user
+switch) to set their default. The site agent's plist next door is correctly a
+LaunchAgent — it only reads SNMP. macOS vendor driver staging and a signed,
+notarized `.pkg` are deliberately **not** built: vendor PPDs were deprecated in
+10.14 and vendor packages are `.pkg` installers, so `pnputil` has no analogue, and
+a `.pkg` needs an Apple Developer ID and a notarization round trip. A
+`driver_required` printer on a Mac is a stated skip, and no Windows driver archive
+is downloaded to unpack on a platform that cannot stage it.
+
+The per-client Windows **MSI** is built from the Machines
 page: `msi_builder.build_workstation_msi` shares the agent's runtime cache and
 differs only by a `ProductProfile` — **a distinct UpgradeCode, service name and
 install directory, because Windows treats a shared UpgradeCode as the same
@@ -516,7 +563,14 @@ server legitimately runs both). Each build **mints its own enrollment key**:
 keys are SHA-256 at rest so an existing one cannot be read back, and per-build
 keys mean a leaked installer is revoked without touching any other. The key
 travels in `workstation.toml`, never in `AppParameters` — **a service's command
-line is readable by any logged-in user**. A build that fails rolls the key back,
+line is readable by any logged-in user**. The macOS installer lands on the same
+rule from the other direction: a LaunchDaemon's `ProgramArguments` and
+`EnvironmentVariables` are readable by any local user via `launchctl print`, and
+launchd *requires* the plist to be world-readable, so the key lives in a 0600
+`workstation.toml` and only its path is in the plist.
+`tests/test_macos_deployment.py` asserts that against both the reviewable plist
+and the one the installer generates, since they are two files and only one ships.
+A build that fails rolls the key back,
 since a key minted for an installer that never existed is a live credential
 nobody holds. It has **never run against a real spooler** — every test
 above `PowerShellRunner` uses a fake, which is exactly the blindness that let
@@ -622,6 +676,78 @@ transports, **not** against real tenants.
   is **not** one we derived, the monitor is **not** Standard TCP/IP, and the
   driver is the inbox one. Any future claim that driverless printing works needs
   that check, not a green CI run.
+- **The macOS backend repeated the lesson exactly, and paid for it four times.**
+  `tests/test_workstation_macos.py` (81 tests) was green while every one of these
+  shipped; all four were found by `scripts/macos_provision_check.py` against a
+  live `cupsd`, and by nothing else. None of them is a macOS quirk — each is a
+  general failure mode wearing CUPS clothing, which is why they are here:
+  - **`lpoptions -d` with no destination is a usage error, not a read** (exit 1,
+    prints usage). So the read-back always returned `None` and
+    `set_default_printer` *always* raised "default did not stick" — the assigned
+    default had **never once worked**. The read is `lpstat -d`. A *successful*
+    `lpoptions -d NAME` prints the queue's whole option list, so parsing its
+    output for a name yields `copies=1`. The general lesson: a verify-then-report
+    rule is only as good as the read, and a read that can only fail makes the
+    whole mechanism report failure forever rather than loudly break.
+  - **Every string CUPS prints is translated.** `lpstat -p` on a German Mac reads
+    `Drucker X ist im Leerlauf`, so enumeration matched nothing: every poll
+    re-created every queue — a live IPP query per printer per poll, the exact
+    round trip the code promises not to make — and no stale queue was ever
+    removed. Fixed by forcing `LC_ALL=C` on **every** command, which has to
+    travel through `sudo` as an explicit `/usr/bin/env` because sudo scrubs the
+    environment, and by enumerating with `lpstat -v` (name *and* URI in one call;
+    deliberately not `lpstat -e`, which also lists DNS-SD-discovered printers, so
+    every Bonjour printer on the subnet would look like an existing queue).
+  - **`cupsd` commits `device-uri` and *then* runs the `-m everywhere` query.** A
+    repair against an unreachable printer therefore exited 1 having already moved
+    the queue and generated no PPD — a queue that exists, is listed, matches what
+    central wants, converges as "unchanged" **forever**, and cannot print. The
+    macOS spelling of the tier-1 bug above. A failed change is now unwound
+    completely, per the updater's contract: a failed *repair* restores the
+    previous URI (a `-v`-only `lpadmin` is instant, needs no network, and leaves
+    the PPD byte-identical — measured), a failed *create* removes the carcass.
+    Rejected alternative: probing `printer-make-and-model` for `Local Raw
+    Printer`, which depends on an undocumented server-side string.
+  - **An unreachable printer costs 30s, and our timeout must not collide with
+    the tool's.** A single 30s bound matched `cupsd`'s own connect timeout, so
+    the failure surfaced as our useless "timed out" instead of `lpadmin`'s message
+    naming the address. Live queries now carry a larger timeout than the thing
+    they wrap, and a whole pass is bounded by `_QUERY_BUDGET` (under half the
+    300s poll interval) so a rack of sleeping printers cannot outlast a cycle.
+    What the budget skips it **says** — a queue silently absent from the outcomes
+    reads to central as a queue that was never assigned.
+  - One more, found the same way: **a prefix is not a name.** `cups_queue_name`
+    strips trailing underscores, so the shipped `MANAGED_PREFIX = "PN "`
+    sanitised to `"PN"` — which matches a user's own `PNMyPrinter` and would
+    delete it, the precise failure the prefix exists to prevent.
+    `cups_queue_prefix` keeps the separator.
+- **A report must use one name per printer, and the backend owns that name.** A
+  sixth defect, and the *end-to-end smoke* is what caught it — not the real-CUPS
+  check, because it lives above `_run`. `build_specs` names queues for Windows,
+  which accepts them verbatim; CUPS rejects spaces, so the macOS backend derives
+  its own and keys `outcomes` by that. `skipped` and `desired_default` still
+  carried the Windows spelling, so `outcomes.get(desired_default)` in `provision`
+  **missed every time**: on a Mac the assigned default could never be applied, and
+  the reason reported was "its queue was not provisioned (skipped)" *even when the
+  queue had been created perfectly* — central asserting a failure that had not
+  happened, about a feature that could not work. Backends therefore expose
+  `queue_name()` (identity on Windows, `cups_queue_name` on macOS) and `provision`
+  normalises the whole report through it. The general rule: when a per-platform
+  layer may rename a thing, the shared layer must ask it for the name rather than
+  assume its own is authoritative. Nothing above the seam could see this, because
+  the fake backend the unit tests use echoes the names it is handed — the same
+  blind spot as tier 1, one layer up.
+- **`scripts/macos_cups_testbed.sh` makes that verification reproducible without
+  a Mac**, which is why the defects above were findable at all. CUPS is CUPS: the
+  same daemon, the same client tools, the same exit codes, the same translated
+  prose, the same `~/.cups/lpoptions` precedence. It stands up a private `cupsd`
+  on `/run/cups/cups.sock` — the **default** socket, deliberately, because `sudo`
+  scrubs `CUPS_SERVER` and a scheduler anywhere else means the per-user
+  default-printer check silently tests nothing — and creates a second account,
+  since one account cannot demonstrate that root's default and the console user's
+  are different files. What it does *not* reproduce is a Mac: no launchd, no
+  `/dev/console`, no `dscl`, no printer. Those stay manual, per
+  `deploy/MACOS-CLIENT-TESTING.md`.
 - **Queue provisioning converges; it never blindly creates.** The client re-runs
   on every assignment change, service start and poll, so `Add-Printer` on an
   existing queue would mean a crash loop or a swallowed exception hiding real
