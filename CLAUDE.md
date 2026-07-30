@@ -497,8 +497,10 @@ different levels of proof:
 
 - **The site agent and the whole central surface run in production.** Treat these
   as verified.
-- **The macOS workstation client is verified against a real CUPS scheduler and a
-  real `pkgbuild`, but never against a Mac.** See below for exactly which parts.
+- **The macOS workstation client is verified against a real CUPS scheduler, a
+  real `pkgbuild`, and — since 2026-07-30 — a real Mac, including an actual
+  `installer -pkg` and the LaunchDaemon running as root.** A page has still never
+  come out of a printer. See below for exactly which parts.
 - **The Windows workstation client has never executed against a real spooler,
   driver store or console session.** Queue provisioning, driver staging, the
   default printer, the MSI — every test above `PowerShellRunner` uses a fake,
@@ -519,13 +521,35 @@ failure. Its **`.pkg` is built by Apple's own tooling on a `macos-latest` runner
 (`.github/workflows/macos-pkg.yml`), which confirms the identifier, the payload,
 the scripts and that the enrollment key's `0600` survives the round trip.
 
-What is still unverified is a **Mac**: launchd, `/dev/console`, `dscl`, a real
-printer, a non-English system locale, MDM interaction, and — the one with no
-automated coverage at all, since `installer` does not exist off macOS — an actual
-**install**. `deploy/MACOS-CLIENT-TESTING.md` is that list. Two things there are
-worth doing first: confirming Gatekeeper **refuses** the unsigned build, because if
-it does not then the signing story is being tested wrong; and printing a page,
-since neither a green real-CUPS run nor a green `pkgbuild` gets near that.
+**And it has now run on a Mac**, on 2026-07-30: macOS 26.5.2, Apple Silicon,
+system Python 3.9.6, no Homebrew. `installer -pkg` of a locally-built `.pkg`,
+launchd loading the daemon as root, `/dev/console` and `dscl` exercised, a queue
+created by that daemon from a live IPP query, and the console user's default set
+by root through `sudo -u` — verified by the write landing in the *user's*
+`~/.cups/lpoptions` rather than root's. Gatekeeper **refuses** the unsigned build
+(`spctl` → `rejected, no usable signature`), which was the first thing worth
+confirming and is now confirmed.
+
+That run found an **eighth** defect, and it is the archetype of "only an install
+could see this": `ensure_enrolled` was called *above* `run()`'s retry loop, so the
+documented contract — transport failures are retried, not fatal — held for every
+poll and failed at enrollment, which is exactly when a freshly imaged machine has
+no network. An unresolvable central killed the process, launchd respawned it every
+60s, and the log grew **9.8 MB/day** of tracebacks naming no reason. Moving the
+call inside the loop costs nothing (once enrolled it makes no request) and drops
+that to ~44 KB/day of one stated line per interval. A refused *key* still
+re-raises, because terminal is not transient. Note the trap left behind:
+`workstation_cli` returns exit 2 for a refused key specifically so a service
+manager will not loop — but the plist's `KeepAlive{SuccessfulExit=false}` restarts
+on any non-zero exit, so on macOS it loops anyway.
+
+What is **still** unverified: **printing a page** — nothing above gets near it, and
+no printer was reachable from the test host. Also a non-English system locale, fast
+user switching, the login-window case, a directory-bound (AD/Entra) Mac, MDM
+interaction, notarization (needs a Developer ID certificate), Intel hardware, and
+the vendor-driver `pkg` shape with `allow_macos_pkg_install` enabled.
+`deploy/MACOS-CLIENT-TESTING.md` tracks the list, with the done items marked and
+dated.
 
 **Print management** (the Printix-shaped half, feature-complete): end users,
 groups, and per-user / per-group printer assignment with a deterministic

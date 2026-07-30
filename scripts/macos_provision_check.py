@@ -176,6 +176,24 @@ def make_queue(name: str, uri: str, ppd: str = "") -> None:
         raise SystemExit(f"could not set up {name}: {rc.stderr.strip()}")
 
 
+def _lpadmin_works() -> bool:
+    """Can we actually administer this scheduler? Proven, not inferred.
+
+    A `-v`-only create is instant, needs no network and generates no PPD, so the
+    probe costs nothing and is removed immediately whether or not it succeeded.
+    """
+    name = PREFIX + "authprobe"
+    try:
+        macos._run([macos._LPADMIN, "-p", name, "-v", "ipp://127.0.0.1:631/ipp/print"])
+    except macos.CupsError:
+        return False
+    try:
+        macos.remove_queue(name)
+    except macos.CupsError as exc:  # pragma: no cover - would be very odd
+        print(f"      (could not remove the auth probe {name}: {exc})")
+    return True
+
+
 def sweep() -> None:
     """Remove only our own queues. Never anything else, ever."""
     for name in macos.list_queues():
@@ -616,8 +634,24 @@ def main(argv=None) -> int:
     if "running" not in scheduler.stdout:
         print("\nno scheduler to talk to; nothing here can be verified", file=sys.stderr)
         return 2
-    if os.geteuid() != 0:
-        print("\nlpadmin needs root; re-run under sudo", file=sys.stderr)
+    # Asked, not assumed. CUPS authorises administrative operations by POLICY
+    # (`Require user @SYSTEM` in cupsd.conf), not by euid, so `geteuid() != 0`
+    # is the wrong question on macOS: on any Mac whose console user is in the
+    # `_lpadmin` group -- which is the default for an admin account, i.e. the
+    # machine class this client is written for -- lpadmin works unprivileged.
+    # Testing euid instead refused to run the check on exactly the hosts it was
+    # written to be run on, which is why the real-Mac verification stayed
+    # outstanding longer than it needed to.
+    if not _lpadmin_works():
+        print("\nlpadmin is not permitted here; re-run under sudo", file=sys.stderr)
+        return 2
+    # The per-user default checks shell out through `sudo -u`, which does need
+    # root when the target is somebody else. Refused up front rather than
+    # failing halfway through a check that has already made queues.
+    if args.as_user and args.as_user != pwd.getpwuid(os.geteuid()).pw_name \
+            and os.geteuid() != 0:
+        print(f"\n--as-user {args.as_user} needs root (sudo -u); re-run under sudo",
+              file=sys.stderr)
         return 2
 
     ppd_path = "/tmp/pn-provision-check.ppd"

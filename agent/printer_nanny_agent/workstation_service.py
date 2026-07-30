@@ -609,9 +609,17 @@ class ProvisionReport:
     #: reason skips are: "central shows a default the user does not have" is the
     #: failure this module exists to avoid.
     default_reason: Optional[str] = None
+    #: Why the cycle itself did not complete -- central unreachable, enrollment
+    #: not yet possible. Distinct from a per-queue error: none of the queues
+    #: failed, we never got as far as asking about them. Set so a ``--once`` run
+    #: cannot report success for a cycle that never ran, which is the same rule
+    #: as a channel that must set ``sent=False`` when nothing left the building.
+    cycle_error: Optional[str] = None
 
     @property
     def ok(self) -> bool:
+        if self.cycle_error:
+            return False
         return not any(v.startswith("error") for v in self.outcomes.values())
 
 
@@ -994,19 +1002,44 @@ def run(
     killing the service: a workstation is off-network constantly (a laptop lid,
     a VPN reconnect), and a print client that needs restarting after every one
     is a print client that gets uninstalled.
+
+    **That includes enrollment**, which is the one this got wrong for as long as
+    it existed. ``ensure_enrolled`` sat above the loop with no handler, so the
+    rule held for every poll and failed at precisely the moment it matters most
+    -- a freshly imaged Mac's first boot, where the network is least likely to be
+    up. Found by installing on a real Mac (nothing below the ``_run`` seam can
+    see it, and no unit test drives ``run()`` against an unreachable host): the
+    process died on an unhandled ``httpx.ConnectError``, launchd respawned it
+    every 60s, and the log grew ~9.8 MB/day of tracebacks stating no reason.
+
+    A refused **key** is different and stays terminal: it re-raises, because
+    retrying a credential central has rejected only buries the reason.
     """
     import socket
 
     name = computer_name or os.environ.get("COMPUTERNAME") or socket.gethostname()
     runner = runner or _platform_runner()
     client = WorkstationClient(base_url, verify_tls=verify_tls)
-    ensure_enrolled(
-        client, enroll_key=enroll_key, computer_name=name, state_dir=state_dir
-    )
 
     report = ProvisionReport()
     while True:
         try:
+            # INSIDE the loop, deliberately. Enrolling is exactly where a freshly
+            # imaged Mac is least likely to have the network: first boot behind a
+            # captive portal, a VLAN that is not up yet, a VPN that has not
+            # connected. Hoisted above the loop -- where this used to be -- a
+            # transport failure there escaped uncaught and killed the process,
+            # which is the precise opposite of this function's contract. launchd's
+            # KeepAlive then respawned it every ThrottleInterval (60s -- five times
+            # more often than a successful poll), each cycle writing a full httpx
+            # traceback and no stated reason: measured at ~9.8 MB/day of
+            # root-owned, unrotated log on a Mac pointed at an unreachable central.
+            # Re-running it costs nothing once enrolled: it adopts the stored
+            # credentials and makes no request at all.
+            ensure_enrolled(
+                client, enroll_key=enroll_key, computer_name=name,
+                state_dir=state_dir,
+            )
             report = poll_once(
                 client, runner, computer_name=name, prefix=prefix,
                 user=console_user(), state_dir=state_dir,
@@ -1022,8 +1055,15 @@ def run(
                     "default printer %s NOT applied: %s",
                     report.desired_default, report.default_reason,
                 )
+        except ServiceError:
+            # A key central has refused is terminal, not transient. Re-raised so
+            # the CLI reports it once and exits with its distinct code, rather
+            # than this loop retrying a credential that will never be accepted
+            # and burying the reason in a restart loop.
+            raise
         except Exception as exc:
-            log.warning("poll failed, will retry in %ss: %s", interval, exc)
+            report = ProvisionReport(cycle_error=f"{type(exc).__name__}: {exc}")
+            log.warning("cycle failed, will retry in %ss: %s", interval, exc)
         if once:
             return report
         time.sleep(interval)
