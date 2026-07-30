@@ -22,6 +22,43 @@ import pytest
 from printer_nanny_agent import workstation as ws
 
 
+# --------------------- the port's transport, not its label ------------------ #
+#
+# Observed on Windows 11 26200 against a real Brother, on a queue built by
+# Add-Printer -IppURL: Description = "IPP Port" while PortMonitor = "WSD Port
+# Monitor". Everything used to assert against the description, so the
+# "not on the Standard TCP/IP monitor" disproof was reading a label.
+
+
+def test_port_transport_prefers_the_monitor_over_the_description():
+    detail = {"description": "IPP Port", "monitor": "WSD Port Monitor"}
+    assert ws.port_transport(detail) == "wsd port monitor"
+
+
+def test_port_transport_falls_back_to_the_description():
+    """Older callers, and ports where Windows reports no monitor."""
+    assert ws.port_transport({"description": "Standard TCP/IP Port"}) == (
+        "standard tcp/ip port"
+    )
+    assert ws.STANDARD_TCP_MONITOR in ws.port_transport(
+        {"description": "Standard TCP/IP Port"}
+    )
+
+
+def test_a_standard_tcp_monitor_is_caught_even_when_the_label_says_ipp():
+    """The exact shape that would otherwise slip through: a reassuring
+    description over a monitor that speaks only RAW/LPR."""
+    detail = {"description": "IPP Port", "monitor": "Standard TCP/IP Port"}
+    assert ws.STANDARD_TCP_MONITOR in ws.port_transport(detail)
+
+
+def test_the_port_detail_script_reads_all_three_fields():
+    for field in ("Description", "PrinterHostAddress", "PortMonitor"):
+        assert field in ws._SCRIPT_PORT_DETAIL, (
+            f"{field} is needed to tell a working queue from a converged-but-dead one"
+        )
+
+
 class FakeRunner:
     """A tiny stateful fake spooler.
 

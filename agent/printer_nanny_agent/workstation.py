@@ -314,7 +314,7 @@ _SCRIPT_PORT_DETAIL = """
 $ErrorActionPreference = 'Stop'
 $p = Get-PrinterPort -Name $env:PN_PORT -ErrorAction SilentlyContinue
 if ($null -eq $p) { 'ABSENT' }
-else { 'PRESENT|' + [string]$p.Description + '|' + [string]$p.PrinterHostAddress }
+else { 'PRESENT|' + [string]$p.Description + '|' + [string]$p.PrinterHostAddress + '|' + [string]$p.PortMonitor }
 """
 
 
@@ -430,7 +430,16 @@ def ippurl_supported(runner: PowerShellRunner) -> bool:
 
 
 def port_detail(runner: PowerShellRunner, port: str) -> Dict[str, str]:
-    """Monitor description + host address for a port, or ``{}`` when absent."""
+    """Description, host address and **monitor** for a port, or ``{}`` if absent.
+
+    ``description`` and ``monitor`` are different fields and they disagree in
+    practice: a queue built by ``Add-Printer -IppURL`` on Windows 11 reports
+    ``Description = "IPP Port"`` while its ``PortMonitor`` is
+    ``"WSD Port Monitor"``. Everything here used to read only the description,
+    so the "not on the Standard TCP/IP monitor" disproof was asserting against a
+    label rather than the transport. Both are returned now; the checks read
+    ``monitor`` and fall back to ``description`` for older callers.
+    """
     text = runner.run(_SCRIPT_PORT_DETAIL, {"port": port}).strip()
     if not text or text.startswith("ABSENT"):
         return {}
@@ -438,7 +447,13 @@ def port_detail(runner: PowerShellRunner, port: str) -> Dict[str, str]:
     return {
         "description": parts[1] if len(parts) > 1 else "",
         "host_address": parts[2] if len(parts) > 2 else "",
+        "monitor": parts[3] if len(parts) > 3 else "",
     }
+
+
+def port_transport(detail: Dict[str, str]) -> str:
+    """The field that actually names a port's transport, preferring the monitor."""
+    return (detail.get("monitor") or detail.get("description") or "").lower()
 
 
 def ensure_driverless_queue(
@@ -526,7 +541,7 @@ def ensure_driverless_queue(
     existed = state.present
     if existed:
         detail = port_detail(runner, state.port) if state.port else {}
-        on_tcp = STANDARD_TCP_MONITOR in (detail.get("description") or "").lower()
+        on_tcp = STANDARD_TCP_MONITOR in port_transport(detail)
         driver_ok = (state.driver or "").strip() == IPP_CLASS_DRIVER
 
         if driver_ok and not on_tcp:
@@ -577,8 +592,7 @@ def ensure_driverless_queue(
     # IPP no matter what the driver says, so it is an error rather than a queue.
     if got_port:
         detail = port_detail(runner, got_port)
-        description = (detail.get("description") or "").lower()
-        if STANDARD_TCP_MONITOR in description:
+        if STANDARD_TCP_MONITOR in port_transport(detail):
             raise IppProvisionError(
                 "queue {!r} was created on a Standard TCP/IP port ({!r}), which "
                 "speaks only RAW/LPR and cannot carry IPP -- refusing to report "

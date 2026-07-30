@@ -231,6 +231,78 @@ Run on a real client OS you actually deploy to. **Everything above
 `PowerShellRunner` is tested with a fake**, so a green CI run proves nothing
 here — this section is the only evidence that any of it works.
 
+> **2026-07-30 — done once, and it found two defects.** Windows 11 26200
+> (ARM64, so the `python-3.12.10-embed-amd64` runtime ran under x64 emulation),
+> MSI installed with `msiexec /qn`, service enrolled as LocalSystem, provisioning
+> against a real Brother MFC-L8900CDW.
+>
+> 1. **The assigned default printer had never once applied.** Fixed — see
+>    `_stop_windows_managing_default` and PR #94.
+> 2. **A queue that passed every check could not print.** This one is not fixed,
+>    because it is a design question rather than a bug. Read the next section
+>    before trusting any green result here.
+
+---
+
+## The check can pass on a queue that cannot print
+
+`scripts/windows_provision_check.py` passed against a real printer — port not
+derived, monitor not Standard TCP/IP, inbox IPP class driver, second pass a
+no-op — and **the queue silently discarded every job**.
+
+What the spooler actually recorded, once
+`Microsoft-Windows-PrintService/Operational` was enabled (it is **off by
+default**, which is why this is invisible):
+
+    id=800  Spooling job 3.
+    id=801  Printing job 3.
+    id=842  ... print processor MS_XPS_PROC ... driver Microsoft IPP Class Driver
+            ... Win32 error code returned by the print processor: 0x80004005.
+    (no id=307 "Document printed")
+
+Meanwhile `PrinterStatus=Normal`, `DetectedErrorState=0`, `WorkOffline=False`,
+zero jobs pending. Nothing surfaced to the user, the queue, or central.
+
+The device was never in doubt: raw bytes written to TCP/9100 on the same address
+from the same VM printed immediately.
+
+**Why the check missed it.** Two separate reasons, both now worth knowing:
+
+- **It asserted against a label, not the transport.** `Get-PrinterPort` returns
+  `Description` *and* `PortMonitor`, and on a `-IppURL` queue they disagree:
+  `Description = "IPP Port"`, `PortMonitor = "WSD Port Monitor"`. Everything read
+  the description, so the Standard-TCP/IP disproof was matching a string that
+  says what we hoped. Fixed: `ws.port_transport()` prefers the monitor, and the
+  check now prints description, monitor and host address separately.
+- **The port has no address.** Its registry entry is
+  `Printer UUID = e3248000-…`, `Install Protocol = 1`, and `PrinterHostAddress`
+  is **empty**. `Add-Printer -IppURL` uses the URL to interrogate the device when
+  the queue is built, then stores a device *identity* that Windows must resolve
+  again by discovery at print time. WS-Discovery is link-local, and TCP 5357 was
+  filtered to this device — so the queue converged clean forever and had no path
+  to the printer.
+
+**Why that matters beyond this lab.** An MSP's workstations routinely print to
+printers on another subnet, VLAN or across a VPN, which is exactly where
+link-local discovery does not reach. Before trusting tier 1 in production,
+establish whether `-IppURL` queues print **across a routed hop**, not just on the
+same link. If they do not, the driverless path needs an address-bound
+alternative, and the "deliberately no fallback" rule needs revisiting.
+
+**The only sufficient check is a printed page.** Every proxy short of paper —
+`Get-Printer`, the port name, the monitor, the driver, convergence, an empty
+queue, `DetectedErrorState` — has now returned a clean answer for a queue that
+could not print.
+
+### Enable the print log before you believe anything
+
+    $ch = 'Microsoft-Windows-PrintService/Operational'
+    $c = New-Object System.Diagnostics.Eventing.Reader.EventLogConfiguration $ch
+    $c.IsEnabled = $true; $c.SaveChanges()
+
+Then look for **`id=307`**. Its absence is the failure; `id=842` with a non-zero
+`Win32 error code` names it.
+
 1. **Install** (elevated):
    ```powershell
    msiexec /i printer-nanny-workstation-<client>.msi /l*v ws-install.log
