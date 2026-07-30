@@ -176,10 +176,49 @@ Mint the enrollment key on the **Machines** page. Re-running upgrades in place a
 keeps the machine's identity, which is what stops an upgrade looking like a new
 machine to central.
 
-There is deliberately **no signed, notarized `.pkg`** yet. An MSP pushing this
-through MDM wants one; building it needs an Apple Developer ID and a notarization
-round trip, so it is out of scope rather than half-built. A `.pkg` postinstall
-would end up running this script.
+## The `.pkg` installer
+
+For MDM deployment, build a `.pkg` instead. **Machines → macOS installer → Download
+macOS bundle** gives you a per-client bundle; run its build script *on a Mac*:
+
+    tar xzf printer-nanny-workstation-<client>-macos-bundle.tar.gz
+    cd <extracted>
+    set -a; . ./pkg.env; set +a
+    ./build-macos-pkg.sh              # unsigned: MDM-installable, not double-clickable
+    ./build-macos-pkg.sh --notarize   # signed + notarized + stapled
+
+**Why central does not just hand you the `.pkg`.** `pkgbuild`, `productbuild`,
+`productsign`, `notarytool` and `stapler` are macOS-only, and `notarytool` is a
+closed Apple binary talking to an Apple service. Signing also needs *your* Developer
+ID certificate in a keychain. So a Mac is required regardless, and central does the
+part only central can — mint this client's enrollment key and assemble the payload.
+Hand-assembling an unsigned `.pkg` on Linux with `xar`+`bomutils` was rejected:
+neither is packaged in current Ubuntu, and the result would still need the Mac.
+
+**Signing and notarization are separate things, and you need both** for a package a
+human can double-click. Signed-but-not-notarized is still refused by Gatekeeper on
+10.15+. Stapling matters too: without it a Mac that cannot reach Apple refuses a
+perfectly notarized package, which describes a segmented client VLAN — i.e. exactly
+where these get installed.
+
+    PN_SIGN_IDENTITY   "Developer ID Installer: Acme Inc (AB12CD34EF)"
+    PN_TEAM_ID         AB12CD34EF
+    PN_ASC_KEY_ID / PN_ASC_ISSUER_ID / PN_ASC_KEY_PATH   (preferred: no 2FA prompt)
+    PN_APPLE_ID / PN_APPLE_PASSWORD                      (app-specific password)
+
+Credentials come from the environment, never from arguments — a process's command
+line is readable by every user on the machine. `set -x` is never enabled in that
+script for the same reason, and a test asserts it.
+
+**The bundle contains a live credential.** `workstation.toml` holds this client's
+enrollment key at mode 0600. Don't commit the bundle, don't attach it to a ticket,
+and delete it once the `.pkg` is built — the `.pkg` carries the same key and is
+equally sensitive. Each build mints its **own** key, so revoking one installer
+leaves every other install working.
+
+`.github/workflows/macos-pkg.yml` builds and inspects the package on a
+`macos-latest` runner, and signs it when the repo has the secrets. That is the only
+automated coverage `pkgbuild` has; nothing on Linux can provide any.
 
 ---
 
@@ -294,7 +333,36 @@ rather than in outcome.
       (`realpath` runs before the root check).
 - [ ] A `.ppd` path that escapes the archive is refused.
 
-### 7. Uninstall
+### 7. The `.pkg` installer
+
+Everything here is outstanding, and the `.pkg` path has **no** local automated
+coverage — `installer`, `pkgbuild` and `notarytool` do not exist off macOS.
+
+- [ ] `./build-macos-pkg.sh` produces a `.pkg` on a Mac with the Xcode command line
+      tools, and `pkgutil --expand` shows `com.printernanny.workstation` and the
+      agent wheel in the payload.
+- [ ] `sudo installer -pkg <pkg> -target /` installs, and
+      `launchctl print system/com.printernanny.workstation` shows it loaded.
+- [ ] `/Library/Application Support/PrinterNanny/workstation.toml` is **0600
+      root:wheel** after install. As an ordinary user, `cat` of it is denied.
+- [ ] The install worked **offline** — pull the network first. Every wheel is in
+      the payload and `postinstall` runs pip with `--no-index`, so this must
+      succeed with no route to PyPI.
+- [ ] On a Mac with **no Homebrew and no python.org build**, the postinstall either
+      picks `/usr/bin/python3` successfully or fails with the stated reason. It must
+      not hang on a Command Line Tools prompt.
+- [ ] Reinstalling over an existing install works: `preinstall` stops the daemon,
+      the venv is rebuilt, and the machine keeps its identity (same row on the
+      Machines page, not a new one).
+- [ ] `--notarize` produces a package where `spctl --assess --type install -vv`
+      accepts it, and `xcrun stapler validate` passes.
+- [ ] A **double-click** on the notarized package opens Installer without a
+      Gatekeeper warning. On the *unsigned* one, confirm Gatekeeper refuses it — if
+      it doesn't, the signing story is being tested wrong.
+- [ ] An MDM `InstallEnterpriseApplication` push of the **unsigned** package
+      installs successfully, since that is the path that does not need signing.
+
+### 8. Uninstall
 
     sudo bash deploy/install-workstation-macos.sh --uninstall
 

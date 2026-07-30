@@ -110,6 +110,15 @@ enforced; none of them is optional.
   - `audit.py` — `record(db, request, user, action, target, detail)` writer used
     at every security-relevant boundary; never raises.
   - `reports.py` — scheduled weekly fleet email + monthly billing CSV.
+  - `pkg_builder.py` — assembles the **macOS installer bundle** per client: the
+    agent wheelhouse, the LaunchDaemon plist, the install scripts, a freshly
+    minted enrollment key in a 0600 `workstation.toml`, and a copy of
+    `scripts/build-macos-pkg.sh`. It stops short of a finished `.pkg` because it
+    must: `pkgbuild`/`productsign`/`notarytool` are macOS-only and notarytool is a
+    closed binary talking to an Apple service, so a Mac is required to sign
+    whatever central does. Hand-assembling an unsigned `.pkg` on Linux with
+    `xar`+`bomutils` was rejected — neither is packaged in current Ubuntu, and the
+    output would still need the Mac.
   - `msi_builder.py` — builds a self-contained Windows `.msi` for an enrolled
     agent in-container (msitools/`wixl`): bundles the Python embeddable runtime
     + agent wheel + NSSM with enrollment baked into `config.toml`; declarative
@@ -155,7 +164,7 @@ enforced; none of them is optional.
   `WINDOWS-MSI-TESTING.md` (build + Server 2016→2025 smoke) and
   `MACOS-CLIENT-TESTING.md` (real-CUPS verification + the outstanding real-Mac
   smoke).
-- `tests/` — pytest suite (~1675 tests; ~6min end-to-end on Postgres-less SQLite).
+- `tests/` — pytest suite (~1723 tests; ~7min end-to-end on Postgres-less SQLite).
   `test_compose_deployment.py` / `test_install_update.py` cover the deployment
   contract above; both skip cleanly where the docker CLI is absent.
   `test_macos_deployment.py` does the same for the LaunchDaemon plist and its

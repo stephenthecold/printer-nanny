@@ -1,0 +1,204 @@
+name: macOS installer
+
+# The ONLY place the .pkg build is actually exercised. Central assembles the
+# bundle on Linux and cannot go further: pkgbuild, productsign and notarytool are
+# macOS-only, and notarytool is a closed binary talking to an Apple service. So
+# everything below pkgbuild is unverifiable off a Mac, and this job is what closes
+# that -- the same relationship windows-client.yml has to the spooler.
+#
+# Path-filtered because macOS runner minutes bill at 10x on private repos, which
+# is steeper than the Windows job's 2x and worth not spending on a README change.
+#
+# What a green run here proves: the bundle central produces is one pkgbuild
+# accepts, the resulting .pkg has the identifier, version and payload we intend,
+# and its scripts are present and executable. What it does NOT prove: that the
+# postinstall works. The runner has no LaunchDaemon session worth loading into and
+# `installer` on a CI box is not a user's Mac -- so an actual install stays manual,
+# per deploy/MACOS-CLIENT-TESTING.md.
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'central/pkg_builder.py'
+      - 'deploy/macos-pkg/**'
+      - 'deploy/com.printernanny.workstation.plist'
+      - 'scripts/build-macos-pkg.sh'
+      - '.github/workflows/macos-pkg.yml'
+      - 'agent/**'
+  pull_request:
+    paths:
+      - 'central/pkg_builder.py'
+      - 'deploy/macos-pkg/**'
+      - 'deploy/com.printernanny.workstation.plist'
+      - 'scripts/build-macos-pkg.sh'
+      - '.github/workflows/macos-pkg.yml'
+      - 'agent/**'
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: macos-latest
+    # Hoisted to the JOB so the signing step's `if` can see it. A step's own `env:`
+    # is NOT available to that step's `if`, so testing it there is always false --
+    # signing would silently never run, which is the "looks configured, does
+    # nothing" failure this repo keeps writing tests against.
+    env:
+      PN_SIGN_IDENTITY: ${{ secrets.PN_SIGN_IDENTITY }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Install central (for the bundle assembler)
+        run: |
+          python -m pip install --upgrade pip
+          pip install -e ".[dev]"
+
+      - name: Assemble a bundle the way central does
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+          from central.pkg_builder import build_workstation_pkg_bundle, pkg_bundle_available
+          cap = pkg_bundle_available()
+          assert cap.available, cap.reason
+          out = Path("dist"); out.mkdir(exist_ok=True)
+          res = build_workstation_pkg_bundle(
+              client_name="CI Client", client_id=1,
+              central_url="https://central.invalid",
+              # Not a real credential: this bundle is thrown away and never
+              # points at a reachable server.
+              enroll_key="pnw_ci_placeholder_key", enroll_key_id=1,
+              out_dir=out,
+          )
+          print(f"bundle: {res.path} ({res.size} bytes, {res.wheel_count} wheels)")
+          Path("bundle-path.txt").write_text(str(res.path))
+          PY
+
+      - name: Unpack it
+        run: |
+          mkdir -p work
+          tar xzf "$(cat bundle-path.txt)" -C work
+          echo "--- layout ---"
+          find work -type f | sort
+          echo "--- the credential's mode must have survived the round trip ---"
+          mode=$(stat -f '%Lp' "work/payload/Library/Application Support/PrinterNanny/workstation.toml")
+          echo "workstation.toml: $mode"
+          [ "$mode" = "600" ] || { echo "::error::workstation.toml is $mode, expected 600"; exit 1; }
+          for s in preinstall postinstall; do
+            [ -x "work/scripts/$s" ] || { echo "::error::work/scripts/$s is not executable"; exit 1; }
+          done
+
+      - name: Shell-check the installer scripts with the real bash
+        run: |
+          bash -n work/scripts/preinstall
+          bash -n work/scripts/postinstall
+          bash -n work/build-macos-pkg.sh
+
+      - name: The plist must be one launchd accepts
+        run: |
+          plutil -lint "work/payload/Library/LaunchDaemons/com.printernanny.workstation.plist"
+          # A credential in ProgramArguments or EnvironmentVariables is readable by
+          # any local user via launchctl print. Checked on the file that actually
+          # ships, not the one in deploy/.
+          if plutil -p "work/payload/Library/LaunchDaemons/com.printernanny.workstation.plist" \
+               | grep -iE 'enroll|pnw_|password|secret'; then
+            echo "::error::a credential appears in the LaunchDaemon plist"
+            exit 1
+          fi
+
+      - name: pkgbuild + productbuild (unsigned)
+        run: |
+          cd work
+          set -a; . ./pkg.env; set +a
+          ./build-macos-pkg.sh --out-dir out
+
+      - name: Inspect the .pkg Apple's tooling produced
+        run: |
+          cd work
+          # out/ now holds exactly one .pkg: the component intermediate lives in
+          # out/.build so it cannot be mistaken for the installer.
+          PKG=$(ls out/*.pkg)
+          [ "$(ls out/*.pkg | wc -l)" -eq 1 ] \
+            || { echo "::error::out/ holds more than one .pkg; which is the installer?"; exit 1; }
+          echo "built: $PKG"
+          echo "--- identifier / version / payload, per pkgutil ---"
+          pkgutil --expand "$PKG" expanded
+          find expanded -maxdepth 2 | sort
+          # The identifier must be the workstation one. A shared identifier makes
+          # macOS treat two products as one, so installing one would replace the
+          # other -- the same trap as a shared MSI UpgradeCode.
+          grep -q 'com.printernanny.workstation' expanded/Distribution \
+            || { echo "::error::the pkg does not carry com.printernanny.workstation"; exit 1; }
+          # The scripts have to be IN the package, not merely in the bundle.
+          test -d expanded/*.pkg/Scripts || test -f expanded/*.pkg/Scripts \
+            || { echo "::error::the pkg has no Scripts archive"; exit 1; }
+          echo "--- payload contents ---"
+          for c in expanded/*.pkg; do
+            [ -f "$c/Payload" ] && (cd "$c" && gzip -dc Payload | cpio -it 2>/dev/null | sort | head -30)
+          done
+
+      - name: Confirm the payload carries the wheels and the key
+        run: |
+          cd work
+          for c in expanded/*.pkg; do
+            [ -f "$c/Payload" ] || continue
+            listing=$(cd "$c" && gzip -dc Payload | cpio -it 2>/dev/null)
+            echo "$listing" | grep -q 'printer_nanny_agent-.*\.whl' \
+              || { echo "::error::no agent wheel in the payload"; exit 1; }
+            echo "$listing" | grep -q 'workstation.toml' \
+              || { echo "::error::no workstation.toml in the payload"; exit 1; }
+            echo "$listing" | grep -q 'com.printernanny.workstation.plist' \
+              || { echo "::error::no LaunchDaemon plist in the payload"; exit 1; }
+          done
+          echo "payload OK"
+
+      # Signing and notarization only run where the secrets exist. Skipped rather
+      # than failed on a fork or an unconfigured repo: a red X for "no Apple
+      # account" teaches people to ignore red Xs.
+      - name: Sign and notarize
+        if: ${{ env.PN_SIGN_IDENTITY != '' }}
+        env:
+          PN_TEAM_ID: ${{ secrets.PN_TEAM_ID }}
+          PN_ASC_KEY_ID: ${{ secrets.PN_ASC_KEY_ID }}
+          PN_ASC_ISSUER_ID: ${{ secrets.PN_ASC_ISSUER_ID }}
+          MACOS_CERT_P12: ${{ secrets.MACOS_CERT_P12 }}
+          MACOS_CERT_PASSWORD: ${{ secrets.MACOS_CERT_PASSWORD }}
+          PN_ASC_KEY_P8: ${{ secrets.PN_ASC_KEY_P8 }}
+        run: |
+          set -euo pipefail
+          # A dedicated keychain, unlocked only for this job: importing into the
+          # login keychain leaves a Developer ID certificate on a shared runner.
+          KEYCHAIN="$RUNNER_TEMP/pn-signing.keychain-db"
+          PASS="$(uuidgen)"
+          security create-keychain -p "$PASS" "$KEYCHAIN"
+          security set-keychain-settings -lut 900 "$KEYCHAIN"
+          security unlock-keychain -p "$PASS" "$KEYCHAIN"
+          echo "$MACOS_CERT_P12" | base64 --decode > "$RUNNER_TEMP/cert.p12"
+          security import "$RUNNER_TEMP/cert.p12" -k "$KEYCHAIN" \
+            -P "$MACOS_CERT_PASSWORD" -T /usr/bin/productsign
+          security set-key-partition-list -S apple-tool:,apple: -s -k "$PASS" "$KEYCHAIN"
+          security list-keychains -d user -s "$KEYCHAIN" $(security list-keychains -d user | tr -d '"')
+          rm -f "$RUNNER_TEMP/cert.p12"
+
+          echo "$PN_ASC_KEY_P8" | base64 --decode > "$RUNNER_TEMP/asc.p8"
+          export PN_ASC_KEY_PATH="$RUNNER_TEMP/asc.p8"
+
+          cd work
+          set -a; . ./pkg.env; set +a
+          ./build-macos-pkg.sh --notarize --out-dir out
+
+          rm -f "$RUNNER_TEMP/asc.p8"
+          security delete-keychain "$KEYCHAIN"
+
+      - name: Upload the built package
+        uses: actions/upload-artifact@v4
+        with:
+          name: macos-pkg
+          # The CI bundle's key is a placeholder pointing at an unreachable
+          # server, so this artifact is not a live credential. A bundle built by
+          # central IS one, which is why that download is no-store.
+          path: work/out/*.pkg
+          if-no-files-found: error
+          retention-days: 7
