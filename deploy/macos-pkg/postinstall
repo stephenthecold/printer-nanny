@@ -1,0 +1,116 @@
+#!/bin/bash
+# Runs AFTER the payload is laid down, as root, by macOS Installer.
+#
+# WHY THERE IS A POSTINSTALL AT ALL
+# --------------------------------
+# The Windows MSI bundles a Python embeddable runtime because a Server box has no
+# Python. Every Mac has one, and bundling a *relocatable* macOS framework build is
+# a project of its own (python.org's build is not relocatable; python-build-
+# standalone is the real answer). So the payload carries the wheels and this
+# creates the venv from the Mac's own interpreter.
+#
+# That makes the install OFFLINE anyway: every wheel the client needs is in the
+# payload and pip is run with --no-index, so this never touches the network. An
+# MDM push onto a Mac behind a captive portal still works.
+#
+# `set -e` IS used here, unlike preinstall: a postinstall that half-completes
+# leaves a service that cannot start, and macOS Installer reporting success for
+# that is exactly the "central shows provisioned, user has nothing" failure this
+# codebase is organised against. A non-zero exit surfaces in the installer UI and
+# in /var/log/install.log.
+set -e
+
+LABEL="com.printernanny.workstation"
+INSTALL_DIR="/usr/local/printer-nanny-workstation"
+STATE_DIR="/Library/Application Support/PrinterNanny"
+LOG_DIR="/Library/Logs/PrinterNanny"
+CONFIG="${STATE_DIR}/workstation.toml"
+PLIST="/Library/LaunchDaemons/${LABEL}.plist"
+BIN_LINK="/usr/local/bin/printer-nanny-workstation"
+WHEELHOUSE="${INSTALL_DIR}/wheelhouse"
+
+say() { echo "printer-nanny: $*"; }
+die() { echo "printer-nanny: ERROR: $*" >&2; exit 1; }
+
+say "postinstall starting"
+
+# ---------------------------------------------------------------- interpreter --
+# /usr/bin/python3 is a shim that can trigger the Command Line Tools install
+# prompt -- fine interactively, fatal in an MDM push where nobody is watching. So
+# a real interpreter is preferred and the choice is logged, because "which Python
+# did it use" is the first question when a venv misbehaves.
+PYTHON=""
+for candidate in \
+  /opt/homebrew/bin/python3 \
+  /usr/local/bin/python3 \
+  /Library/Frameworks/Python.framework/Versions/Current/bin/python3 \
+  /usr/bin/python3
+do
+  if [ -x "$candidate" ] && "$candidate" -c 'import sys; sys.exit(0 if sys.version_info >= (3, 9) else 1)' 2>/dev/null; then
+    PYTHON="$candidate"
+    break
+  fi
+done
+[ -n "$PYTHON" ] || die "no Python 3.9+ found. Install one (or deploy Homebrew/python.org via MDM) and reinstall."
+say "using $PYTHON ($("$PYTHON" -V 2>&1))"
+
+# ------------------------------------------------------------------- the venv --
+# Rebuilt rather than reused: an upgrade may change the Python major version under
+# us, and a venv pointing at an interpreter that moved is a service that fails to
+# start with a traceback nobody reads.
+if [ -d "${INSTALL_DIR}/venv" ]; then
+  say "removing the previous venv"
+  /bin/rm -rf "${INSTALL_DIR}/venv"
+fi
+"$PYTHON" -m venv "${INSTALL_DIR}/venv" || die "could not create the venv"
+
+[ -d "$WHEELHOUSE" ] || die "the payload has no wheelhouse at ${WHEELHOUSE}"
+
+# --no-index --find-links: OFFLINE, on purpose. If this ever reaches the network
+# it means a wheel is missing from the payload, and that has to fail loudly here
+# rather than work on the build machine and fail on a locked-down Mac.
+"${INSTALL_DIR}/venv/bin/python" -m pip install \
+  --quiet --no-index --find-links "$WHEELHOUSE" \
+  --disable-pip-version-check \
+  printer-nanny-agent || die "offline install from the bundled wheelhouse failed"
+
+ENTRY="${INSTALL_DIR}/venv/bin/printer-nanny-workstation"
+[ -x "$ENTRY" ] || die "the package installed but ${ENTRY} is missing"
+/bin/ln -sf "$ENTRY" "$BIN_LINK"
+
+# --------------------------------------------------------------- permissions --
+/bin/mkdir -p "$STATE_DIR" "$LOG_DIR"
+# 0700: this directory holds the machine's own credential once it enrolls, and the
+# users whose printers it manages must not be able to read it.
+/bin/chmod 700 "$STATE_DIR"
+/usr/sbin/chown root:wheel "$STATE_DIR"
+
+# Re-asserted rather than trusted. pkgbuild does preserve payload modes, but the
+# whole security argument for this installer rests on this one file not being
+# world-readable, so it is set here too -- cheap, and it holds even if somebody
+# rebuilds the payload through a tool that normalises modes.
+if [ -f "$CONFIG" ]; then
+  /bin/chmod 600 "$CONFIG"
+  /usr/sbin/chown root:wheel "$CONFIG"
+else
+  die "the payload did not include ${CONFIG}; the client has no enrollment key"
+fi
+
+[ -f "$PLIST" ] || die "the payload did not include ${PLIST}"
+# launchd refuses a plist that is group- or world-writable, and does so quietly.
+/bin/chmod 644 "$PLIST"
+/usr/sbin/chown root:wheel "$PLIST"
+
+# ------------------------------------------------------------------ the daemon --
+say "loading ${LABEL}"
+/bin/launchctl bootout "system/${LABEL}" 2>/dev/null || true
+/bin/launchctl bootstrap system "$PLIST" || die "launchd refused ${PLIST}"
+/bin/launchctl enable "system/${LABEL}" || true
+
+# Verified, not assumed: bootstrap can succeed and the job still not be present.
+/bin/sleep 2
+/bin/launchctl print "system/${LABEL}" >/dev/null 2>&1 \
+  || die "launchd did not load ${LABEL} -- see ${LOG_DIR}/workstation.log"
+
+say "installed. log: ${LOG_DIR}/workstation.log"
+exit 0

@@ -1,0 +1,38 @@
+#!/bin/bash
+# Runs BEFORE the payload is laid down, as root, by macOS Installer.
+#
+# One job: stop the running daemon. Without this an upgrade replaces the venv and
+# the wheelhouse underneath a live process, which on a good day means a client
+# holding deleted file handles and on a bad one means a half-written venv the next
+# poll trips over. launchd will not restart it here because bootout is explicit.
+#
+# NOT idempotent-by-accident: `launchctl bootout` on a label that is not loaded
+# exits non-zero, and this script must not fail the install for that. Every
+# command that can legitimately fail is guarded, and `set -e` is deliberately
+# NOT used for that reason -- a preinstall that aborts leaves the Mac with the
+# old install and an installer error, which is worse than a stale daemon.
+LABEL="com.printernanny.workstation"
+PLIST="/Library/LaunchDaemons/${LABEL}.plist"
+
+echo "printer-nanny: preinstall starting"
+
+if /bin/launchctl print "system/${LABEL}" >/dev/null 2>&1; then
+  echo "printer-nanny: stopping ${LABEL}"
+  /bin/launchctl bootout "system/${LABEL}" 2>/dev/null || true
+  # Give launchd a moment to reap it. Bounded: a stuck process must not hang the
+  # whole install, and the payload overwrite is safe either way once launchd has
+  # been told to stop.
+  for _ in 1 2 3 4 5 6 7 8 9 10; do
+    /bin/launchctl print "system/${LABEL}" >/dev/null 2>&1 || break
+    /bin/sleep 0.5
+  done
+else
+  echo "printer-nanny: ${LABEL} was not loaded"
+fi
+
+# The plist is replaced by the payload, so remove the old one rather than letting
+# a stale copy linger if the new payload ever changes its name.
+[ -f "$PLIST" ] && /bin/rm -f "$PLIST"
+
+echo "printer-nanny: preinstall done"
+exit 0

@@ -36,6 +36,14 @@ from central.security import generate_enroll_key, hash_enroll_key
 router = APIRouter(prefix="/manage", tags=["manage"])
 
 
+def _pkg_cap():
+    """Whether the macOS bundle can be assembled here. Cheap: it never shells out
+    to a macOS tool, because it never runs one."""
+    from central.pkg_builder import pkg_bundle_available
+
+    return pkg_bundle_available()
+
+
 def _msi_cap():
     """Whether this central image can build an MSI at all.
 
@@ -149,6 +157,8 @@ def machines_page(
         assignments=assignments,
         flash=_pop_flash(request),
         msi_available=_msi_cap().available,
+        pkg_available=_pkg_cap().available,
+        pkg_reason=_pkg_cap().reason,
         msi_reason=_msi_cap().reason,
         drivers=drivers,
         # Shown exactly once, straight after minting, then gone. Held in the
@@ -500,6 +510,109 @@ def build_workstation_msi_route(
         path=str(result.path),
         media_type="application/x-msi",
         filename=f"printer-nanny-workstation-{safe}.msi",
+        background=BackgroundTask(shutil.rmtree, out_dir, ignore_errors=True),
+    )
+
+
+@router.post("/machines/pkg")
+def download_macos_pkg_bundle(
+    request: Request,
+    client_id: int = Form(...),
+    db: Session = Depends(get_db),
+):
+    """Build this client's macOS installer bundle, minting the key it carries.
+
+    A BUNDLE RATHER THAN A FINISHED .pkg, AND WHY THAT IS NOT A SHORTCUT
+    -------------------------------------------------------------------
+    ``pkgbuild``, ``productsign`` and ``xcrun notarytool`` are macOS-only, and
+    notarytool is a closed binary talking to an Apple service. A Mac is therefore
+    required to sign, whatever we do here -- so central assembles the payload and
+    mints the key (the parts only central can do) and hands over a bundle carrying
+    the build script. See ``central/pkg_builder`` for the alternative that was
+    rejected and why.
+
+    THE RESPONSE IS A CREDENTIAL
+    ---------------------------
+    The bundle contains this client's enrollment key, so it is served
+    no-store: a proxy or browser cache holding it is a copy nobody knows about.
+    Same reasoning as the MSI, sharper here because a .tar.gz is a thing people
+    save and commit.
+    """
+    user = _manager(request, db)
+    if user is None:
+        return _redirect("/login")
+
+    from central.pkg_builder import build_workstation_pkg_bundle, pkg_bundle_available
+
+    client = db.get(m.Client, client_id)
+    if client is None:
+        _flash(request, "That client no longer exists.")
+        return _redirect("/manage/machines")
+
+    cap = pkg_bundle_available()
+    if not cap.available:
+        record(db, request, user, "workstation.pkg_bundle",
+               target=f"client:{client.id}", detail=f"unavailable: {cap.reason}")
+        db.commit()
+        _flash(request, cap.reason)
+        return _redirect(f"/manage/machines?client_id={client.id}")
+
+    from central.runtime import load_settings
+
+    rt = load_settings(db)
+    central_url = (rt.get("app.public_url") or str(request.base_url)).rstrip("/")
+
+    key = generate_enroll_key()
+    row = m.WorkstationEnrollKey(
+        client_id=client.id,
+        key_hash=hash_enroll_key(key),
+        label=f"macOS pkg build for {client.name}"[:120],
+        created_by_user_id=user.id,
+    )
+    db.add(row)
+    db.flush()
+
+    out_dir = Path(tempfile.mkdtemp(prefix="pn-ws-pkg-"))
+    try:
+        result = build_workstation_pkg_bundle(
+            client_name=client.name,
+            client_id=client.id,
+            central_url=central_url,
+            enroll_key=key,
+            enroll_key_id=row.id,
+            out_dir=out_dir,
+        )
+    except Exception as exc:  # noqa: BLE001 - a build failure is a flash, not a 500
+        shutil.rmtree(out_dir, ignore_errors=True)
+        # Roll the key back, exactly as the MSI path does: a key minted for an
+        # installer that was never produced is a live credential nobody holds and
+        # nobody will think to revoke, which is worse than no key because it looks
+        # legitimate in the list.
+        db.rollback()
+        record(db, request, user, "workstation.pkg_bundle",
+               target=f"client:{client.id}", detail=f"failed: {exc}")
+        db.commit()
+        _flash(request, f"macOS bundle build failed: {exc}")
+        return _redirect(f"/manage/machines?client_id={client.id}")
+
+    record(
+        db, request, user, "workstation.pkg_bundle",
+        target=f"client:{client.id}",
+        # The key id, never the key. This is what ties a bundle in the wild back
+        # to the row an operator revokes.
+        detail=(f"ok enroll_key={row.id} size={result.size} "
+                f"agent_version={result.agent_version} "
+                f"wheels={result.wheel_count} identifier={result.identifier}"),
+    )
+    db.commit()
+
+    safe = "".join(ch for ch in client.name if ch.isalnum() or ch in "-_")[:40] or "client"
+    return FileResponse(
+        path=str(result.path),
+        media_type="application/gzip",
+        filename=f"printer-nanny-workstation-{safe}-macos-bundle.tar.gz",
+        # no-store, not merely no-cache: this body is a credential.
+        headers={"Cache-Control": "no-store, max-age=0", "Pragma": "no-cache"},
         background=BackgroundTask(shutil.rmtree, out_dir, ignore_errors=True),
     )
 

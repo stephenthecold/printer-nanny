@@ -208,6 +208,38 @@
   {% endif %}
 </div>
 
+{# ------------------------------------------------------- macOS installer -- #}
+<div class="{{ c.card_cls() }} mb-8">
+  {{ c.section_title("macOS installer") }}
+  <p class="mb-4 text-sm text-slate-600">
+    A bundle for {{ client.name }}: the client's wheels, its LaunchDaemon, and a
+    <strong>freshly minted enrollment key</strong> — one per build, so revoking a
+    leaked installer leaves every other install alone. Run
+    <code>./build-macos-pkg.sh</code> from the bundle <strong>on a Mac</strong> to
+    produce the <code>.pkg</code>.
+  </p>
+  <p class="mb-4 text-sm text-slate-600">
+    Central cannot finish the job itself: <code>pkgbuild</code>,
+    <code>productsign</code> and <code>notarytool</code> exist only on macOS, and
+    signing needs your own Developer ID certificate. An <em>unsigned</em> build is
+    installable by MDM straight away; signing and notarizing is what makes it
+    double-clickable for a human.
+  </p>
+  <div class="{{ c.note('warning', 'mb-4') }}">
+    The bundle contains the enrollment key in a <code>0600</code> file. Treat the
+    download as a secret — don't commit it or attach it to a ticket — and delete it
+    once the <code>.pkg</code> is built.
+  </div>
+  {% if pkg_available %}
+    <form method="post" action="/manage/machines/pkg">
+      <input type="hidden" name="client_id" value="{{ client.id }}">
+      <button type="submit" class="{{ c.btn('primary') }}">Download macOS bundle</button>
+    </form>
+  {% else %}
+    <div class="{{ c.note('muted') }}">{{ pkg_reason }}</div>
+  {% endif %}
+</div>
+
 {# ------------------------------------------------------------ machines -- #}
 <div class="{{ c.card_cls() }}">
   {{ c.section_title("Workstations") }}
