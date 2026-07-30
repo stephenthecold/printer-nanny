@@ -197,6 +197,106 @@ def test_the_same_uid_is_sent_on_re_enrollment(tmp_path):
     assert central.enroll_calls[0][1] == uid
 
 
+# ------------------- enrollment is inside the retry loop -------------------- #
+#
+# These cover a defect found by installing on a real Mac and nothing else: the
+# poll loop honoured run()'s "transport failures are retried, not fatal"
+# contract while ``ensure_enrolled`` sat above it with no handler. A central
+# that could not be resolved therefore killed the process, launchd respawned it
+# every 60s, and the log grew ~9.8 MB/day of tracebacks stating no reason -- at
+# exactly the moment a freshly imaged machine is least likely to have network.
+
+
+class _UnreachableCentral(FakeCentral):
+    """Enrolls only after ``fails`` attempts, like a box behind a captive portal."""
+
+    def __init__(self, fails=99, **kw):
+        super().__init__(**kw)
+        self.fails = fails
+        self.attempts = 0
+
+    def enroll(self, enroll_key, uid, name):
+        self.attempts += 1
+        if self.attempts <= self.fails:
+            raise OSError("[Errno 8] nodename nor servname provided, or not known")
+        return super().enroll(enroll_key, uid, name)
+
+
+def _run_with(monkeypatch, central, **kw):
+    monkeypatch.setattr(svc, "WorkstationClient", lambda *a, **k: central)
+    monkeypatch.setattr(svc, "console_user", lambda: None)
+    return svc.run("https://central.invalid", "pnw_k", once=True, **kw)
+
+
+def test_an_unreachable_central_at_enrollment_does_not_kill_the_service(
+    monkeypatch, tmp_path
+):
+    central = _UnreachableCentral()
+    # The point: this returns rather than raising. Before the fix the transport
+    # error propagated out of run() and out of main(), and the service died.
+    report = _run_with(monkeypatch, central, state_dir=str(tmp_path))
+    assert report.cycle_error
+    assert "nodename nor servname" in report.cycle_error
+
+
+def test_a_cycle_that_never_reached_central_is_not_reported_as_ok(
+    monkeypatch, tmp_path
+):
+    """--once must not exit 0 for work it did not do -- the `sent=False` rule."""
+    report = _run_with(monkeypatch, _UnreachableCentral(), state_dir=str(tmp_path))
+    assert report.ok is False
+
+
+def test_enrollment_is_retried_on_the_next_tick(monkeypatch, tmp_path):
+    """The whole point of moving it inside the loop: it recovers by itself."""
+    central = _UnreachableCentral(fails=2)
+    monkeypatch.setattr(svc, "WorkstationClient", lambda *a, **k: central)
+    monkeypatch.setattr(svc, "console_user", lambda: None)
+
+    ticks = []
+
+    def _stop_after_three(seconds):
+        ticks.append(seconds)
+        if len(ticks) >= 3:
+            raise KeyboardInterrupt
+
+    monkeypatch.setattr(svc.time, "sleep", _stop_after_three)
+    with pytest.raises(KeyboardInterrupt):
+        svc.run("https://central.invalid", "pnw_k", state_dir=str(tmp_path),
+                interval=1)
+
+    assert central.attempts == 3, "it must keep trying, not give up after one"
+    assert central.machine_id == 7, "and adopt the credential once it succeeds"
+
+
+def test_a_refused_key_is_still_terminal(monkeypatch, tmp_path):
+    """A key central has rejected must NOT be retried forever: the CLI's
+    distinct exit code exists so the reason is reported once, not buried."""
+
+    class _RefusingCentral(FakeCentral):
+        def enroll(self, enroll_key, uid, name):
+            raise svc.ServiceError("enrollment refused: the key is not valid")
+
+    monkeypatch.setattr(svc, "WorkstationClient", lambda *a, **k: _RefusingCentral())
+    monkeypatch.setattr(svc, "console_user", lambda: None)
+    with pytest.raises(svc.ServiceError):
+        svc.run("https://central.invalid", "pnw_k", once=True,
+                state_dir=str(tmp_path))
+
+
+def test_an_enrolled_client_makes_no_enroll_request_per_cycle(
+    monkeypatch, tmp_path
+):
+    """Moving it into the loop must stay free: once enrolled it only adopts."""
+    central = FakeCentral()
+    svc.ensure_enrolled(
+        central, enroll_key="pnw_k", computer_name="PC1", state_dir=str(tmp_path)
+    )
+    central.enroll_calls.clear()
+    _run_with(monkeypatch, central, state_dir=str(tmp_path))
+    assert central.enroll_calls == []
+
+
 # --------------------------- spec mapping ---------------------------------- #
 
 

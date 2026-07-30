@@ -144,6 +144,11 @@ def main(argv: Optional[list] = None) -> int:
         return 0
 
     if args.once:
+        if report.cycle_error:
+            # Stated, and non-zero below. A cycle that never reached central has
+            # no outcomes to print, and printing nothing then exiting 0 is how a
+            # diagnostic run reports success for work it did not do.
+            print(f"cycle did not complete: {report.cycle_error}")
         for queue, outcome in sorted(report.outcomes.items()):
             print(f"{queue}: {outcome}")
         for queue, why in sorted(report.skipped.items()):

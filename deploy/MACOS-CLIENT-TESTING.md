@@ -5,10 +5,19 @@ is proven, by what, and what is still outstanding.
 
 **Status.** The queue, vendor-driver and default-printer logic is verified against
 a **real CUPS scheduler** (see below — that verification, plus the required
-end-to-end smoke, has now found **seven** defects). What is *not*
-verified is a **real Mac**: launchd, `/dev/console`, `dscl`, a real printer, and
-MDM interaction have never been exercised. Treat the manual smoke section as
-outstanding work, not as a record of work already done.
+end-to-end smoke, found **seven** defects).
+
+**It has now also run on a real Mac** — macOS 26.5.2, Apple Silicon, system
+Python 3.9.6, no Homebrew — including an actual `installer -pkg` of a `.pkg`
+built by `pkgbuild` on that machine, the LaunchDaemon loaded by launchd and
+running as root, and a queue provisioned and a console user's default set by that
+daemon. That run found an **eighth** defect, which is described below and which
+nothing short of an install could have found: enrollment sat outside the poll
+loop's retry handler, so a central it could not resolve killed the process,
+launchd respawned it every 60s, and the daemon log grew ~9.8 MB/day of
+tracebacks. What is *still* unverified is listed at the end: **a page has never
+come out**, and MDM, a non-English Mac, fast user switching and a
+directory-bound Mac remain untouched.
 
 | | **Site agent** | **Workstation client** |
 |---|---|---|
@@ -167,6 +176,50 @@ A green run **still does not prove a page comes out.** Print one.
 
 ---
 
+### The eighth defect — what only an actual install could find
+
+Every check above passes on a machine that can reach central. The `.pkg` that was
+installed to find this one deliberately could not: it pointed at
+`https://central.invalid`, which is what a typo'd server URL, a VLAN that is not
+up yet, or a first boot behind a captive portal all look like.
+
+`run()` documents its contract — *"Transport failures are logged and retried on
+the next tick rather than killing the service"* — and the poll loop honoured it.
+But `ensure_enrolled` was called **above** the loop, outside that `try`. So the
+rule held for every poll and failed at enrollment, which is precisely the moment
+a freshly imaged machine is least likely to have a network. Observed on the Mac:
+
+- an unhandled `httpx.ConnectError` traceback, exit 1;
+- launchd's `KeepAlive{SuccessfulExit=false}` respawning on `ThrottleInterval`
+  — every **60s**, five times more often than a successful poll;
+- `/Library/Logs/PrinterNanny/workstation.log` growing **9.8 MB/day**
+  (measured: 118.6 B/s over 75s), root-owned, with **no rotation** configured in
+  the plist or `/etc/newsyslog.d`;
+- and no stated reason anywhere in it — just httpx internals.
+
+Fixed by moving `ensure_enrolled` inside the loop, which costs nothing (once
+enrolled it adopts the stored credential and makes no request). A refused **key**
+still re-raises, because that is terminal and must be reported once rather than
+retried forever. After the fix, the same unreachable central produces one
+`cycle failed, will retry in 300s: …` line per interval and no traceback —
+~44 KB/day, a ~230× reduction, verified by running it.
+
+**A related trap, not yet resolved.** `workstation_cli` returns exit **2** for a
+refused key, commented "restarting on a bad key just retries forever and buries
+the reason in a restart loop". On macOS the plist defeats that:
+`KeepAlive{SuccessfulExit=false}` restarts on *any* non-zero exit, so exit 2
+loops too — just with one line instead of a traceback. launchd cannot express
+"restart unless the exit code is 2". Worth deciding deliberately rather than
+leaving the comment describing something that does not happen.
+
+Log rotation was considered and **not** shipped: `StandardOutPath` means launchd
+opens the file and the process inherits the descriptor, so a `newsyslog` rename
+would leave the daemon writing to the rotated inode unless it also learns to
+reopen on a signal. That is a real change needing its own verification, and with
+the growth rate down 230× it is no longer urgent.
+
+---
+
 ## Install
 
     curl -fsSL https://CENTRAL/install-workstation-macos.sh | sudo bash -s -- \
@@ -224,33 +277,42 @@ automated coverage `pkgbuild` has; nothing on Linux can provide any.
 
 ## Manual smoke on a real Mac (the part nothing above can do)
 
-Everything in this section is **outstanding**.
+Checked boxes were done on 2026-07-30 against macOS 26.5.2 / Apple Silicon /
+system Python 3.9.6 / no Homebrew, with a `.pkg` built by `pkgbuild` on that
+machine and installed with `installer -pkg … -target /`. Everything still
+unchecked is genuinely outstanding.
 
 ### 1. Install and enrollment
 
-- [ ] The installer completes on Apple Silicon **and** Intel.
-- [ ] It completes on a Mac with **no Homebrew** — `/usr/bin/python3` is a stub
+- [x] The installer completes on Apple Silicon. *(Intel still untested.)*
+- [x] It completes on a Mac with **no Homebrew** — `/usr/bin/python3` is a stub
       that can trigger the Command Line Tools prompt, which is fatal in an MDM
       push. The installer prefers a real interpreter; confirm what it picked.
-- [ ] `launchctl print system/com.printernanny.workstation` shows it loaded.
-- [ ] The machine appears on the **Machines** page within one poll.
-- [ ] `/Library/Application Support/PrinterNanny` is `0700 root:wheel` and
+      *(Host had no Homebrew and no python.org build; the loop fell through all
+      three preferred candidates to `/usr/bin/python3` (3.9.6) and said so.)*
+- [x] `launchctl print system/com.printernanny.workstation` shows it loaded.
+- [x] The machine appears on the **Machines** page within one poll.
+      *(Enrolled and checked in, `platform='macos'` recorded by check-in.)*
+- [x] `/Library/Application Support/PrinterNanny` is `0700 root:wheel` and
       `workstation.toml` is `0600`.
-- [ ] As an ordinary user, `launchctl print system/com.printernanny.workstation`
+- [x] As an ordinary user, `launchctl print system/com.printernanny.workstation`
       shows **no enrollment key**, and `cat` of `workstation.toml` is denied.
+      *(Both confirmed; the plist carries only the path.)*
 
 ### 2. Queues
 
-- [ ] A `driverless` printer assigned to the machine appears in
-      **System Settings → Printers & Scanners** within one poll.
+- [x] A `driverless` printer assigned to the machine appears within one poll.
+      *(Created by the root LaunchDaemon, not by a hand-run client.)*
 - [ ] It prints a test page. *(Nothing short of this proves the path works.)*
-- [ ] `lpstat -v` shows the URI central sent.
-- [ ] The queue is **not shared** (`lpoptions -p NAME | tr ' ' '\n' | grep shared`
+      **Still outstanding** — no printer was reachable from the test host.
+- [x] `lpstat -v` shows the URI central sent.
+- [x] The queue is **not shared** (`lpoptions -p NAME | tr ' ' '\n' | grep shared`
       → `printer-is-shared=false`). A shared queue advertises a workstation's
-      printers to the whole subnet.
-- [ ] Unassigning it removes the queue on the next poll.
-- [ ] A printer the **user** added themselves survives a poll, and is not
-      mentioned in the outcomes.
+      printers to the whole subnet. *(Confirmed, and `printer-state-reasons=none`.)*
+- [x] Unassigning it removes the queue on the next poll.
+- [x] A printer the **user** added themselves survives a poll, and is not
+      mentioned in the outcomes. *(All 13 pre-existing queues on the host
+      survived every pass untouched.)*
 - [ ] Re-addressing the printer in central repairs the queue in place — one
       queue, not a broken one beside a new one.
 - [ ] Powering the printer **off** and re-addressing it leaves the existing queue
@@ -259,9 +321,13 @@ Everything in this section is **outstanding**.
 
 ### 3. The default printer
 
-- [ ] An assigned default becomes the console user's default in System Settings.
-- [ ] `lpstat -d` **as that user** agrees.
-- [ ] Central reports it as applied — and reports a *reason* when it is not.
+- [x] An assigned default becomes the console user's default.
+      *(Set by the **root** daemon via `sudo -u`, which is the production path.)*
+- [x] `lpstat -d` **as that user** agrees. *(And the write landed in the user's
+      `~/.cups/lpoptions`, not root's `/etc/cups/lpoptions` — which is the check
+      that proves it impersonated rather than setting root's own default.)*
+- [x] Central reports it as applied — and reports a *reason* when it is not.
+      *(Reported under the **CUPS** queue name, so defect 6 stays fixed.)*
 - [ ] At the login window it reports "nobody is signed in" rather than an error.
 - [ ] After a **fast user switch**, the next poll sets the default for the user
       now at the console, and does not touch the other's.
@@ -274,8 +340,10 @@ Everything in this section is **outstanding**.
 
 - [ ] On a Mac bound to AD/Entra, `dscl . -read /Users/$USER NetworkUser` returns
       a UPN and the user's **own** assignments resolve (not just the machine's).
-- [ ] On a **standalone** Mac with no UPN, machine-scoped printers still
+- [x] On a **standalone** Mac with no UPN, machine-scoped printers still
       provision and the user-scoped ones are simply absent — not an error.
+      *(`dscl` ran, found no UPN, logged one INFO line, and the machine's own
+      printers provisioned normally.)*
 
 ### 5. Things that must be reported, not silently assumed
 
@@ -285,8 +353,10 @@ Everything in this section is **outstanding**.
       be downloaded onto the Mac — check the Machines page shows the Mac as
       `macos`, then confirm nothing appears under
       `/Library/Application Support/PrinterNanny/drivers`.
-- [ ] An unreachable printer produces an error naming the address, and the poll
-      still checks in.
+- [x] An unreachable printer produces an error naming the address, and the poll
+      still checks in. *(`lpadmin: Unable to connect to "192.0.2.77:631"` —
+      lpadmin's own words, not our "timed out"; no carcass; the reachable queue
+      alongside it was created in the same pass.)*
 - [ ] Ten unreachable printers do not stop the poll completing; the ones not
       reached say so.
 
@@ -338,27 +408,38 @@ rather than in outcome.
 Everything here is outstanding, and the `.pkg` path has **no** local automated
 coverage — `installer`, `pkgbuild` and `notarytool` do not exist off macOS.
 
-- [ ] `./build-macos-pkg.sh` produces a `.pkg` on a Mac with the Xcode command line
+- [x] `./build-macos-pkg.sh` produces a `.pkg` on a Mac with the Xcode command line
       tools, and `pkgutil --expand` shows `com.printernanny.workstation` and the
-      agent wheel in the payload.
-- [ ] `sudo installer -pkg <pkg> -target /` installs, and
+      agent wheel in the payload. *(Also: exactly one `.pkg` in `out/`, min OS
+      10.12, `preinstall`/`postinstall` present and executable and parsing under
+      real macOS `bash` 3.2.57, plist passing `plutil -lint` with no credential
+      in it.)*
+- [x] `sudo installer -pkg <pkg> -target /` installs, and
       `launchctl print system/com.printernanny.workstation` shows it loaded.
-- [ ] `/Library/Application Support/PrinterNanny/workstation.toml` is **0600
+- [x] `/Library/Application Support/PrinterNanny/workstation.toml` is **0600
       root:wheel** after install. As an ordinary user, `cat` of it is denied.
-- [ ] The install worked **offline** — pull the network first. Every wheel is in
-      the payload and `postinstall` runs pip with `--no-index`, so this must
-      succeed with no route to PyPI.
-- [ ] On a Mac with **no Homebrew and no python.org build**, the postinstall either
+- [x] The install worked **offline** — every wheel is in the payload and
+      `postinstall` runs pip with `--no-index`. *(Verified as a distinct step:
+      a venv from `/usr/bin/python3` + the exact `--no-index --find-links`
+      invocation installed `printer-nanny-agent 0.16.0` and a working entry
+      point. All 12 wheels are `py3-none-any`.)*
+- [x] On a Mac with **no Homebrew and no python.org build**, the postinstall either
       picks `/usr/bin/python3` successfully or fails with the stated reason. It must
       not hang on a Command Line Tools prompt.
-- [ ] Reinstalling over an existing install works: `preinstall` stops the daemon,
+- [x] Reinstalling over an existing install works: `preinstall` stops the daemon,
       the venv is rebuilt, and the machine keeps its identity (same row on the
-      Machines page, not a new one).
+      Machines page, not a new one). *(The machine UID minted before the reinstall
+      was the one used after it — `machine.json` is not in the payload, so it
+      survives, which is the mechanism.)*
 - [ ] `--notarize` produces a package where `spctl --assess --type install -vv`
       accepts it, and `xcrun stapler validate` passes.
 - [ ] A **double-click** on the notarized package opens Installer without a
       Gatekeeper warning. On the *unsigned* one, confirm Gatekeeper refuses it — if
       it doesn't, the signing story is being tested wrong.
+      *(Second half **done**: `spctl --assess --type install -vv` on the unsigned
+      build → `rejected`, `source=no usable signature`, exit 3; `pkgutil
+      --check-signature` → `Status: no signature`. The notarized half still needs
+      a Developer ID certificate.)*
 - [ ] An MDM `InstallEnterpriseApplication` push of the **unsigned** package
       installs successfully, since that is the path that does not need signing.
 
