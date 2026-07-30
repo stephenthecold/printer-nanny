@@ -416,16 +416,43 @@ def _windows_set_default_printer(
 def _stop_windows_managing_default() -> None:  # pragma: no cover - Windows-only
     """Turn off "Let Windows manage my default printer" for the impersonated user.
 
-    Written through HKCU **while impersonating**, so it lands in that user's hive
-    rather than SYSTEM's. Without this the default is re-pointed at whatever they
-    print to next, and central would be reporting a default that evaporates.
-    """
-    import winreg
+    **HKEY_CURRENT_USER is not the impersonated user's hive**, which is what this
+    used to assume. ``HKEY_CURRENT_USER`` is resolved against the *process* token
+    and cached per process, so in a session-0 service running as LocalSystem it
+    keeps pointing at SYSTEM's own hive no matter who the thread is impersonating.
+    The write then either lands on SYSTEM (wrong user, silently useless) or is
+    refused outright.
 
-    with winreg.CreateKeyEx(
-        winreg.HKEY_CURRENT_USER, _LEGACY_MODE_KEY, 0, winreg.KEY_SET_VALUE
-    ) as key:
-        winreg.SetValueEx(key, _LEGACY_MODE_VALUE, 0, winreg.REG_DWORD, 1)
+    Measured on a real Windows 11 machine, which is the only thing that could show
+    it: under NSSM as LocalSystem this raised ``[WinError 5] Access is denied``,
+    and because it runs *before* ``SetDefaultPrinter`` it took the whole feature
+    down with it -- with the shipped default (``manage_default_printer`` on) an
+    assigned default never applied at all. Flipping that setting off made the same
+    poll succeed, which is what isolated this call. The identical call succeeds
+    when run outside the service, so nothing short of the service context reaches
+    it.
+
+    ``RegOpenCurrentUser`` is the documented API for precisely this: it resolves
+    the hive of the **thread** token, so it follows the impersonation.
+    """
+    import ctypes
+    import winreg
+    from ctypes import wintypes
+
+    advapi32 = ctypes.WinDLL("advapi32", use_last_error=True)
+    hkey = wintypes.HANDLE()
+    rc = advapi32.RegOpenCurrentUser(
+        wintypes.DWORD(winreg.KEY_WRITE), ctypes.byref(hkey)
+    )
+    if rc != 0:
+        raise OSError(0, f"RegOpenCurrentUser failed (error {rc})")
+    try:
+        with winreg.CreateKeyEx(
+            hkey.value, _LEGACY_MODE_KEY, 0, winreg.KEY_SET_VALUE
+        ) as key:
+            winreg.SetValueEx(key, _LEGACY_MODE_VALUE, 0, winreg.REG_DWORD, 1)
+    finally:
+        advapi32.RegCloseKey(hkey)
 
 
 def _read_default_printer(winspool) -> str:  # pragma: no cover - Windows-only
