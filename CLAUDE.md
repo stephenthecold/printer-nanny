@@ -160,11 +160,12 @@ enforced; none of them is optional.
   an index declared only in a later migration is silently absent on new installs.
   Declare indexes in the model's `__table_args__` and mirror them in the migration.
 - `deploy/` — Caddyfile, installer scripts (`install-agent.sh`/`.ps1`,
-  `install-workstation-macos.sh`), sample systemd unit and launchd plists, plus
-  `WINDOWS-MSI-TESTING.md` (build + Server 2016→2025 smoke) and
-  `MACOS-CLIENT-TESTING.md` (real-CUPS verification + the outstanding real-Mac
-  smoke).
-- `tests/` — pytest suite (~1723 tests; ~7min end-to-end on Postgres-less SQLite).
+  `install-workstation-macos.sh`), sample systemd unit and launchd plists,
+  `macos-pkg/` (the `preinstall`/`postinstall` the `.pkg` runs as root — the same
+  files that ship, never a second copy), plus `WINDOWS-MSI-TESTING.md` (build +
+  Server 2016→2025 smoke) and `MACOS-CLIENT-TESTING.md` (real-CUPS verification,
+  the `.pkg` procedure, and the outstanding real-Mac smoke).
+- `tests/` — pytest suite (~1725 tests; ~6.5min end-to-end on Postgres-less SQLite).
   `test_compose_deployment.py` / `test_install_update.py` cover the deployment
   contract above; both skip cleanly where the docker CLI is absent.
   `test_macos_deployment.py` does the same for the LaunchDaemon plist and its
@@ -489,28 +490,42 @@ enforced; none of them is optional.
   a local run can pass while CI fails on a file you never checked.
 
 ## Status
-**Every feature described below is built. What is NOT done is verification on
-real workstations**, and that distinction is the only one worth carrying at the
-top of this section: the site agent and the whole central surface run in
-production, and the workstation client — queue provisioning, driver staging, the
-default printer, the MSI — has never executed against a real Windows spooler,
-driver store or console session. Every test above `PowerShellRunner` uses a fake,
-which is exactly the blindness that let tier 1 ship broken for its entire
-existence. Treat `deploy/WINDOWS-MSI-TESTING.md` as the outstanding work, not as
-documentation of work already done.
+**Every feature described below is built. What varies is how much of it has been
+run against the real thing**, and that is the distinction worth carrying at the
+top of this section, because the three halves of this system sit at three
+different levels of proof:
 
-The **macOS** half of that client sits one notch better and it is worth being
-precise about why. Its CUPS logic *is* verified against a real scheduler —
-`scripts/macos_cups_testbed.sh` stands up a throwaway `cupsd` on any Linux box
-and `scripts/macos_provision_check.py` drives the backend through it, which found
-**six shipped defects** the unit tests had all passed over, and the required
-end-to-end smoke found a **seventh** (see the conventions above; two of them made
-the assigned default printer impossible in different ways, and another was the
-tier-1 bug in CUPS clothing). What is still unverified is a
-**Mac**: launchd, `/dev/console`, `dscl`, a real printer, a non-English system
-locale and MDM interaction have never run. `deploy/MACOS-CLIENT-TESTING.md` is
-that outstanding list. And a green real-CUPS run still does not prove a page comes
-out — only `--printer-uri` against real hardware gets near that.
+- **The site agent and the whole central surface run in production.** Treat these
+  as verified.
+- **The macOS workstation client is verified against a real CUPS scheduler and a
+  real `pkgbuild`, but never against a Mac.** See below for exactly which parts.
+- **The Windows workstation client has never executed against a real spooler,
+  driver store or console session.** Queue provisioning, driver staging, the
+  default printer, the MSI — every test above `PowerShellRunner` uses a fake,
+  which is exactly the blindness that let tier 1 ship broken for its entire
+  existence. Treat `deploy/WINDOWS-MSI-TESTING.md` as the outstanding work, not as
+  documentation of work already done.
+
+**Why the macOS half sits better, precisely.** Its CUPS logic *is* verified against
+a real scheduler: `scripts/macos_cups_testbed.sh` stands up a throwaway `cupsd` on
+any Linux box and `scripts/macos_provision_check.py` drives the backend through it
+(54 checks). That found **six shipped defects** the unit tests had all passed over,
+the required end-to-end smoke found a **seventh**, and fixing the third
+*introduced* the seventh — see the conventions above. Two of them made the assigned
+default printer impossible in different ways, and two were the tier-1 bug in CUPS
+clothing (a queue that exists, lists, converges clean and cannot print), which with
+the original Windows one makes three times this codebase has shipped that exact
+failure. Its **`.pkg` is built by Apple's own tooling on a `macos-latest` runner**
+(`.github/workflows/macos-pkg.yml`), which confirms the identifier, the payload,
+the scripts and that the enrollment key's `0600` survives the round trip.
+
+What is still unverified is a **Mac**: launchd, `/dev/console`, `dscl`, a real
+printer, a non-English system locale, MDM interaction, and — the one with no
+automated coverage at all, since `installer` does not exist off macOS — an actual
+**install**. `deploy/MACOS-CLIENT-TESTING.md` is that list. Two things there are
+worth doing first: confirming Gatekeeper **refuses** the unsigned build, because if
+it does not then the signing story is being tested wrong; and printing a page,
+since neither a green real-CUPS run nor a green `pkgbuild` gets near that.
 
 **Print management** (the Printix-shaped half, feature-complete): end users,
 groups, and per-user / per-group printer assignment with a deterministic
@@ -556,12 +571,40 @@ LaunchAgent: `lpadmin` needs root, queues are machine-wide, the machine's
 credential must not be readable by the user whose printers it manages, and the
 client has to be able to become whoever is at the console *now* (after a fast user
 switch) to set their default. The site agent's plist next door is correctly a
-LaunchAgent — it only reads SNMP. macOS vendor driver staging and a signed,
-notarized `.pkg` are deliberately **not** built: vendor PPDs were deprecated in
-10.14 and vendor packages are `.pkg` installers, so `pnputil` has no analogue, and
-a `.pkg` needs an Apple Developer ID and a notarization round trip. A
-`driver_required` printer on a Mac is a stated skip, and no Windows driver archive
-is downloaded to unpack on a platform that cannot stage it.
+LaunchAgent — it only reads SNMP.
+
+macOS **does** stage vendor drivers, by binding a **PPD** — one an MDM already
+installed (`system`), one extracted from an uploaded archive (`ppd`), or one a
+vendor `.pkg` installs when an operator has opted in (`pkg`, default off). No
+Windows driver archive is ever downloaded onto a platform that cannot stage it.
+The details, and the seventh instance of this codebase's recurring failure, are in
+the conventions above.
+
+It also ships as a **`.pkg`**, built from a per-client bundle central assembles
+(`central/pkg_builder.py`) plus `scripts/build-macos-pkg.sh` run on a Mac. The
+split is not a shortcut — `pkgbuild`, `productsign` and `notarytool` are
+macOS-only, notarytool is a closed binary talking to an Apple service, and signing
+needs the operator's own Developer ID certificate — so a Mac is required whatever
+central does, and central therefore does the part only it can: mint the key and
+assemble the payload. Three things about that worth not rediscovering. **Signing
+and notarization are different**, and Gatekeeper on 10.15+ needs both, so
+signed-but-unnotarized is still refused. **Stapling** is what makes the ticket work
+offline, and without it a Mac that cannot reach Apple refuses a perfectly notarized
+package — which describes a segmented client VLAN, i.e. exactly where these
+install. And an **unsigned** build is genuinely useful (an MDM push installs it)
+but is not double-clickable, so the script says so rather than letting an operator
+find out from a customer; it asks `spctl` whether Gatekeeper accepts the result
+rather than treating a successful `productsign` as evidence.
+
+The payload uses the **Mac's own Python** with a bundled wheelhouse installed
+`--no-index`, not a bundled interpreter: a relocatable macOS framework build is a
+project of its own. That only holds because every dependency is `py3-none-any` —
+the builder refuses otherwise and a test asserts it, since a C-extension
+dependency would install on the Linux build host and fail on the Mac.
+`.github/workflows/macos-pkg.yml` is the only automated coverage `pkgbuild` has,
+and its signing gate reads a **job-level** env var, because a step's own `env:` is
+not visible to that step's `if` — testing it there is always false, so signing
+would silently never run.
 
 The per-client Windows **MSI** is built from the Machines
 page: `msi_builder.build_workstation_msi` shares the agent's runtime cache and
@@ -829,6 +872,19 @@ transports, **not** against real tenants.
   `RestrictDriverInstallationToAdministrators`, vendor driver packages, or the
   LocalSystem context (the runner is an elevated user, not SYSTEM) — those stay
   manual, per `deploy/WINDOWS-MSI-TESTING.md`.
+- **macOS CI covers the packaging seam, and only that.**
+  `.github/workflows/macos-pkg.yml` runs `pkgbuild`/`productbuild` on a
+  `macos-latest` runner and then `pkgutil --expand`s the result to assert the
+  identifier, the payload and the scripts — because nothing on Linux can produce a
+  `.pkg` at all, so without this the whole packaging path would be unverified.
+  Path-filtered, and at **10×** billing it is worth being stricter about than the
+  Windows job's 2×. Two things about reading it: a green run costs ~20-30s, which
+  is normal on an M-series runner with pure-Python wheels and **not** the shape of
+  a job that skipped its steps (it was checked); and it does **not** prove the
+  install works — the runner has no console session worth loading a LaunchDaemon
+  into, so `installer` stays manual per `deploy/MACOS-CLIENT-TESTING.md`. The
+  signing step is skipped rather than failed where the Apple secrets are absent,
+  because a red X for "no Developer account" teaches people to ignore red Xs.
 
 **Core**: central server, multi-tenant model, push-based agents, brand-agnostic
 SNMP, alerting with dedupe + auto-resolve + flap damping, quiet hours + maintenance
