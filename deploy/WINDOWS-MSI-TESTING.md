@@ -276,18 +276,49 @@ from the same VM printed immediately.
   check now prints description, monitor and host address separately.
 - **The port has no address.** Its registry entry is
   `Printer UUID = e3248000-…`, `Install Protocol = 1`, and `PrinterHostAddress`
-  is **empty**. `Add-Printer -IppURL` uses the URL to interrogate the device when
-  the queue is built, then stores a device *identity* that Windows must resolve
-  again by discovery at print time. WS-Discovery is link-local, and TCP 5357 was
-  filtered to this device — so the queue converged clean forever and had no path
-  to the printer.
+  is **empty**. `Add-Printer -IppURL` interrogates the device when the queue is
+  built, then stores a device *identity* rather than an address. That is real and
+  worth knowing — but see the next section: it is **not** why this queue failed.
 
-**Why that matters beyond this lab.** An MSP's workstations routinely print to
-printers on another subnet, VLAN or across a VPN, which is exactly where
-link-local discovery does not reach. Before trusting tier 1 in production,
-establish whether `-IppURL` queues print **across a routed hop**, not just on the
-same link. If they do not, the driverless path needs an address-bound
-alternative, and the "deliberately no fallback" rule needs revisiting.
+### The routed-hop theory was tested, and it is wrong
+
+The first reading of this defect blamed the address-less port: a UUID must be
+re-resolved by discovery, WS-Discovery is link-local, therefore an `-IppURL`
+queue cannot survive a routed hop. That was a plausible story and it is **false**.
+It was tested with `ippeveprinter` (ships with macOS, CUPS 2.3.4) as a
+conforming IPP Everywhere target, driving a real Windows 11 client:
+
+| device | position | result |
+|---|---|---|
+| ippeveprinter | **link-local** (same /24, `Get-NetNeighbor` = Reachable) | **printed**, `id=307`, 46,525 bytes arrived |
+| ippeveprinter — *same instance* | **routed hop** (via NAT, no neighbor entry) | **printed**, `id=307`, 46,526 bytes arrived |
+| Brother MFC-L8900CDW | routed hop, no NAT (client bridged onto the LAN) | **`0x80004005`, no `id=307`** |
+| Brother MFC-L8900CDW | routed hop, raw TCP/9100 from the same client | **printed** |
+
+Only the network position changed between rows 1 and 2, and it made no
+difference. **`-IppURL` prints across a routed hop.**
+
+A second theory — that the Brother fails because it does not advertise
+`application/pdf` (Windows sends PDF to the emulator) — was tested the same way
+and is also false: with PDF removed from the emulator's
+`document-format-supported`, Windows negotiated down to `image/pwg-raster` on its
+own and printed (19,726 bytes of `.pwg` received). Format negotiation is fine.
+
+**What is actually left.** The failure is specific to this real device. The queue
+is created, converges, reports healthy, and the job dies in the print processor —
+while the same Brother prints happily from CUPS over the same IPP endpoint, and
+from the same Windows client over raw 9100. The one structural difference still
+standing is what the device advertises about itself:
+
+    Brother    ipp-features-supported = airprint-1.6, wfds-print-1.0
+    emulator   ipp-features-supported = ipp-everywhere
+
+**The actionable consequence.** The probe marks this printer `driverless` on the
+strength of "IPP 2.0 with image/pwg-raster". That is demonstrably **not
+sufficient** to predict that Windows' inbox IPP class driver can print to it. If
+tier 1 is to be trusted, either the probe needs a stronger criterion (an
+`ipp-everywhere` feature check is the obvious candidate, though unverified) or
+the client must stop treating a successful `Add-Printer` as evidence.
 
 **The only sufficient check is a printed page.** Every proxy short of paper —
 `Get-Printer`, the port name, the monitor, the driver, convergence, an empty
