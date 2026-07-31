@@ -834,7 +834,17 @@ transports, **not** against real tenants.
     healthy, and the job dies in the print processor, while the very same device
     prints from CUPS over the same IPP endpoint and from the same Windows box
     over raw 9100. The lesson that survives is the one below, not a theory about
-    routing.
+    routing. `scripts/ipp_replay.py` exists to settle this class of question:
+    capture a device's real Get-Printer-Attributes response, replay it
+    byte-for-byte, change one attribute. It has since **excluded**
+    `ipp-features-supported` (both `airprint-1.6` and `ipp-everywhere` fail
+    identically), the PWG/URF raster strings, and `document-format-default` --
+    so the probe's `driverless` criterion is deliberately **unchanged**, because
+    gating it on `ipp-everywhere` would downgrade every working AirPrint-only
+    printer for no benefit. What the replay did establish is worth more than any
+    of those: the failure is reproducible from the advertised attributes alone,
+    and Windows fails while **rendering**, before it ever contacts the device --
+    so the signal a probe would need is already in data the probe has.
   The general lesson, for the fourth time: a queue that exists, lists and
   converges is not a queue that prints, and every proxy for "it works" that does
   not involve paper has now failed at least once. **The only sufficient check is
