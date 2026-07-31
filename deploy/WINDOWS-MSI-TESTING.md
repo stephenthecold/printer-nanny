@@ -356,10 +356,45 @@ standing is what the device advertises about itself:
 
 **The actionable consequence.** The probe marks this printer `driverless` on the
 strength of "IPP 2.0 with image/pwg-raster". That is demonstrably **not
-sufficient** to predict that Windows' inbox IPP class driver can print to it. If
-tier 1 is to be trusted, either the probe needs a stronger criterion (an
-`ipp-everywhere` feature check is the obvious candidate, though unverified) or
-the client must stop treating a successful `Add-Printer` as evidence.
+sufficient** to predict that Windows' inbox IPP class driver can print to it.
+
+### `ipp-everywhere` was the obvious candidate. It is not the cause.
+
+This doc previously named an `ipp-everywhere` feature check as the likely fix.
+It was tested with `scripts/ipp_replay.py` -- capture the Brother's real
+Get-Printer-Attributes response, replay it byte-for-byte, and change exactly one
+attribute -- and **it is wrong**:
+
+| `ipp-features-supported` | result |
+|---|---|
+| `airprint-1.6, wfds-print-1.0` (the Brother's own) | did not print |
+| `ipp-everywhere` | **also did not print** |
+
+Everything else in both runs was identical, so the attribute is excluded.
+Gating `driverless` on it would have downgraded every working AirPrint-only
+printer to `driver_required` -- needing a vendor package or being skipped --
+for no benefit at all. **The criterion is therefore unchanged**: there is no
+validated basis for tightening it, and an unvalidated tightening is a fleet-wide
+regression.
+
+Also excluded by the same method: the PWG/URF raster capability strings, and
+`document-format-default` (the Brother defaults to `application/octet-stream`,
+which looked promising and is not it).
+
+### What the replay *did* establish
+
+Replaying the captured attributes reproduces the failure exactly, and the replay
+server **never receives a job operation** -- Windows fails while rendering,
+before it contacts the device. So:
+
+- the fault is **fully determined by what the device advertises**, not by the
+  network, the device's job handling, or anything stateful;
+- therefore a probe *can* predict it -- the signal is in data the probe already
+  has;
+- we simply do not yet know which of the ~400 attributes is responsible.
+
+Finishing the bisect means running `ipp_replay.py serve` with more overrides
+until the verdict flips. That is now cheap; it was not before.
 
 **The only sufficient check is a printed page.** Every proxy short of paper —
 `Get-Printer`, the port name, the monitor, the driver, convergence, an empty
