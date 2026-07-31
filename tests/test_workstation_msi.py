@@ -339,3 +339,100 @@ def test_build_workstation_msi_end_to_end(tmp_path):  # pragma: no cover
     assert result.path.exists() and result.size > 0
     summary = mb.validate_msi(result.path)
     assert summary["has_service"] and summary["has_registry"]
+
+
+# ------------------- the installed credential's ACL ------------------------- #
+#
+# The key travels in the config file BECAUSE a service's command line is
+# readable by any logged-in user. That reasoning only holds if the file is not
+# equally readable, and it was not holding: verified on a real Windows install,
+# the MSI set no ACL at all, so the file inherited Program Files' default and
+# icacls reported BUILTIN\Users:(I)(RX) plus ALL APPLICATION PACKAGES:(I)(RX)
+# on a file containing the client's enrollment key. wixl cannot express a file
+# ACL (it rejects WiX's <Permission> element), so LockPermissions is imported
+# into the finished package instead.
+
+
+class _FakeProc:
+    def __init__(self, rc=0, out="", err=""):
+        self.returncode, self.stdout, self.stderr = rc, out, err
+
+
+def _fake_file_table(name="workstation.toml"):
+    # msiinfo export layout: File \t Component_ \t FileName \t FileSize ...
+    return (
+        "File\tComponent_\tFileName\tFileSize\n"
+        "s72\ts72\tl255\ti4\n"
+        "File\tFile\n"
+        "file1\tcomp1\tnssm.exe\t331264\n"
+        f"file2\tcomp1\t{name}\t630\n"
+        "file3\tcomp2\tpython.exe\t100\n"
+    )
+
+
+def _patch_msi_tools(monkeypatch, captured, *, file_table=None, tables_after=None):
+    monkeypatch.setattr(mb, "_msiinfo_export", lambda p, t: file_table or _fake_file_table())
+    monkeypatch.setattr(
+        mb, "_msiinfo_tables",
+        lambda p: tables_after if tables_after is not None else ["File", "LockPermissions"],
+    )
+
+    def fake_run(cmd, **kw):
+        captured.append(cmd)
+        if cmd[0] == "msibuild":
+            captured.append(("idt", open(cmd[3]).read()))
+        return _FakeProc()
+
+    monkeypatch.setattr(mb.subprocess, "run", fake_run)
+
+
+def test_the_config_is_locked_to_system_and_administrators(monkeypatch, tmp_path):
+    cap = []
+    _patch_msi_tools(monkeypatch, cap)
+    key = mb.lock_config_permissions(tmp_path / "x.msi", "workstation.toml")
+
+    assert key == "file2", "it must lock the config, not whatever file came first"
+    idt = next(c[1] for c in cap if isinstance(c, tuple))
+    assert "LockPermissions\tLockObject\tTable\tDomain\tUser" in idt
+    assert "file2\tFile\t\tSYSTEM\t268435456" in idt
+    assert "file2\tFile\t\tAdministrators\t268435456" in idt
+    # LockPermissions REPLACES the ACL, so the absence of these IS the fix.
+    for who in ("Users", "Everyone", "APPLICATION PACKAGE"):
+        assert who not in idt, f"{who} must not be granted access to the credential"
+
+
+def test_the_agent_config_is_locked_too(monkeypatch, tmp_path):
+    """config.toml carries an api_key or claim code and had the same exposure."""
+    cap = []
+    _patch_msi_tools(monkeypatch, cap, file_table=_fake_file_table("config.toml"))
+    assert mb.lock_config_permissions(tmp_path / "a.msi", "config.toml") == "file2"
+
+
+def test_a_missing_config_row_is_fatal(monkeypatch, tmp_path):
+    """Shipping without the ACL hands out a readable credential, so this must
+    never degrade to a warning."""
+    cap = []
+    _patch_msi_tools(monkeypatch, cap, file_table=_fake_file_table("something-else.toml"))
+    with pytest.raises(RuntimeError, match="no File row"):
+        mb.lock_config_permissions(tmp_path / "x.msi", "workstation.toml")
+
+
+def test_an_import_that_does_not_take_is_fatal(monkeypatch, tmp_path):
+    """msibuild exiting 0 is not evidence the table landed -- the same
+    'return code is not proof' rule the PowerShell runner learned."""
+    cap = []
+    _patch_msi_tools(monkeypatch, cap, tables_after=["File"])
+    with pytest.raises(RuntimeError, match="table is absent"):
+        mb.lock_config_permissions(tmp_path / "x.msi", "workstation.toml")
+
+
+def test_msibuild_is_a_declared_build_requirement(monkeypatch):
+    """The ACL depends on it, so its absence must be reported up front rather
+    than discovered at the end of a multi-minute build."""
+    monkeypatch.setattr(
+        mb.shutil, "which",
+        lambda n: None if n == "msibuild" else f"/usr/bin/{n}",
+    )
+    cap = mb.msi_build_available()
+    assert cap.available is False
+    assert "msibuild" in cap.reason

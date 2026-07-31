@@ -244,6 +244,47 @@ here — this section is the only evidence that any of it works.
 
 ---
 
+## The installed credential's ACL
+
+`workstation.toml` (and the agent's `config.toml`) carry a live credential, which
+is why they are files rather than command-line arguments — *a service's command
+line is readable by any logged-in user*. That only helps if the file is not
+equally readable, and originally it was: the MSI set no ACL, the file inherited
+Program Files' default, and on a real install `icacls` reported
+
+    BUILTIN\Users:(I)(RX)
+    APPLICATION PACKAGE AUTHORITY\ALL APPLICATION PACKAGES:(I)(RX)
+
+on a file containing that client's enrollment key — on every PC in the fleet.
+
+It is now locked at build time. `wixl` cannot express a file ACL (it rejects
+WiX's `<Permission>` element), so `msibuild -i` imports a `LockPermissions` table
+into the finished package and Windows Installer applies it. Confirm after any
+install:
+
+    icacls "C:\Program Files\Printer Nanny\Workstation\workstation.toml"
+
+Expected — and nothing else:
+
+    NT AUTHORITY\SYSTEM:(OI)(CI)(F)
+    BUILTIN\Administrators:(OI)(CI)(F)
+
+`LockPermissions` **replaces** the ACL rather than adding to it, so the absence
+of `Users` is the fix working, and `AreAccessRulesProtected` should be `True`.
+SYSTEM is on the list because the service runs as LocalSystem and must read its
+own config — check the service actually reaches `Running`, not just that the ACL
+looks tight.
+
+> **A trap when re-testing this.** Do not delete `C:\Program Files\Printer
+> Nanny` by hand between installs. The product stays registered, the next `/i`
+> is treated as a *reconfigure*, every component reports `Installed: Local /
+> Action: Null`, and msiexec exits **0** having laid down nothing. Uninstall by
+> ProductCode (`msiexec /x {…} /qn`) instead — and note two builds of the same
+> version have different ProductCodes but the same UpgradeCode, so a leftover
+> registration from an earlier build silently swallows the next install.
+
+---
+
 ## The check can pass on a queue that cannot print
 
 `scripts/windows_provision_check.py` passed against a real printer — port not

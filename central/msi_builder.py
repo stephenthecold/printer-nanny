@@ -165,9 +165,18 @@ def msi_build_available() -> MsiCapability:
     """
     wixl = shutil.which("wixl")
     msiinfo = shutil.which("msiinfo")
-    if not wixl or not msiinfo:
+    # msibuild is what applies the config file's ACL after wixl (see
+    # lock_config_permissions). Probed here rather than discovered at the end of
+    # a multi-minute build, and REQUIRED rather than optional: without it the
+    # installer would ship a credential every user on the machine can read.
+    msibuild = shutil.which("msibuild")
+    if not wixl or not msiinfo or not msibuild:
         missing = ", ".join(
-            name for name, path in (("wixl", wixl), ("msiinfo", msiinfo)) if not path
+            name
+            for name, path in (
+                ("wixl", wixl), ("msiinfo", msiinfo), ("msibuild", msibuild)
+            )
+            if not path
         )
         return MsiCapability(
             available=False,
@@ -766,6 +775,9 @@ def build_msi(
                 "wixl failed to build the MSI:\n"
                 + proc.stdout[-2000:] + "\n" + proc.stderr[-2000:]
             )
+        # config.toml holds this agent's api_key (or claim code). wixl cannot
+        # express a file ACL, so it is imported into the finished package.
+        lock_config_permissions(msi_path, "config.toml")
     finally:
         shutil.rmtree(payload, ignore_errors=True)
 
@@ -809,6 +821,87 @@ def validate_msi(path: Path) -> dict:
     config = _extract_member(path, "config.toml")
     summary["config_toml"] = config
     return summary
+
+
+#: Full control, as the MSI ``LockPermissions`` table spells it (``GENERIC_ALL``).
+_PERM_FULL_CONTROL = 268435456
+
+#: Who may read the installed credential. SYSTEM because the service runs as
+#: LocalSystem and must read its own config; Administrators so a technician can
+#: still support the box. Deliberately nobody else -- and because
+#: ``LockPermissions`` REPLACES the ACL rather than adding to it, leaving
+#: ``Users`` out is what actually removes them.
+_CONFIG_ACL = ("SYSTEM", "Administrators")
+
+
+def lock_config_permissions(msi_path: Path, config_name: str) -> str:
+    """Restrict the installed config file to SYSTEM + Administrators.
+
+    WHY THIS IS POST-PROCESSED RATHER THAN DECLARED
+    -----------------------------------------------
+    The credential travels in the config file precisely *because* a service's
+    command line is readable by any logged-in user. That reasoning only holds if
+    the file is not equally readable -- and it was not holding. Verified on a
+    real install: the MSI set no ACL at all, so the file inherited Program
+    Files' default and ``icacls`` reported ``BUILTIN\\Users:(I)(RX)`` plus
+    ``ALL APPLICATION PACKAGES:(I)(RX)`` on a file containing that client's
+    enrollment key -- on every PC in the fleet, readable by every user on it.
+    The agent MSI shipped its ``api_key`` the same way.
+
+    WiX expresses this as a ``<Permission>`` child of ``<File>``, but **wixl
+    rejects that element outright** (``unhandled child File node Permission``),
+    so it cannot be declared in the source we compile. The MSI
+    ``LockPermissions`` table is the same mechanism one layer down, and
+    ``msibuild -i`` can import a table into a finished package -- so the ACL is
+    applied here, after wixl, and Windows Installer enforces it at install time.
+
+    The File key is looked up from the built package rather than threaded
+    through the WXS generator: ids are positional (``file1``, ``file2``, ...),
+    so matching on the name is both simpler and immune to ordering changes.
+
+    Raises rather than warns. An installer that silently lost this hands out a
+    credential every user on the machine can read, which is the whole defect.
+    """
+    files = _msiinfo_export(msi_path, "File")
+    key = ""
+    for line in files.splitlines():
+        parts = line.split("\t")
+        # FileName is "short|long", or just the name when no short name was needed.
+        if len(parts) >= 3 and config_name in parts[2].split("|"):
+            key = parts[0]
+            break
+    if not key:
+        raise RuntimeError(
+            f"cannot lock down {config_name}: no File row for it in {msi_path.name}"
+        )
+
+    rows = "\n".join(
+        f"{key}\tFile\t\t{user}\t{_PERM_FULL_CONTROL}" for user in _CONFIG_ACL
+    )
+    idt = (
+        "LockObject\tTable\tDomain\tUser\tPermission\n"
+        "s72\ts32\tS255\ts255\ti4\n"
+        "LockPermissions\tLockObject\tTable\tDomain\tUser\n"
+        f"{rows}\n"
+    )
+    with tempfile.TemporaryDirectory(prefix="pn-msi-acl-") as td:
+        idt_path = Path(td) / "LockPermissions.idt"
+        idt_path.write_text(idt)
+        proc = subprocess.run(
+            ["msibuild", str(msi_path), "-i", str(idt_path)],
+            capture_output=True, text=True,
+        )
+    if proc.returncode != 0:
+        raise RuntimeError(
+            "msibuild could not import LockPermissions (the config would ship "
+            "world-readable):\n" + proc.stdout[-1000:] + "\n" + proc.stderr[-1000:]
+        )
+    if "LockPermissions" not in _msiinfo_tables(msi_path):
+        raise RuntimeError(
+            "LockPermissions import reported success but the table is absent"
+        )
+    log.info("locked %s to %s", config_name, " + ".join(_CONFIG_ACL))
+    return key
 
 
 def _msiinfo_tables(path: Path) -> list[str]:
@@ -997,6 +1090,9 @@ def build_workstation_msi(
                 "wixl failed to build the workstation MSI:\n"
                 + proc.stdout[-2000:] + "\n" + proc.stderr[-2000:]
             )
+        # workstation.toml holds this client's enrollment key. Same reasoning
+        # as the agent MSI, and the same one-line consequence if it is skipped.
+        lock_config_permissions(msi_path, "workstation.toml")
     finally:
         shutil.rmtree(payload, ignore_errors=True)
 
