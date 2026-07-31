@@ -836,15 +836,21 @@ transports, **not** against real tenants.
     over raw 9100. The lesson that survives is the one below, not a theory about
     routing. `scripts/ipp_replay.py` exists to settle this class of question:
     capture a device's real Get-Printer-Attributes response, replay it
-    byte-for-byte, change one attribute. It has since **excluded**
-    `ipp-features-supported` (both `airprint-1.6` and `ipp-everywhere` fail
-    identically), the PWG/URF raster strings, and `document-format-default` --
-    so the probe's `driverless` criterion is deliberately **unchanged**, because
-    gating it on `ipp-everywhere` would downgrade every working AirPrint-only
-    printer for no benefit. What the replay did establish is worth more than any
-    of those: the failure is reproducible from the advertised attributes alone,
-    and Windows fails while **rendering**, before it ever contacts the device --
-    so the signal a probe would need is already in data the probe has.
+    byte-for-byte, change one attribute. An early pass appeared to exclude
+    `ipp-features-supported`; **that is withdrawn** -- it used a fixed 30s wait
+    that manufactures false negatives, so it proved nothing either way. What a
+    *verified* harness does show: the Brother's captured attributes reproduce the
+    failure 3/3 with the client demonstrably querying the replay, and importing
+    all 78 non-identity attributes from a working device makes it print. So the
+    failure is determined by what the device advertises, and Windows fails while
+    **rendering** before it contacts the device -- the signal a probe would need
+    is already in data the probe has. It is a *combination*, though: neither half
+    of those 78 suffices, and the responsible attributes are **not identified**.
+    The `driverless` criterion is therefore unchanged. Three separate harness
+    bugs each produced confident wrong answers here (a fixed wait, a port that
+    never freed so the previous config kept serving, and a verdict from a run
+    where the client never queried us) -- the guards are documented in the
+    script, and a result obtained without them is worthless.
   The general lesson, for the fourth time: a queue that exists, lists and
   converges is not a queue that prints, and every proxy for "it works" that does
   not involve paper has now failed at least once. **The only sufficient check is
