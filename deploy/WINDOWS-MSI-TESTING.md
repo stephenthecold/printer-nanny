@@ -360,17 +360,17 @@ sufficient** to predict that Windows' inbox IPP class driver can print to it.
 
 ### `ipp-everywhere` was the obvious candidate. It is not the cause.
 
-This doc previously named an `ipp-everywhere` feature check as the likely fix.
-It was tested with `scripts/ipp_replay.py` -- capture the Brother's real
-Get-Printer-Attributes response, replay it byte-for-byte, and change exactly one
-attribute -- and **it is wrong**:
+This doc previously named an `ipp-everywhere` feature check as the likely fix,
+and a first pass with `scripts/ipp_replay.py` appeared to exclude it. **That
+result is withdrawn.** Both runs used a fixed 30s wait before checking for
+`id=307`, and that wait was later shown to record `DID NOT PRINT` whenever a job
+merely took longer -- so a negative from that harness is not evidence. The
+`ipp-everywhere` hypothesis is therefore **not established either way**; it was
+never re-tested with a verified harness.
 
-| `ipp-features-supported` | result |
-|---|---|
-| `airprint-1.6, wfds-print-1.0` (the Brother's own) | did not print |
-| `ipp-everywhere` | **also did not print** |
-
-Everything else in both runs was identical, so the attribute is excluded.
+What can be said is narrower: gating `driverless` on it would still be a bad
+trade on present evidence, because it would downgrade every working AirPrint-only
+printer to `driver_required` on an unconfirmed signal.
 Gating `driverless` on it would have downgraded every working AirPrint-only
 printer to `driver_required` -- needing a vendor package or being skipped --
 for no benefit at all. **The criterion is therefore unchanged**: there is no
@@ -381,20 +381,41 @@ Also excluded by the same method: the PWG/URF raster capability strings, and
 `document-format-default` (the Brother defaults to `application/octet-stream`,
 which looked promising and is not it).
 
-### What the replay *did* establish
+### What the replay establishes, with a verified harness
 
-Replaying the captured attributes reproduces the failure exactly, and the replay
-server **never receives a job operation** -- Windows fails while rendering,
-before it contacts the device. So:
+Once the harness was fixed (see below), the picture is consistent and repeatable:
 
-- the fault is **fully determined by what the device advertises**, not by the
-  network, the device's job handling, or anything stateful;
-- therefore a probe *can* predict it -- the signal is in data the probe already
-  has;
-- we simply do not yet know which of the ~400 attributes is responsible.
+- replaying the Brother's captured attributes reproduces the failure **3/3**,
+  with the client demonstrably querying the replay server;
+- the replay server **never receives a job** -- Windows fails while rendering,
+  before it contacts the device;
+- importing all **78** non-identity attributes from a working device's capture
+  makes it **print**.
 
-Finishing the bisect means running `ipp_replay.py serve` with more overrides
-until the verdict flips. That is now cheap; it was not before.
+So the fault is **determined by what the device advertises** -- not the network,
+not the device's job handling, nothing stateful -- and a probe could in principle
+predict it. It is a **combination**: neither half of those 78 is sufficient on its
+own. The responsible attribute(s) are **not identified**, and the bisect is
+unfinished.
+
+### The harness lied three times before it told the truth
+
+Every one of these produced a confident, wrong answer. Any runner around
+`ipp_replay.py` must guard all three:
+
+1. **A fixed wait is a false negative generator.** 30s recorded `DID NOT PRINT`
+   for jobs that merely took longer. Poll for `id=307` instead.
+2. **`pkill` + `sleep 1` does not free the port.** The replacement server hits
+   `Address already in use`, dies in the background, and the *previous*
+   configuration keeps serving -- so results get attributed to the wrong config.
+   Wait for the port to close, check the log for a traceback, then confirm over
+   IPP that the server answers with the identity you set.
+3. **Confirm the client actually queried you.** A run where the replay server saw
+   zero `Get-Printer-Attributes` is a verdict about a cached device. Windows keys
+   devices on `printer-uuid`; use a fresh one per run.
+
+A `PRINTED` obtained without those guards means nothing, and a `DID NOT PRINT`
+means less.
 
 **The only sufficient check is a printed page.** Every proxy short of paper —
 `Get-Printer`, the port name, the monitor, the driver, convergence, an empty

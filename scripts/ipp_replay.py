@@ -9,44 +9,61 @@ IPP endpoint, and from the same Windows box over raw 9100. So the fault was
 somewhere between Windows' inbox class driver and *something the device says
 about itself* -- and there are ~400 of those.
 
-Guessing did not work. Three plausible causes were proposed and all three were
-wrong (a routed hop, a missing ``application/pdf``, and
-``ipp-features-supported`` lacking ``ipp-everywhere``). What settles that class
-of question is a single-variable experiment, and this is the apparatus for it:
-
     capture   pull a real device's Get-Printer-Attributes response, raw
-    serve     replay it verbatim, with named attributes overridden
+    serve     replay it verbatim, with named attributes overridden or imported
+              wholesale from a second (working) capture
 
-Because everything except the named attribute is byte-identical to what the real
-device said, any change in the client's behaviour is attributable to that
-attribute and nothing else.
+Because everything except the named attributes is byte-identical to what the real
+device said, a behaviour change is attributable to those attributes.
 
-WHAT IT ESTABLISHED, AND WHAT IS STILL OPEN
--------------------------------------------
-Replaying the Brother's captured attributes reproduces the failure exactly --
-Windows builds the queue, then fails to render, and this server never receives a
-job operation at all. **So the failure is fully determined by what the device
-advertises**, which means a probe *can* predict it; we simply do not yet know
-which attribute is responsible. ``ipp-features-supported`` is ruled out (A/B,
-single variable, both values fail), as are the PWG/URF raster capability strings
-and ``document-format-default``.
+WHAT IS ESTABLISHED
+-------------------
+With a *verified* harness (see the traps below), replaying the Brother's captured
+attributes reproduces the failure reliably -- 3/3, with the client demonstrably
+querying this server. Importing all 78 non-identity attributes from a working
+device's capture makes it print. So **the failure is determined by what the
+device advertises**, and a probe could in principle predict it.
 
-Finishing the bisect is a matter of running ``serve`` with more overrides until
-the verdict flips. Watch ``PrintService/Operational`` for ``id=307`` -- its
-absence is the failure; ``id=842`` with a non-zero Win32 code names it.
+It is a *combination*: neither half of those 78 is sufficient alone. The
+individual attribute(s) have NOT been identified.
+
+READ THIS BEFORE TRUSTING A RESULT
+----------------------------------
+Three harness bugs each produced confident, wrong answers before being caught.
+A runner around this script must guard all three:
+
+1. **Poll for the outcome; never sleep a fixed interval.** A 30s wait recorded
+   ``DID NOT PRINT`` whenever a job merely took longer, which made every negative
+   result untrustworthy. Poll ``PrintService/Operational`` for ``id=307`` (that
+   channel is OFF by default -- enable it first).
+2. **Verify the running server is the one you just configured.** ``pkill`` +
+   ``sleep 1`` is not enough: the new process hits ``Address already in use``,
+   dies in the background, and the PREVIOUS configuration keeps serving. Wait for
+   the port to actually free, check the log for a traceback, and then confirm over
+   IPP that the server answers with the identity you set.
+3. **Confirm the client actually queried you.** A verdict from a run where this
+   server saw zero ``Get-Printer-Attributes`` is a verdict about a cached device,
+   not about your configuration.
+
+Also: Windows keys an IPP device on ``printer-uuid``. Reuse one and it will
+reuse the cached device instead of re-reading your attributes; a capture whose
+UUID matches an already-installed printer fails with "printer already exists".
+Override it with a fresh UUID per run.
 
 USAGE
 -----
     python3 scripts/ipp_replay.py capture 10.0.0.5 brother.ipp
-    python3 scripts/ipp_replay.py serve brother.ipp 10.211.55.2 8631 airprint \
-        document-format-default=image/pwg-raster \
-        printer-icons=            # an empty value drops the attribute
+    python3 scripts/ipp_replay.py capture 127.0.0.1 good.ipp 631 /printers/Queue
 
-``airprint`` / ``everywhere`` selects the ``ipp-features-supported`` value, which
-is kept as a first-class switch because it was the leading hypothesis. The
-device's self-referential URIs are re-pointed at this server automatically --
-otherwise the client goes back to the real printer and the experiment tests
-nothing.
+    python3 scripts/ipp_replay.py serve brother.ipp 10.211.55.2 8631 airprint \
+        --from good.ipp media-supported,print-color-mode-supported \
+        printer-uuid=urn:uuid:$(uuidgen) \
+        printer-make-and-model="Bisect Device"
+
+``airprint`` / ``everywhere`` selects the ``ipp-features-supported`` value. An
+override with an empty value drops the attribute. Self-referential URIs are
+re-pointed at this server automatically -- otherwise the client goes back to the
+real printer and the experiment tests nothing.
 """
 from __future__ import annotations
 
@@ -86,15 +103,15 @@ def build_request(printer_uri: str) -> bytes:
     return body
 
 
-def capture(host: str, out: str) -> None:
-    uri = f"ipp://{host}:631/ipp/print"
+def capture(host: str, out: str, port: int = 631, path: str = "/ipp/print") -> None:
+    uri = f"ipp://{host}:{port}{path}"
     body = build_request(uri)
     req = (
-        f"POST /ipp/print HTTP/1.1\r\nHost: {host}:631\r\n"
+        f"POST {path} HTTP/1.1\r\nHost: {host}:{port}\r\n"
         f"Content-Type: application/ipp\r\nContent-Length: {len(body)}\r\n"
         f"Connection: close\r\n\r\n"
     ).encode() + body
-    s = socket.create_connection((host, 631), timeout=20)
+    s = socket.create_connection((host, port), timeout=20)
     s.sendall(req)
     chunks = []
     while True:
@@ -161,6 +178,7 @@ def serialise(version, status, rid, items) -> bytes:
 
 
 OVERRIDES: dict = {}
+DONOR: dict = {}
 
 
 def rewrite(items, *, features: list, my_uri: str):
@@ -188,7 +206,13 @@ def rewrite(items, *, features: list, my_uri: str):
             run.append(items[j])
             j += 1
 
-        if name.decode(errors="replace") in OVERRIDES:
+        nm = name.decode(errors="replace")
+        if nm in DONOR:
+            # Replace this attribute with the donor's version verbatim (or drop
+            # it if the donor does not have it). This is what makes a bisect
+            # between a failing and a working device possible.
+            out.extend(DONOR[nm])
+        elif name.decode(errors="replace") in OVERRIDES:
             vals = OVERRIDES[name.decode(errors="replace")]
             if vals == ["<<DROP>>"]:
                 pass
@@ -285,7 +309,9 @@ class Handler(http.server.BaseHTTPRequestHandler):
 
 def main():
     if sys.argv[1] == "capture":
-        capture(sys.argv[2], sys.argv[3])
+        capture(sys.argv[2], sys.argv[3],
+                int(sys.argv[4]) if len(sys.argv) > 4 else 631,
+                sys.argv[5] if len(sys.argv) > 5 else "/ipp/print")
         return
     raw = open(sys.argv[2], "rb").read()
     bind, port, mode = sys.argv[3], int(sys.argv[4]), sys.argv[5]
@@ -298,7 +324,30 @@ def main():
             continue
         if seen_printer:
             printer_items.append(it)
-    for spec in sys.argv[6:]:
+    argv = sys.argv[6:]
+    if argv and argv[0] == "--from":
+        donor_raw = open(argv[1], "rb").read()
+        _, _, _, ditems = parse(donor_raw)
+        names = set(argv[2].split(",")) if len(argv) > 2 and argv[2] else set()
+        argv = argv[3:]
+        dmap, cur = {}, None
+        inp = False
+        for it in ditems:
+            if it[0] == "d":
+                inp = it[1] == PRINTER_ATTRS
+                continue
+            if not inp:
+                continue
+            if it[2]:
+                cur = it[2].decode(errors="replace")
+                dmap[cur] = [it]
+            elif cur:
+                dmap[cur].append(it)
+        for n in names:
+            DONOR[n] = dmap.get(n, [])
+        print(f"importing {len(names)} attrs from donor "
+              f"({sum(1 for n in names if n in dmap)} found)")
+    for spec in argv:
         n, _, v = spec.partition("=")
         OVERRIDES[n] = v.split(",") if v else ["<<DROP>>"]
     if OVERRIDES:
