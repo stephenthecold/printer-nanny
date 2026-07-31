@@ -668,11 +668,22 @@ also read**. The same holds for the agent MSI, whose `config.toml` carries an AP
 key or claim code to the same tree. The correct code already exists in the sibling
 installer: `deploy/install-agent.ps1` calls `SetAccessRuleProtection($true,$false)`
 and restricts to SYSTEM + Administrators, commented "api_key is a secret" — the MSI
-path never got it, and macOS enforces the equivalent with 0700/0600. **The fix is
-not a one-liner**: `wixl` rejects WiX's `<Permission>` element outright
-(`unhandled child File node Permission`), so it needs a post-processed
-`LockPermissions` table, a service-side tightening on first run (which leaves a
-window), or moving the credential out of Program Files.
+path never got it, and macOS enforces the equivalent with 0700/0600.
+
+**Fixed** by importing a `LockPermissions` table into the finished package with
+`msibuild -i`. It has to happen *after* wixl because wixl rejects WiX's
+`<Permission>` element outright (`unhandled child File node Permission`), so the
+ACL cannot be declared in the source we compile. The table grants **SYSTEM +
+Administrators only**, and because `LockPermissions` *replaces* the ACL rather
+than adding to it, leaving `Users` out is what actually removes them. Verified on
+a real install: `icacls` now reports exactly `NT AUTHORITY\SYSTEM:(OI)(CI)(F)`
+and `BUILTIN\Administrators:(OI)(CI)(F)`, inheritance broken, and the service
+still starts — LocalSystem must read its own config, which is why SYSTEM is on
+the list and not Administrators alone. Two guards came with it: `msibuild` is a
+declared build requirement (`msi_build_available` probes it) rather than
+something discovered at the end of a multi-minute build, and an import that
+reports success without landing the table is **fatal** — `msibuild` exiting 0 is
+not evidence, which is the rule the PowerShell runner already learned.
 
 A build that fails rolls the key back,
 since a key minted for an installer that never existed is a live credential
