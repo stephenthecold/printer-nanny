@@ -167,7 +167,15 @@ enforced; none of them is optional.
   defects it found) and `MACOS-CLIENT-TESTING.md` (real-CUPS verification, the
   `.pkg` procedure, and the 2026-07-30 real-Mac run — done items marked and dated,
   the rest still open).
-- `tests/` — pytest suite (~1740 tests; ~6.5min end-to-end on Postgres-less SQLite).
+- `tests/` — pytest suite (~1740 tests, serial, on Postgres-less SQLite).
+  **Quote the machine with the number**: ~2.5min on a GitHub `ubuntu-latest`
+  runner, ~6-7min on a 4-vCPU container. A bare figure is unfalsifiable, which
+  is how a run on a *busy* box (9min) gets reported as a regression against a
+  documented one — that happened. ~80% of the wall clock is
+  `create_all`/`drop_all` rebuilding the schema per fixture (measured: 282s of
+  353s across 744 rebuilds), so the total tracks single-core speed and is the
+  first thing to attack if it ever needs to be faster. Password hashing, the
+  obvious suspect, is **1.8%** — measured, after it was assumed.
   `test_compose_deployment.py` / `test_install_update.py` cover the deployment
   contract above; both skip cleanly where the docker CLI is absent.
   `test_macos_deployment.py` does the same for the LaunchDaemon plist and its
