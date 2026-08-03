@@ -44,6 +44,10 @@ services:
       # password must be URL-safe (no @ : / ? # in it) since it rides in a URL.
       DATABASE_URL: postgresql+psycopg://${POSTGRES_USER:-nanny}:${POSTGRES_PASSWORD:-nanny}@db:5432/${POSTGRES_DB:-printer_nanny}
       SECRET_KEY: ${SECRET_KEY:-change-me-in-prod}
+      # Verbosity of Printer Nanny's own loggers only -- it never turns on a
+      # dependency's, because httpx logs full request URLs at INFO and a Slack /
+      # Teams / webhook URL is the credential. See central/logging_config.py.
+      LOG_LEVEL: ${LOG_LEVEL:-INFO}
       FREESCOUT_BASE_URL: ${FREESCOUT_BASE_URL:-}
       FREESCOUT_API_KEY: ${FREESCOUT_API_KEY:-}
       # Seeds the Settings row on first boot only. The `mailhog` default
@@ -98,6 +102,10 @@ services:
     environment:
       DATABASE_URL: postgresql+psycopg://${POSTGRES_USER:-nanny}:${POSTGRES_PASSWORD:-nanny}@db:5432/${POSTGRES_DB:-printer_nanny}
       SECRET_KEY: ${SECRET_KEY:-change-me-in-prod}
+      # Same knob and same default as the api service above -- one LOG_LEVEL
+      # moves both containers, so an operator turning up verbosity to debug an
+      # incident does not get half the story.
+      LOG_LEVEL: ${LOG_LEVEL:-INFO}
       FREESCOUT_BASE_URL: ${FREESCOUT_BASE_URL:-}
       FREESCOUT_API_KEY: ${FREESCOUT_API_KEY:-}
       SMTP_HOST: ${SMTP_HOST:-mailhog}

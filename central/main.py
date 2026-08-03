@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 from pathlib import Path
 
 from fastapi import Depends, FastAPI
@@ -33,8 +34,21 @@ from central.dashboard import (
 )
 from central.db import create_all, get_db
 from central.health import database_ok, worker_health
+from central.logging_config import configure_logging
 
-app = FastAPI(title="Printer Nanny", version="0.27.2")
+# `uvicorn central.main:app` gives the api container no entrypoint of ours, so
+# importing this module is the only moment we get before it serves. Until this
+# call existed the worker configured logging in its main() and the api
+# configured it NOWHERE: every log.info() in central/ was dropped on the floor
+# there, and warnings came out through logging.lastResort with no timestamp,
+# level or logger name. Safe at import time -- uvicorn applies its own
+# dictConfig in Config.__init__, i.e. before load() imports this module, and
+# that config names only the uvicorn* loggers. See central/logging_config.py.
+configure_logging()
+
+log = logging.getLogger("central.main")
+
+app = FastAPI(title="Printer Nanny", version="0.28.0")
 # Honor X-Forwarded-Proto/For from the reverse proxy so request.base_url returns
 # https:// when Caddy/Nginx terminates TLS in front of us. Without this, the
 # agent install command on /manage/agents leaks http://… to operators behind
@@ -181,10 +195,9 @@ def readyz(worker: str = "check", db: Session = Depends(get_db)):
 
 @app.on_event("startup")
 def _startup() -> None:
-    import logging
-
     # Refuse to boot a production deployment with a default/blank SECRET_KEY.
     settings.assert_secure()
+    log.info("printer nanny api %s starting", app.version)
     # On SQLite (local dev) create tables automatically. On Postgres, migrations own
     # the schema, but create_all is a harmless no-op if they've already run.
     if settings.is_sqlite:
@@ -203,8 +216,6 @@ def _startup() -> None:
             if sa_inspect(db.get_bind()).has_table(m.AppSetting.__tablename__):
                 updated = encrypt_existing_settings(db)
                 if updated:
-                    logging.getLogger("central").info(
-                        "encrypted %d legacy plaintext secret setting(s)", updated
-                    )
+                    log.info("encrypted %d legacy plaintext secret setting(s)", updated)
     except Exception:  # noqa: BLE001 - never block boot on the sweep
-        logging.getLogger("central").exception("secret-encryption sweep failed")
+        log.exception("secret-encryption sweep failed")
