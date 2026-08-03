@@ -16,6 +16,15 @@ class Settings(BaseSettings):
     # Dashboard session signing.
     secret_key: str = "dev-insecure-change-me"
 
+    # Verbosity of this project's own loggers (central.* / printer_nanny.*), see
+    # central/logging_config.py. Env rather than the DB-backed settings in
+    # central/runtime.py because it is a bootstrap concern: the first thing worth
+    # logging is a database that will not answer, which is exactly when a
+    # DB-backed value cannot be read. It moves nothing outside those namespaces,
+    # so turning it down to DEBUG cannot switch on SQLAlchemy's bound-parameter
+    # logging or httpx's request URLs (a webhook URL is a credential).
+    log_level: str = "INFO"
+
     # An agent is considered offline if no heartbeat within this many seconds.
     agent_offline_grace_seconds: int = 300
 

@@ -321,6 +321,33 @@ enforced; none of them is optional.
 - Secret-typed settings + SNMPv3 USM passwords are **encrypted at rest** with
   a Fernet key derived from `SECRET_KEY`. Lazy migration: legacy plaintext is
   swept into encrypted form on every save and at api startup.
+- **Logging is configured in one place (`central/logging_config.py`), and the
+  verbosity knob deliberately cannot reach a dependency.** The worker called
+  `logging.basicConfig` in its `main()`; the api configured logging **nowhere**,
+  so in the api container every `log.info()` under `central/` went to the floor
+  and warnings arrived through `logging.lastResort` — bare `%(message)s`, no
+  timestamp, no level, no logger name. Verified before/after against a real
+  `uvicorn central.main:app`: a self-registration that plainly *happened* (agent
+  created, HTTP 200) logged **nothing**. Both processes now call
+  `configure_logging()`; two `basicConfig` copies are exactly the drift this
+  repo keeps paying for. Three properties are load-bearing. **`LOG_LEVEL` moves
+  `central`/`printer_nanny` only, never root** — `httpx` logs the full request
+  URL at INFO and a Slack / Teams / webhook URL *is* the credential, and
+  SQLAlchemy logs bound parameters (password hashes, Fernet ciphertext) at
+  DEBUG, so an allowlist makes both impossible rather than filtered and a
+  dependency added later cannot reopen it. Root keeps its WARNING default, and a
+  record still reaches an ancestor's handlers regardless of that ancestor's
+  level (`Logger.callHandlers` consults handler levels only) — which is what
+  lets our INFO out while a library's stays in. **It does not fight uvicorn**:
+  `Config.__init__` applies its `dictConfig` before `load()` imports the app and
+  names only the `uvicorn*` loggers (no `root` key, `propagate: False`), so
+  configuring at import neither clobbers nor duplicates. **`LOG_LEVEL` is env,
+  not a DB-backed setting**, because the first thing worth logging is a database
+  that will not answer. A typo costs a preference, never a boot.
+  `tests/test_logging_config.py` asserts on captured *output* — the failure
+  being guarded is a configuration call that runs and still emits nothing — and
+  one of its subprocess cases reproduces the old broken state so the suite fails
+  if the wiring is reverted.
 - **Audit trail** — every login (incl. failures with attempted username),
   settings change (key names only), user/agent/printer/subnet CRUD, approvals,
   alert acks, agent updates, portal reports, backup downloads / restores are
