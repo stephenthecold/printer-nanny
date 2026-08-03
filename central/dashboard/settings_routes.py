@@ -14,6 +14,7 @@ from fastapi.templating import Jinja2Templates
 from sqlalchemy import inspect as sa_inspect
 from sqlalchemy.orm import Session
 
+from central import branding
 from central import models as m
 from central import runtime
 from central.db import get_db
@@ -23,10 +24,11 @@ router = APIRouter(tags=["settings"])
 _templates = Jinja2Templates(directory=str(Path(__file__).parent / "templates"))
 
 LOGO_ASSET_NAME = "logo"
-LOGO_MAX_BYTES = 512 * 1024  # 512 KB -- enough for a logo, blocks accidental DB bloat
-LOGO_ALLOWED_TYPES = {
-    "image/png", "image/jpeg", "image/svg+xml", "image/webp", "image/gif",
-}
+# The size cap and the accepted types now live in central.branding, because the
+# per-client uploader has to agree with this one on every rule. Re-exported
+# under their old names so callers (and tests) keep working.
+LOGO_MAX_BYTES = branding.LOGO_MAX_BYTES
+LOGO_ALLOWED_TYPES = set(branding.ALLOWED_LOGO_TYPES)
 
 
 def _admin(request: Request, db: Session) -> Optional[m.User]:
@@ -130,26 +132,27 @@ async def upload_logo(
 
     Operators don't need an external image host for one small file -- let them
     drop it in here and the dashboard / login page pick it up immediately.
+
+    Validation is ``branding.validate_logo``, shared with the per-client
+    uploader: the declared content type is checked, the size is capped, and the
+    BYTES decide what is stored -- the sniffed type is what lands in the row,
+    so a renamed HTML file or an SVG carrying script is refused rather than
+    served back from this origin. The filename is never used for anything.
     """
+    from central.audit import record
+
     user = _admin(request, db)
     if user is None:
         return RedirectResponse("/login", status_code=303)
-    content_type = (logo.content_type or "").lower()
-    if content_type not in LOGO_ALLOWED_TYPES:
-        request.session["logo_error"] = (
-            f"Unsupported file type: {content_type or 'unknown'}. "
-            "Use PNG, JPEG, SVG, WEBP, or GIF."
-        )
-        return RedirectResponse("/settings", status_code=303)
     data = await logo.read()
-    if not data:
-        request.session["logo_error"] = "Empty file uploaded."
-        return RedirectResponse("/settings", status_code=303)
-    if len(data) > LOGO_MAX_BYTES:
-        request.session["logo_error"] = (
-            f"File too large: {len(data) // 1024} KB (limit "
-            f"{LOGO_MAX_BYTES // 1024} KB)."
-        )
+    content_type, error = branding.validate_logo(logo.content_type or "", data)
+    if error:
+        request.session["logo_error"] = error
+        # A refused upload is a security-relevant boundary, so it is recorded
+        # rather than merely bounced -- the reason, never the bytes.
+        record(db, request, user, "settings.logo.refused",
+               target="app.logo", detail=error[:200])
+        db.commit()
         return RedirectResponse("/settings", status_code=303)
     existing = db.get(m.AppAsset, LOGO_ASSET_NAME)
     if existing is None:
@@ -194,6 +197,12 @@ def serve_logo(db: Session = Depends(get_db)):
     Public by design -- same exposure surface as a logo on the login page. Clients
     cache it for an hour; uploads bump the URL via a cache-busting suffix on the
     settings page (no manual purge needed for the operator's own browser).
+
+    The security headers matter for what may already be in this row: SVG is
+    refused on upload now, but an install that took one before this rule
+    existed still has it here, and an SVG loaded as a document runs its script
+    on this origin. `sandbox` stops that; `nosniff` stops a browser deciding a
+    mislabelled blob is HTML. Neither affects an <img> render.
     """
     # Same migration-not-applied guard as /settings: don't 500 a public endpoint
     # because a table is missing on a freshly-restarted-without-migrations stack.
@@ -202,10 +211,37 @@ def serve_logo(db: Session = Depends(get_db)):
     asset = db.get(m.AppAsset, LOGO_ASSET_NAME)
     if asset is None:
         return Response(status_code=404)
-    return Response(
-        content=asset.data, media_type=asset.content_type,
-        headers={"Cache-Control": "public, max-age=3600"},
-    )
+    headers = {"Cache-Control": "public, max-age=3600"}
+    headers.update(branding.IMAGE_SECURITY_HEADERS)
+    return Response(content=asset.data, media_type=asset.content_type, headers=headers)
+
+
+@router.get("/branding/clients/{client_id}/logo")
+def serve_client_logo(client_id: int, request: Request, db: Session = Depends(get_db)):
+    """A client's portal logo. Tenant-scoped, unlike the global one above.
+
+    The global logo is public because it is on the login page. This one is not:
+    it would otherwise let anyone walk the id space and enumerate an MSP's
+    customer list by their logos. So a session is required, a client_readonly
+    user may fetch only their own client's, and every other case is a plain
+    404 -- the same shape as the driver-package download, so a wrong id cannot
+    be used to probe which clients exist. `Cache-Control: private` keeps a
+    shared proxy from handing one tenant's logo to the next request.
+    """
+    if not sa_inspect(db.get_bind()).has_table(m.AppAsset.__tablename__):
+        return Response(status_code=404)
+    uid = request.session.get("user_id")
+    user = db.get(m.User, uid) if uid else None
+    if user is None or not user.active:
+        return Response(status_code=404)
+    if user.role == m.UserRole.client_readonly and user.client_id != client_id:
+        return Response(status_code=404)
+    asset = db.get(m.AppAsset, branding.client_logo_asset_name(client_id))
+    if asset is None:
+        return Response(status_code=404)
+    headers = {"Cache-Control": "private, max-age=3600"}
+    headers.update(branding.IMAGE_SECURITY_HEADERS)
+    return Response(content=asset.data, media_type=asset.content_type, headers=headers)
 
 
 @router.post("/settings/test-notification")

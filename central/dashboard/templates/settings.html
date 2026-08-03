@@ -41,10 +41,13 @@
       <form method="post" action="/settings/branding/logo" enctype="multipart/form-data" class="space-y-2">
         <label class="block">
           <span class="text-xs text-slate-500">Logo image</span>
-          <input type="file" name="logo" accept="image/png,image/jpeg,image/svg+xml,image/webp,image/gif" required
+          <input type="file" name="logo" accept="image/png,image/jpeg,image/webp,image/gif" required
                  class="block w-full text-sm rounded focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-offset-1 focus-visible:ring-sky-500" />
         </label>
-        <p class="text-xs text-slate-400">PNG, JPEG, SVG, WEBP, GIF up to 512 KB.</p>
+        {# SVG is refused: it is a document, it can carry <script>, and it
+           would be served from this origin. The file's magic bytes are checked
+           too, so the extension and the declared type decide nothing. #}
+        <p class="text-xs text-slate-400">PNG, JPEG, GIF or WEBP up to 512 KB. SVG is refused — it can carry script.</p>
         <button class="{{ btn('primary') }}">Upload</button>
       </form>
       {% if has_uploaded_logo %}

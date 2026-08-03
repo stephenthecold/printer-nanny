@@ -12,21 +12,24 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import List, Optional
 
-from fastapi import APIRouter, Depends, Form, Request
+from fastapi import APIRouter, Depends, File, Form, Request, UploadFile
 from fastapi.responses import FileResponse, HTMLResponse, RedirectResponse
 from fastapi.templating import Jinja2Templates
 from sqlalchemy import func, select
+from sqlalchemy import inspect as sa_inspect
 from sqlalchemy.orm import Session
 from starlette.background import BackgroundTask
 
+from central import branding as branding_lib
 from central import models as m
 from central import services
 from central import suppression
 from central.audit import record
+from central.branding import branding_for
 from central.dashboard import _keystore
 from central.db import get_db
 from central.health import worker_banner
-from central.runtime import app_branding, load_settings
+from central.runtime import load_settings
 from central.security import generate_api_key, hash_api_key, hash_password
 
 
@@ -78,10 +81,16 @@ def _tpl(request: Request, template: str, db: Session, **ctx) -> HTMLResponse:
 
     Keeps every manage template (nav, login, footer) in sync with the operator's
     Settings -> Branding values without each callsite having to remember.
+
+    ``branding_for`` resolves to the global values for admin/tech -- an
+    operator's chrome must not change identity as they move between tenants --
+    and to their own client's branding for a client_readonly user, so a
+    customer who reaches one of these pages does not see the portal's branding
+    swap back to the MSP's halfway through their session.
     """
     from central import __version__ as _central_version
 
-    ctx.setdefault("app", app_branding(db))
+    ctx.setdefault("app", branding_for(db, ctx.get("user")))
     ctx.setdefault("central_version", _central_version)
     # Conditional Approvals nav: link only renders when something is pending.
     if "nav_pending" not in ctx:
@@ -158,12 +167,27 @@ def client_manage(client_id: int, request: Request, db: Session = Depends(get_db
         db.scalars(select(m.Printer).where(m.Printer.client_id == client_id).order_by(m.Printer.ip))
     )
     runtime = load_settings(db)
+    # Whether this client has uploaded logo BYTES (as opposed to an external
+    # URL), for the preview + remove controls. Guarded on the table existing
+    # for the same reason /settings is: an operator who restarted the api
+    # before migrations ran should get a page without the logo panel, not a
+    # 500 on the client screen.
+    has_brand_logo = (
+        sa_inspect(db.get_bind()).has_table(m.AppAsset.__tablename__)
+        and db.get(m.AppAsset, branding_lib.client_logo_asset_name(client.id)) is not None
+    )
     return _tpl(
         request, "client_manage.html", db,
         user=user, client=client, sites=client.sites,
         printers=printers, flash=_pop_flash(request),
         default_tz=(runtime.get("alerts.default_timezone") or "UTC"),
         tz_choices=_timezone_choices(),
+        has_brand_logo=has_brand_logo,
+        # Sanitised here rather than in the template: the swatch renders it
+        # into a style attribute, which is the same CSS sink base.html has.
+        brand_swatch=branding_lib.safe_css_color(
+            client.brand_primary_color, fallback=""
+        ),
     )
 
 
@@ -198,6 +222,161 @@ def update_client(
     return _redirect(f"/manage/clients/{client_id}")
 
 
+@router.post("/clients/{client_id}/branding")
+def update_client_branding(
+    client_id: int, request: Request,
+    brand_name: str = Form(""),
+    brand_primary_color: str = Form(""),
+    brand_logo_url: str = Form(""),
+    db: Session = Depends(get_db),
+):
+    """Per-client white-label overrides for the customer portal.
+
+    Every field is optional and blank means "inherit the global setting", so a
+    client with nothing set renders exactly as it does today.
+
+    The colour is **validated, not escaped**: it is interpolated into a CSS
+    declaration in base.html, where escaping stops an attribute breakout but
+    not ``red; background-image: url(https://attacker/?c=)``. Anything that is
+    not ``#rgb``/``#rrggbb`` is refused with a message rather than coerced --
+    silently dropping it would leave an operator staring at an unchanged nav
+    bar wondering which of the two fields they got wrong.
+
+    The logo URL is constrained to http(s) or a site-relative path. Nothing is
+    fetched server-side, so this is not an SSRF surface; the constraint is
+    about what ends up in an ``<img src>``.
+    """
+    actor = _manager(request, db)
+    if actor is None:
+        return _redirect("/login")
+    client = db.get(m.Client, client_id)
+    if client is None:
+        return _redirect("/manage")
+
+    name = (brand_name or "").strip()[:120]
+
+    color_raw = (brand_primary_color or "").strip()
+    color = branding_lib.normalise_hex_color(color_raw) if color_raw else None
+    if color_raw and color is None:
+        _flash(request, f"'{color_raw[:40]}' is not a #RRGGBB colour — branding unchanged.")
+        record(db, request, actor, "client.branding.refused",
+               target=f"client:{client.id} {client.name}",
+               detail="primary_color rejected (not #rrggbb)")
+        db.commit()
+        return _redirect(f"/manage/clients/{client_id}")
+
+    url_raw = (brand_logo_url or "").strip()
+    # An upload points this at our own route; re-typing that path by hand is
+    # equally valid, so there is nothing to special-case here.
+    url = branding_lib.safe_logo_url(url_raw) if url_raw else None
+    if url_raw and url is None:
+        _flash(request, "Logo URL must be an https:// address or a /path — branding unchanged.")
+        record(db, request, actor, "client.branding.refused",
+               target=f"client:{client.id} {client.name}",
+               detail="logo_url rejected (scheme or length)")
+        db.commit()
+        return _redirect(f"/manage/clients/{client_id}")
+
+    before = (client.brand_name, client.brand_primary_color, client.brand_logo_url)
+    client.brand_name = name or None
+    client.brand_primary_color = color
+    client.brand_logo_url = url
+    after = (client.brand_name, client.brand_primary_color, client.brand_logo_url)
+    if before != after:
+        # Values, not just key names: a brand name, a hex colour and a logo URL
+        # are operator-visible configuration, never secrets.
+        record(db, request, actor, "client.branding.update",
+               target=f"client:{client.id} {client.name}",
+               detail="name={} color={} logo={}".format(
+                   client.brand_name or "inherit",
+                   client.brand_primary_color or "inherit",
+                   client.brand_logo_url or "inherit",
+               ))
+    db.commit()
+    _flash(request, "Portal branding saved.")
+    return _redirect(f"/manage/clients/{client_id}")
+
+
+@router.post("/clients/{client_id}/branding/logo")
+async def upload_client_branding_logo(
+    client_id: int, request: Request,
+    logo: UploadFile = File(...),
+    db: Session = Depends(get_db),
+):
+    """Upload this client's portal logo.
+
+    Deliberately the SAME uploader as Settings -> Branding: one size cap, one
+    allow-list, one magic-byte check (``central.branding.validate_logo``), and
+    the same ``app_assets`` blob store under a namespaced key. A second
+    uploader is a second set of rules to get wrong.
+
+    The uploaded filename is never used -- not as a key, not as a path, not in
+    the response -- so there is no traversal to defend against. What is stored
+    is the SNIFFED content type, and what is served is tenant-scoped.
+    """
+    actor = _manager(request, db)
+    if actor is None:
+        return _redirect("/login")
+    client = db.get(m.Client, client_id)
+    if client is None:
+        return _redirect("/manage")
+
+    data = await logo.read()
+    content_type, error = branding_lib.validate_logo(logo.content_type or "", data)
+    if error:
+        _flash(request, f"Logo upload: {error}")
+        record(db, request, actor, "client.branding.logo.refused",
+               target=f"client:{client.id} {client.name}", detail=error[:200])
+        db.commit()
+        return _redirect(f"/manage/clients/{client_id}")
+
+    key = branding_lib.client_logo_asset_name(client.id)
+    existing = db.get(m.AppAsset, key)
+    if existing is None:
+        db.add(m.AppAsset(
+            name=key, content_type=content_type, data=data,
+            updated_at=datetime.now(timezone.utc),
+        ))
+    else:
+        existing.content_type = content_type
+        existing.data = data
+        existing.updated_at = datetime.now(timezone.utc)
+    # Point the client's logo URL at the route that serves these bytes, the
+    # same way the global upload wires up app.logo_url.
+    client.brand_logo_url = branding_lib.client_logo_path(client.id)
+    record(db, request, actor, "client.branding.logo",
+           target=f"client:{client.id} {client.name}",
+           detail=f"type={content_type} bytes={len(data)}")
+    db.commit()
+    _flash(request, f"Portal logo uploaded ({len(data) // 1024} KB).")
+    return _redirect(f"/manage/clients/{client_id}")
+
+
+@router.post("/clients/{client_id}/branding/logo/delete")
+def delete_client_branding_logo(
+    client_id: int, request: Request, db: Session = Depends(get_db)
+):
+    actor = _manager(request, db)
+    if actor is None:
+        return _redirect("/login")
+    client = db.get(m.Client, client_id)
+    if client is None:
+        return _redirect("/manage")
+    key = branding_lib.client_logo_asset_name(client.id)
+    existing = db.get(m.AppAsset, key)
+    if existing is not None:
+        db.delete(existing)
+    # Clear the URL only if it pointed at the upload -- an operator who pasted
+    # an external CDN address keeps it, same rule as the global logo.
+    if (client.brand_logo_url or "") == branding_lib.client_logo_path(client.id):
+        client.brand_logo_url = None
+    record(db, request, actor, "client.branding.logo.delete",
+           target=f"client:{client.id} {client.name}")
+    db.commit()
+    _flash(request, "Portal logo removed.")
+    return _redirect(f"/manage/clients/{client_id}")
+
+
 @router.post("/clients/{client_id}/delete")
 def delete_client(client_id: int, request: Request, db: Session = Depends(get_db)):
     user = _manager(request, db)
@@ -208,6 +387,15 @@ def delete_client(client_id: int, request: Request, db: Session = Depends(get_db
     if client:
         record(db, request, user, "client.delete",
                target=f"client:{client.id} {client.name}")
+        # The branding columns go with the row, but the logo BYTES live in
+        # app_assets keyed by client id and have no foreign key to cascade
+        # along. Leaving them is not merely untidy: SQLite hands out the next
+        # free rowid, so a client created after this delete can be given the
+        # same id -- and would inherit the deleted tenant's logo. Delete it
+        # with the client.
+        asset = db.get(m.AppAsset, branding_lib.client_logo_asset_name(client.id))
+        if asset is not None:
+            db.delete(asset)
         db.delete(client)
         db.commit()
         _flash(request, "Client deleted.")

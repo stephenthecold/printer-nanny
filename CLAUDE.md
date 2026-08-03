@@ -364,6 +364,37 @@ enforced; none of them is optional.
   trimmed view of their fleet with friendly names, "your supplies last ~Nd"
   forecasts, open issues, and a "Report a problem" form that opens a FreeScout
   ticket via the existing channel (or falls back to alert-email recipients).
+- **Per-client white-label** (`clients.brand_name` / `brand_logo_url` /
+  `brand_primary_color`, `central/branding.py`) overrides the global `app.*`
+  branding **per field** — an unset column inherits, so a client with nothing
+  configured renders exactly as before. It applies to the customer-facing
+  surface only: every page a `client_readonly` user reaches, plus
+  `/portal?client_id=N` when staff preview one. Staff pages keep the global
+  chrome, because a nav bar that turns into the customer's logo reads as "you
+  are inside their system". **Alert email, tickets and reports stay global** —
+  channels are shared across tenants and digests span several, so a message
+  branded as one customer is branded as the wrong one for everyone else on
+  that channel. Two sinks make this a security surface, not a cosmetic one:
+  `primary_color` lands in a CSS declaration, where escaping stops an
+  attribute breakout but not `red; background-image: url(https://attacker/)`,
+  so it is **validated against `#rgb`/`#rrggbb` on input and re-checked at
+  render**; and the logo is a file served from our own origin, so the **bytes
+  decide** (`sniff_image_type`, four raster formats), SVG is refused outright
+  as a script-carrying document, and anything already stored goes out with
+  `nosniff` + a sandboxing CSP. There is **one** uploader, shared with Settings
+  → Branding, storing into `app_assets` under `client:<id>:logo`; that row has
+  no FK, so deleting a client deletes it explicitly — SQLite reuses row ids and
+  the next client would otherwise inherit the logo. Serving is tenant-scoped
+  (404, never 403, so ids can't be probed).
+- **HTML escaping is not JS escaping.** A value interpolated into
+  `onsubmit="return confirm('Delete {{ name }}?')"` is autoescaped to `&#39;`
+  — and the HTML parser decodes that back to a quote *before* the attribute is
+  compiled as script, so the string literal closes and the rest executes. Pass
+  such values in a `data-` attribute and read them through `dataset` instead;
+  then they are only ever data. `client_manage.html` does this;
+  `tests/test_client_branding.py` asserts it. **Eleven other confirm dialogs
+  still interpolate** (agents, maintenance, printer, manage_users, suppression)
+  and carry operator free-text or device-supplied strings — not yet fixed.
 - **Printer friendly names** (`printers.display_name`) are used everywhere a
   printer is named — dashboards, alert titles, recent activity, the weekly
   report. Operators set them in the printer edit form.

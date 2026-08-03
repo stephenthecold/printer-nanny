@@ -14,9 +14,9 @@ from sqlalchemy.orm import Session
 
 from central import models as m
 from central import queries
+from central.branding import branding_for
 from central.db import get_db
 from central.health import worker_banner
-from central.runtime import app_branding
 from central.security import hash_password, verify_password
 
 router = APIRouter(tags=["dashboard"])
@@ -48,7 +48,17 @@ def _render(
     ctx.setdefault("user", ctx.get("user"))
     # White-label branding injected into every render. Templates read ``app.name``,
     # ``app.logo_url``, ``app.primary_color``, ``app.support_email``, ``app.footer_text``.
-    ctx.setdefault("app", app_branding(db) if db is not None else {})
+    #
+    # ``brand_client`` selects PER-CLIENT branding for the customer-facing
+    # surface: the portal passes the client it is rendering (which covers an
+    # admin previewing one), and any page a client_readonly user reaches picks
+    # up their own client automatically. Staff pages resolve to no client and
+    # render the global values exactly as before. See central/branding.py.
+    brand_client = ctx.pop("brand_client", None)
+    if db is not None:
+        ctx.setdefault("app", branding_for(db, ctx.get("user"), brand_client))
+    else:
+        ctx.setdefault("app", {})
     # Central server version surfaced in the footer of every page so operators
     # can verify a rollout landed without dropping to the shell.
     ctx.setdefault("central_version", _central_version)
@@ -200,6 +210,11 @@ def customer_portal(request: Request, db: Session = Depends(get_db)):
     esg = queries.sustainability_rollup(db, client_id=client.id)
     return _render(
         request, "portal.html", db=db, user=user,
+        # The portal is THE white-label surface: it renders in this client's
+        # branding, falling back per-field to the global settings. Passed
+        # explicitly so an admin/tech previewing ?client_id=N sees what that
+        # customer sees rather than the MSP's own chrome.
+        brand_client=client,
         client=client, printers=printers, runway=runway,
         low_supplies=low, open_alerts=alerts,
         freescout_enabled=freescout_on,

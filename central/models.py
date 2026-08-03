@@ -289,6 +289,21 @@ class Client(Base):
     # save, and resolved defensively at read time (see central.suppression), so
     # a stale or hand-edited value degrades to UTC instead of killing the worker.
     timezone: Mapped[Optional[str]] = mapped_column(String(64), default=None)
+    # --- Per-client white-label branding (customer portal only) ---------------
+    # NULL/blank on any of these means "inherit the global app.* setting", and
+    # the fallback is per-field: a client that sets only a colour keeps the
+    # MSP's name and logo. See central/branding.py for where this is applied
+    # (and, just as deliberately, where it is not: alert email stays global).
+    #
+    # brand_primary_color is validated to #rgb/#rrggbb on the way in AND
+    # re-checked on the way out, because it is interpolated into a CSS
+    # declaration. brand_logo_url is either an external https URL or the
+    # internal /branding/clients/<id>/logo path an upload points it at; the
+    # bytes themselves live in app_assets under client_logo_asset_name(), so
+    # there is one blob store and one uploader rather than two.
+    brand_name: Mapped[Optional[str]] = mapped_column(String(120), default=None)
+    brand_logo_url: Mapped[Optional[str]] = mapped_column(String(1000), default=None)
+    brand_primary_color: Mapped[Optional[str]] = mapped_column(String(32), default=None)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
 
     sites: Mapped[list[Site]] = relationship(back_populates="client", cascade="all, delete-orphan")
