@@ -1,84 +1,128 @@
 {% extends "base.html" %}
-{% from "_components.html" import card_cls, table_wrap %}
-{% from "base.html" import status_badge %}
+{% from "_components.html" import page_title, section_title, card_cls, note,
+   table_wrap, table_cls, thead_cls, th_cls, td_cls, tr_cls, badge, btn,
+   select_field, empty_row %}
 {% block title %}Security posture · {{ app.name or 'Printer Nanny' }}{% endblock %}
 {% block body %}
-<div class="flex items-center justify-between mb-4">
-  <h1 class="text-2xl font-semibold">Device security posture</h1>
-  <span class="text-xs text-slate-500">Treat printers like endpoints — grounded in collected SNMP signals.</span>
+{{ page_title(
+     'Device security posture',
+     sub='Treat printers like endpoints. Every value here is collected, not inferred.') }}
+
+{#
+  The scope note is not decoration. This report's one real failure mode is
+  crying wolf: v1/v2c reads are extremely common and are NOT by themselves
+  evidence of an unhardened device -- HP's "Secure by Default" (FutureSmart
+  4.5+) disables SNMPv1/v2 writes while leaving reads answering, and a
+  technician sent to "fix" such a printer finds nothing to fix and stops
+  believing the next report. So the page states its own scope: it grades the
+  monitoring path we configured, which we can prove, and declines to guess at
+  the device's own write policy, which we never test.
+#}
+<div class="{{ note('info') }} mb-6">
+  <p><strong>What this asserts:</strong> the SNMP transport <em>this system</em> uses to poll each
+  device (from the subnet's version and USM security level), and whether that subnet's community
+  string is still a vendor default. Both are facts about our own configuration.</p>
+  <p class="mt-1"><strong>What it does not assert:</strong> that a device accepts SNMP
+  <em>writes</em>. SET is the attack that reconfigures a printer, we never attempt one, and current
+  firmware commonly refuses writes while still answering reads. Cleartext polling is an exposure of
+  the monitoring path, not proof that a printer is unhardened.</p>
+  <p class="mt-1"><strong>Firmware</strong> is a visibility column, not a finding: “unknown” means
+  the device exposed nothing parseable over SNMP, never that it is up to date.</p>
 </div>
 
-<div class="grid grid-cols-2 md:grid-cols-4 gap-3 mb-6">
+<div class="grid grid-cols-2 md:grid-cols-5 gap-3 mb-6">
   <div class="{{ card_cls() }}">
     <div class="text-3xl font-semibold">{{ summary.total }}</div>
     <div class="text-xs text-slate-500 mt-1">Approved devices</div>
   </div>
   <div class="{{ card_cls() }}">
-    <div class="text-3xl font-semibold {{ 'text-red-600' if summary.insecure_snmp else 'text-slate-300' }}">{{ summary.insecure_snmp }}</div>
-    <div class="text-xs text-slate-500 mt-1">Insecure SNMP (v1/v2c)</div>
+    <div class="text-3xl font-semibold {{ 'text-amber-600' if summary.snmp_cleartext else 'text-slate-300' }}">{{ summary.snmp_cleartext }}</div>
+    <div class="text-xs text-slate-500 mt-1">Polled in cleartext</div>
   </div>
   <div class="{{ card_cls() }}">
-    <div class="text-3xl font-semibold {{ 'text-green-600' if summary.secure_snmp else 'text-slate-300' }}">{{ summary.secure_snmp }}</div>
-    <div class="text-xs text-slate-500 mt-1">SNMPv3 (authenticated)</div>
+    <div class="text-3xl font-semibold {{ 'text-red-600' if summary.snmp_default_community else 'text-slate-300' }}">{{ summary.snmp_default_community }}</div>
+    <div class="text-xs text-slate-500 mt-1">Default community</div>
   </div>
   <div class="{{ card_cls() }}">
-    <div class="text-3xl font-semibold {{ 'text-amber-600' if summary.firmware_unknown else 'text-slate-300' }}">{{ summary.firmware_unknown }}</div>
+    <div class="text-3xl font-semibold {{ 'text-green-600' if summary.snmp_encrypted else 'text-slate-300' }}">{{ summary.snmp_encrypted }}</div>
+    <div class="text-xs text-slate-500 mt-1">SNMPv3 authPriv</div>
+  </div>
+  <div class="{{ card_cls() }}">
+    <div class="text-3xl font-semibold {{ 'text-slate-600' if summary.firmware_unknown else 'text-slate-300' }}">{{ summary.firmware_unknown }}</div>
     <div class="text-xs text-slate-500 mt-1">Firmware unknown</div>
   </div>
 </div>
 
 <section class="{{ card_cls() }}">
-  <h2 class="font-semibold mb-3">Devices</h2>
-  {# The one table on this page had no scroll container, so a narrow
-     viewport scrolled the whole page instead of just the table. #}
+  <div class="flex items-end justify-between gap-3 flex-wrap mb-3">
+    {{ section_title('Devices') }}
+    <div class="flex items-end gap-2 flex-wrap">
+      {%- if clients %}
+      {# GET so the filtered view is linkable and bookmarkable. #}
+      <form method="get" action="/security/posture" class="flex items-end gap-2">
+        <div class="w-48">
+          {%- call select_field('client_id', 'Client', size='sm') -%}
+            <option value="">All clients</option>
+            {%- for c in clients %}
+            <option value="{{ c.id }}" {% if selected_client_id == c.id %}selected{% endif %}>{{ c.name }}</option>
+            {%- endfor %}
+          {%- endcall %}
+        </div>
+        <button type="submit" class="{{ btn('neutral', 'sm') }}">Filter</button>
+      </form>
+      {%- endif %}
+      {#- Staff-only, like the page: the export route refuses client_readonly. -#}
+      <a href="/api/v1/reports/export/posture.csv{% if selected_client_id %}?client_id={{ selected_client_id }}{% endif %}"
+         class="{{ btn('accent', 'sm') }}">Download CSV</a>
+    </div>
+  </div>
+
   <div class="{{ table_wrap() }}">
-  <table class="w-full text-sm">
-    <thead class="text-left text-xs text-slate-500">
+  <table class="{{ table_cls() }}">
+    <thead class="{{ thead_cls() }}">
       <tr>
-        <th class="py-1">Device</th>
-        <th class="py-1">Client / Site</th>
-        <th class="py-1">SNMP</th>
-        <th class="py-1">Firmware</th>
-        <th class="py-1">Posture</th>
+        <th class="{{ th_cls() }}">Device</th>
+        <th class="{{ th_cls() }}">Client / Site</th>
+        <th class="{{ th_cls() }}">SNMP transport</th>
+        <th class="{{ th_cls() }}">Firmware</th>
+        <th class="{{ th_cls() }}">Findings</th>
       </tr>
     </thead>
     <tbody>
       {% for row in rows %}
-      <tr class="border-t hover:bg-slate-50">
-        <td class="py-1.5">
-          <a href="/printers/{{ row.printer.id }}" class="text-sky-700 hover:underline font-medium">{{ printer_label(row.printer) }}</a>
+      {% set grade = grade_meta.get(row.snmp_grade) %}
+      <tr class="{{ tr_cls() }}">
+        <td class="{{ td_cls() }}">
+          <a href="/printers/{{ row.printer.id }}" class="text-sky-700 hover:underline font-medium rounded focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-sky-500">{{ printer_label(row.printer) }}</a>
           {% if row.printer.model %}<div class="text-xs text-slate-400">{{ row.printer.model }}</div>{% endif %}
         </td>
-        <td class="py-1.5 text-slate-500">
+        <td class="{{ td_cls('left', 'text-slate-500') }}">
           {{ row.client.name if row.client else '—' }}
           {% if row.site %}<span class="text-slate-400"> · {{ row.site.name }}</span>{% endif %}
         </td>
-        <td class="py-1.5">
-          {% if row.snmp_secure %}
-          <span class="px-2 py-0.5 rounded text-xs font-medium bg-green-100 text-green-800" title="Authenticated USM ({{ row.snmp_source }})">v{{ row.snmp_version }}</span>
-          {% else %}
-          <span class="px-2 py-0.5 rounded text-xs font-medium bg-red-100 text-red-800" title="Cleartext community ({{ row.snmp_source }})">insecure-snmp v{{ row.snmp_version }}</span>
-          {% endif %}
+        <td class="{{ td_cls() }}">
+          {{ badge('v' ~ row.snmp_version ~ ' ' ~ grade.label, grade.tone) }}
+          <div class="text-xs text-slate-400 mt-0.5">from {{ row.snmp_source }}</div>
         </td>
-        <td class="py-1.5">
+        <td class="{{ td_cls() }}">
           {% if row.firmware_known %}
           <span class="tabular-nums text-slate-700">{{ row.firmware }}</span>
           {% else %}
-          <span class="text-xs text-slate-400">unknown</span>
+          {#- Honest absence. Not a badge, because it is not a finding. -#}
+          <span class="text-xs text-slate-400" title="The device exposed no parseable firmware string over SNMP.">unknown</span>
           {% endif %}
         </td>
-        <td class="py-1.5">
-          {% if row.flags %}
-            {% for flag in row.flags %}
-            <span class="px-1.5 py-0.5 rounded text-xs mr-1 {{ 'bg-red-100 text-red-700' if flag == 'insecure-snmp' else 'bg-amber-100 text-amber-700' }}">{{ flag }}</span>
-            {% endfor %}
+        <td class="{{ td_cls() }}">
+          {% for flag in row.flags %}
+          {% set meta = flag_meta.get(flag) %}
+          <span title="{{ meta.detail }}">{{ badge(meta.label, meta.tone, 'mr-1') }}</span>
           {% else %}
-          <span class="px-1.5 py-0.5 rounded text-xs bg-green-100 text-green-700">ok</span>
-          {% endif %}
+          <span class="text-xs text-slate-400">none</span>
+          {% endfor %}
         </td>
       </tr>
       {% else %}
-      <tr><td class="py-2 text-slate-400" colspan="5">No approved devices.</td></tr>
+      {{ empty_row(5, 'No approved devices.') }}
       {% endfor %}
     </tbody>
   </table>

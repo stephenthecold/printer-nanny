@@ -13,10 +13,75 @@ from central import models as m
 
 DEFAULT_LOW_SUPPLY_PCT = 20.0
 
-# SNMP versions that transmit the community string / data in the clear. v3 USM
-# adds authentication + (optionally) privacy, so we treat it as the only
-# "secure" transport for the device security-posture report.
+# SNMP versions that transmit the community string / data in the clear.
 INSECURE_SNMP_VERSIONS = {"1", "v1", "2c", "v2c", "2", "v2"}
+
+# Grades for the transport OUR polling uses. Three, not two, because "v3" alone
+# is not a security property: USM's noAuthNoPriv level is v3 with authentication
+# and privacy both switched off, and the agent polls at exactly that level when
+# no security_level is recorded (agent/printer_nanny_agent/snmp.py: `level =
+# (params.v3_security_level or "noAuthNoPriv")`). Grading every v3 row "secure"
+# therefore printed a green badge over an unauthenticated cleartext session --
+# a posture report calling absence safety, which is worse than no report.
+SNMP_GRADE_CLEARTEXT = "cleartext"          # v1/v2c, or v3 noAuthNoPriv
+SNMP_GRADE_AUTHENTICATED = "authenticated"  # v3 authNoPriv: signed, not encrypted
+SNMP_GRADE_ENCRYPTED = "encrypted"          # v3 authPriv: signed and encrypted
+
+# Community strings every vendor ships. Unlike "is v2c bad", this needs no
+# inference about the device: the string is in our own subnet row, and if it is
+# still the factory default then every SNMP reader on that broadcast domain can
+# read the device today.
+DEFAULT_SNMP_COMMUNITIES = {"public", "private"}
+
+# Posture flags. These are SECURITY FINDINGS about the monitoring path, and the
+# wording of each is deliberately narrower than "this printer is insecure":
+#
+#   snmp-cleartext          Our polling credential and every reading cross the
+#                           customer VLAN unencrypted. Asserted about our own
+#                           configuration, which we own and can prove.
+#   snmp-default-community  The community string is still a factory default.
+#
+# What is deliberately NOT asserted: that the device accepts SNMP *writes*. SET
+# is the attack that reconfigures a printer, we never attempt one, and modern
+# firmware increasingly refuses it while still answering reads -- HP's "Secure
+# by Default" (FutureSmart 4.5+) disables SNMPv1/v2 write access and leaves read
+# enabled. Reporting a read-only v2c device as "insecure" would send a
+# technician to argue with a printer that is already hardened, which is how a
+# security report teaches its readers to ignore it.
+FLAG_SNMP_CLEARTEXT = "snmp-cleartext"
+FLAG_SNMP_DEFAULT_COMMUNITY = "snmp-default-community"
+
+# Presentation metadata for the two above and for the transport grades. It
+# lives here rather than in the template for two reasons: the wording of a
+# security claim belongs next to the logic that decides it, and a flag code
+# spelled in a Jinja literal is indistinguishable from a CSS class to the
+# tree-shaking guard in tests/test_static_assets.py (which is why the previous
+# flag name needed an entry in that test's exemption list). `tone` values are
+# the badge() tones in _components.html.
+POSTURE_FLAG_META = {
+    FLAG_SNMP_CLEARTEXT: {
+        "label": "cleartext SNMP",
+        "tone": "warning",
+        "detail": (
+            "Polling credential and readings cross the customer VLAN "
+            "unencrypted. Not a claim that the device accepts SNMP writes."
+        ),
+    },
+    FLAG_SNMP_DEFAULT_COMMUNITY: {
+        "label": "default community",
+        "tone": "error",
+        "detail": (
+            "The community string on this subnet is still a vendor default, "
+            "so any SNMP reader on the broadcast domain can query the device."
+        ),
+    },
+}
+
+SNMP_GRADE_META = {
+    SNMP_GRADE_CLEARTEXT: {"label": "cleartext", "tone": "warning"},
+    SNMP_GRADE_AUTHENTICATED: {"label": "authNoPriv", "tone": "info"},
+    SNMP_GRADE_ENCRYPTED: {"label": "authPriv", "tone": "ok"},
+}
 
 
 def fleet_summary(db: Session, client_id: Optional[int] = None) -> dict:
@@ -372,19 +437,41 @@ def _normalize_snmp_version(version: Optional[str]) -> str:
     return v or "2c"
 
 
-def _subnet_snmp_version_for(printer: m.Printer, subnets: list[m.Subnet]) -> tuple[str, Optional[str]]:
-    """Effective SNMP version for a printer, derived from its SUBNET config.
+def snmp_grade(version: str, snmp_v3: Optional[dict]) -> str:
+    """Grade the SNMP transport from the version plus the USM security level.
+
+    v1/v2c are cleartext by definition. For v3 the version says nothing on its
+    own -- the USM security level does -- and an absent level is not an unknown:
+    the agent substitutes noAuthNoPriv for it, so the session really is
+    unauthenticated and unencrypted. Treating it as cleartext is a statement
+    about what this system actually does, not a guess about the device.
+    """
+    if version in INSECURE_SNMP_VERSIONS:
+        return SNMP_GRADE_CLEARTEXT
+    level = ((snmp_v3 or {}).get("security_level") or "").strip().lower()
+    if level == "authpriv":
+        return SNMP_GRADE_ENCRYPTED
+    if level == "authnopriv":
+        return SNMP_GRADE_AUTHENTICATED
+    return SNMP_GRADE_CLEARTEXT
+
+
+def _subnet_snmp_config_for(printer: m.Printer, subnets: list[m.Subnet]) -> dict:
+    """Effective SNMP config for a printer, derived from its SUBNET row.
 
     The anchor signal for the posture report is "what SNMP version does this
     device actually talk over", which is owned by the subnet the printer sits
     in (each subnet row carries its own creds). We match the printer's IP
     against the CIDRs of the subnets in its own site; the matching subnet's
-    ``snmp_version`` wins. Falls back to the printer's own ``snmp_version``
-    column when no subnet contains the IP (e.g. a manually-added device, or an
-    IP outside any enrolled CIDR).
+    config wins. Falls back to the printer's own columns when no subnet
+    contains the IP (e.g. a manually-added device, or an IP outside any
+    enrolled CIDR).
 
-    Returns (version, source) where source is the subnet label/cidr or
-    "printer" so the UI can show where the determination came from.
+    Returns ``{"version", "source", "community", "snmp_v3"}`` where ``source``
+    is the subnet label/cidr or "printer", so the UI can show where the
+    determination came from. The community string itself is never rendered or
+    exported -- only whether it is a factory default -- because it is the
+    credential this whole finding is about.
     """
     try:
         ip = ipaddress.ip_address(printer.ip)
@@ -399,31 +486,50 @@ def _subnet_snmp_version_for(printer: m.Printer, subnets: list[m.Subnet]) -> tup
             except ValueError:
                 continue
             if ip in net:
-                return _normalize_snmp_version(sub.snmp_version), (sub.label or sub.cidr)
-    return _normalize_snmp_version(printer.snmp_version), "printer"
+                return {
+                    "version": _normalize_snmp_version(sub.snmp_version),
+                    "source": sub.label or sub.cidr,
+                    "community": sub.snmp_community,
+                    "snmp_v3": sub.snmp_v3,
+                }
+    return {
+        "version": _normalize_snmp_version(printer.snmp_version),
+        "source": "printer",
+        "community": printer.snmp_community,
+        "snmp_v3": printer.snmp_v3,
+    }
 
 
 def security_posture_rollup(db: Session, client_id: Optional[int] = None) -> dict:
     """Per-device security posture + a fleet summary -- "treat printers like
     endpoints".
 
-    Grounded entirely in data we already hold:
+    Grounded entirely in data we already hold, and careful about the difference
+    between the two kinds of thing it holds:
 
-      * insecure_snmp -- derived from the SNMP version the device talks over
-        (subnet config; v1/v2c are cleartext, v3 USM is authenticated). This is
-        the anchor signal and is fully available today.
-      * firmware -- best-effort version string captured during polling
-        (sysDescr / vendor field); honestly "unknown" when the device exposes
-        nothing, never fabricated.
+      * SNMP transport (a FINDING) -- graded from the subnet's version + USM
+        security level. This describes the monitoring path we configured, so we
+        can assert it outright rather than infer it from the device.
+      * Default community string (a FINDING) -- the credential in our own
+        subnet row is still the factory default.
+      * Firmware (VISIBILITY, not a finding) -- best-effort version string
+        captured during polling; honestly ``None`` -> "unknown" when the device
+        exposes nothing parseable, never fabricated.
 
-    Posture is COMPUTED on read (not denormalized): the SNMP version follows
-    the live subnet config, so a row would otherwise go stale the moment an
-    operator flips a subnet to v3. Firmware is the only stored input and it's a
-    fact the agent collected, not a derived verdict.
+    Firmware-unknown is deliberately NOT a ``flag``. It says we cannot see
+    something, not that something is wrong, and folding a visibility gap into
+    the same red count as a real exposure is how a security report becomes
+    noise. It has its own column and its own summary counter instead.
+
+    Posture is COMPUTED on read (not denormalized): the SNMP grade follows the
+    live subnet config, so a row would otherwise go stale the moment an
+    operator flips a subnet to v3 authPriv. Firmware is the only stored input
+    and it's a fact the agent collected, not a derived verdict.
 
     Returns ``{"rows": [...], "summary": {...}}`` scoped to ``client_id`` when
-    given. Each row: printer, client, site, snmp_version, snmp_secure (bool),
-    snmp_source, firmware (str|None), firmware_known (bool), flags (list[str]).
+    given. Each row: printer, client, site, snmp_version, snmp_grade,
+    snmp_secure (bool), snmp_source, snmp_default_community (bool), firmware
+    (str|None), firmware_known (bool), flags (list[str]).
     """
     stmt = (
         select(m.Printer)
@@ -439,23 +545,38 @@ def security_posture_rollup(db: Session, client_id: Optional[int] = None) -> dic
     sites = {s.id: s for s in db.scalars(select(m.Site))}
 
     rows: list[dict] = []
-    insecure_count = 0
-    secure_count = 0
+    cleartext_count = 0
+    authenticated_count = 0
+    encrypted_count = 0
+    default_community_count = 0
     unknown_fw_count = 0
     for printer in printers:
-        version, source = _subnet_snmp_version_for(printer, subnets)
-        secure = version not in INSECURE_SNMP_VERSIONS
+        cfg = _subnet_snmp_config_for(printer, subnets)
+        version = cfg["version"]
+        grade = snmp_grade(version, cfg["snmp_v3"])
+        secure = grade != SNMP_GRADE_CLEARTEXT
         firmware = (printer.firmware or "").strip() or None
         firmware_known = firmware is not None
+        # Only meaningful for v1/v2c: v3 has no community string at all, so
+        # asking whether a v3 subnet's leftover community is "public" would
+        # raise a finding about a credential nothing uses.
+        default_community = (
+            version in INSECURE_SNMP_VERSIONS
+            and (cfg["community"] or "").strip().lower() in DEFAULT_SNMP_COMMUNITIES
+        )
 
         flags: list[str] = []
-        if not secure:
-            flags.append("insecure-snmp")
-            insecure_count += 1
+        if grade == SNMP_GRADE_CLEARTEXT:
+            flags.append(FLAG_SNMP_CLEARTEXT)
+            cleartext_count += 1
+        elif grade == SNMP_GRADE_AUTHENTICATED:
+            authenticated_count += 1
         else:
-            secure_count += 1
+            encrypted_count += 1
+        if default_community:
+            flags.append(FLAG_SNMP_DEFAULT_COMMUNITY)
+            default_community_count += 1
         if not firmware_known:
-            flags.append("firmware-unknown")
             unknown_fw_count += 1
 
         rows.append({
@@ -463,8 +584,10 @@ def security_posture_rollup(db: Session, client_id: Optional[int] = None) -> dic
             "client": clients.get(printer.client_id),
             "site": sites.get(printer.site_id),
             "snmp_version": version,
+            "snmp_grade": grade,
             "snmp_secure": secure,
-            "snmp_source": source,
+            "snmp_source": cfg["source"],
+            "snmp_default_community": default_community,
             "firmware": firmware,
             "firmware_known": firmware_known,
             "flags": flags,
@@ -472,11 +595,14 @@ def security_posture_rollup(db: Session, client_id: Optional[int] = None) -> dic
 
     summary = {
         "total": len(rows),
-        "insecure_snmp": insecure_count,
-        "secure_snmp": secure_count,
+        "snmp_cleartext": cleartext_count,
+        "snmp_authenticated": authenticated_count,
+        "snmp_encrypted": encrypted_count,
+        "snmp_default_community": default_community_count,
         "firmware_unknown": unknown_fw_count,
         "firmware_known": len(rows) - unknown_fw_count,
-        # Devices with at least one posture flag raised.
+        # Devices carrying at least one SECURITY finding. Firmware visibility is
+        # counted separately and on purpose -- see the docstring.
         "flagged": sum(1 for r in rows if r["flags"]),
     }
     return {"rows": rows, "summary": summary}

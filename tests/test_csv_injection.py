@@ -292,3 +292,19 @@ def test_neutralisation_lives_in_the_writer_not_the_cells(func):
     calls = _writer_factories(func)
     assert "safe_writer" in calls
     assert "csv.writer" not in calls
+
+
+def test_none_becomes_an_empty_cell_not_the_word_none():
+    """A missing meter must export as blank, never the string "None".
+
+    Ported from a parallel implementation of this helper that was discarded at
+    integration; the behaviour it asserted is real and was otherwise only
+    incidentally exercised. It matters for billing specifically: the monthly CSV
+    deliberately emits blank rather than 0 when a device reports no mono/colour
+    split, so a missing meter is never billed as zero -- and "None" would be
+    neither blank nor a number to whatever imports it.
+    """
+    buf = io.StringIO()
+    writer = safe_writer(buf)
+    writer.writerow(["printer-1", None, 5])
+    assert buf.getvalue().rstrip("\r\n") == "printer-1,,5"
