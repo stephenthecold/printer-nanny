@@ -355,6 +355,32 @@ SPECS: List[Spec] = [
          "root, which is a wider grant than the Windows path, so it is opted "
          "into rather than inherited. Uploads are audited with their digest "
          "either way."),
+    # Collector redundancy. Redundancy itself is opted into per SUBNET (by
+    # naming a standby agent on the Agents page); these only tune how the
+    # failover behaves once a subnet has one, so an install that never names a
+    # standby is unaffected by every one of them.
+    Spec("collector.lease_seconds", "int", "Collector redundancy",
+         "Collection lease length (seconds)", 900,
+         "How long a collection lease is granted for. The agent holding it stops "
+         "collecting when the lease runs out on its OWN clock, so this is also "
+         "the longest a disconnected agent keeps sweeping -- and a standby is "
+         "never handed a subnet before it elapses. Shorter fails over sooner; "
+         "longer tolerates a flakier link to central. Floored at 60s: a lease "
+         "shorter than the heartbeat interval would lapse between renewals."),
+    Spec("collector.takeover_after_seconds", "int", "Collector redundancy",
+         "Take over after primary silent for (seconds)", 900,
+         "A standby may only take over once the current collector has been "
+         "offline this long. Deliberately longer than the agent offline grace: "
+         "'briefly missed a heartbeat' and 'has stopped working' are different "
+         "events, and a collector that is merely slow must not be displaced."),
+    Spec("collector.auto_takeover", "bool", "Collector redundancy",
+         "Let a standby take over automatically", True,
+         "Off means a standby is configured but never activates on its own -- "
+         "collection stops until an operator hands the subnet over. On (the "
+         "default) the worker performs the handover, refusing unless the "
+         "collector really looks gone and the standby is alive, and audits it "
+         "as subnet.collector_takeover. A primary that comes back does NOT "
+         "reclaim the subnet either way; that is always an operator's decision."),
     Spec("onboarding.apply_defaults", "bool", "Onboarding defaults",
          "Apply defaults to new clients", True,
          "When a client is created through Onboard, give it the starting alert "
@@ -432,7 +458,8 @@ SETTINGS_GROUPS: "Dict[str, tuple]" = {
     "polling": ("Polling & SNMP", ["Polling", "SNMP defaults", "Data retention"]),
     "auth": ("Authentication",
              ["Single sign-on (OIDC)", "SCIM provisioning", "Directory sync"]),
-    "agents": ("Agents", ["Agent install", "Workstations", "Onboarding defaults"]),
+    "agents": ("Agents", ["Agent install", "Collector redundancy", "Workstations",
+                          "Onboarding defaults"]),
 }
 DEFAULT_SETTINGS_GROUP = "branding"
 

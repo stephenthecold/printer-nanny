@@ -84,18 +84,160 @@ def mark_offline_agents(db: Session, now: Optional[datetime] = None) -> dict:
     return {"agents_updated": changed}
 
 
+def reassign_collectors(db: Session, now: Optional[datetime] = None) -> dict:
+    """Hand a leased subnet to its standby when the collector really has gone.
+
+    **This is the only path that moves a lease between agents.** A heartbeat can
+    renew its own and pick up one nobody holds, but it can never take one -- so
+    a takeover is always a central decision, made once, with the whole tenant in
+    view, and audited. It runs under the worker's leader lock, so two worker
+    containers cannot both perform it.
+
+    Every check below is stale by the time the write executes, which is why the
+    write is a compare-and-swap (``collector.grant_lease`` asserts the holder id
+    AND the expiry it judged). A primary that was merely slow renews between our
+    read and our write, the swap misses, and nothing moves -- that, not the
+    checks, is what guarantees a working collector is never displaced. The
+    checks exist to stop us *trying*, so the audit trail records handovers
+    rather than attempts.
+
+    Refusals, in the shape of ``services.adopt_by_name``:
+
+    * **The lease must have lapsed.** A live lease is a collector that is still
+      sweeping on its own clock; taking it would create the exact overlap the
+      lease exists to prevent.
+    * **The holder must look gone** -- ``offline``, and silent for longer than
+      ``collector.takeover_after_seconds``, which is deliberately a separate,
+      longer threshold than the offline grace. Missing one heartbeat is not
+      having stopped working.
+    * **The successor must be alive.** Moving a subnet to a second dead agent
+      changes nothing except who is blamed for the silence.
+    * **Exactly one candidate**, structurally: the other of primary/standby.
+    * A holder that is **no longer either** (an operator reassigned the subnet
+      out from under it) is not "gone", but it is not entitled either -- it
+      simply stops being able to renew, and the subnet moves to the primary once
+      its lease lapses. The lapse is what makes that safe, not the reassignment.
+
+    A primary that comes back does NOT get its subnet back. The standby is
+    collecting correctly; a second handover buys nothing and costs another
+    transition, and a flapping collector -- which is how these actually fail --
+    would oscillate, one handover per flap. Hand-back is an operator action.
+    """
+    from central import collector as _collector
+    from central.audit import record
+
+    now = now or _now()
+    rt = load_settings(db)
+    ttl, takeover_after, auto = _collector.lease_settings(rt)
+    grace = timedelta(seconds=rt.get("alerts.offline_grace_seconds", 300))
+    silent_for = timedelta(seconds=takeover_after)
+
+    subnets = list(
+        db.scalars(select(m.Subnet).where(m.Subnet.standby_agent_id.is_not(None)))
+    )
+    if not subnets:
+        return {"collector_takeovers": 0}
+
+    def _alive(agent: Optional[m.Agent]) -> bool:
+        if agent is None or agent.status != m.AgentStatus.online:
+            return False
+        last = _aware(agent.last_heartbeat)
+        return last is not None and (now - last) <= grace
+
+    def _gone(agent: Optional[m.Agent]) -> bool:
+        # A deleted agent row is gone by definition. Otherwise both conditions:
+        # marked offline by mark_offline_agents (which ran earlier this cycle),
+        # and silent for the longer takeover threshold.
+        if agent is None:
+            return True
+        if agent.status != m.AgentStatus.offline:
+            return False
+        last = _aware(agent.last_heartbeat)
+        return last is None or (now - last) > silent_for
+
+    taken = 0
+    for subnet in subnets:
+        expires = _aware(subnet.collector_lease_expires_at)
+        # A live lease is never touched, whatever anyone's status says.
+        if expires is not None and expires > now:
+            continue
+        holder_id = subnet.collector_agent_id
+        eligible = _collector.eligible_agent_ids(subnet)
+
+        if holder_id is None:
+            # Nobody holds it: a freshly-released lease past its barrier, or a
+            # subnet whose primary has never heartbeated. The primary gets it
+            # back -- this is a return to the configured owner, not a takeover,
+            # so it needs no staleness judgement, only a live candidate.
+            candidate_id = subnet.agent_id
+        elif holder_id not in eligible:
+            # The operator reassigned this subnet away from its holder. Not a
+            # failure, so no staleness test; the lapse alone makes it safe.
+            candidate_id = subnet.agent_id
+        else:
+            if not auto:
+                continue
+            candidate_id = next(iter(eligible - {holder_id}), None)
+            if not _gone(db.get(m.Agent, holder_id)):
+                continue
+
+        if candidate_id is None or candidate_id == holder_id:
+            continue
+        if not _alive(db.get(m.Agent, candidate_id)):
+            continue
+
+        if _collector.grant_lease(
+            db, subnet.id,
+            to_agent_id=candidate_id, from_agent_id=holder_id,
+            now=now, ttl_seconds=ttl,
+        ):
+            taken += 1
+            action = (
+                "subnet.collector_takeover" if holder_id is not None
+                else "subnet.collector_assign"
+            )
+            record(
+                db, None, None, action,
+                target=f"subnet:{subnet.id} {subnet.cidr}",
+                detail=(
+                    f"collector agent:{holder_id if holder_id is not None else 'none'}"
+                    f" -> agent:{candidate_id}; lease lapsed"
+                    + (
+                        f", holder silent > {int(silent_for.total_seconds())}s"
+                        if holder_id is not None and holder_id in eligible else ""
+                    )
+                ),
+            )
+    db.commit()
+    return {"collector_takeovers": taken}
+
+
 def _sites_with_a_live_agent(db: Session) -> set:
     """Site ids currently covered by at least one non-offline agent.
 
     Mirrors ``services.sites_served_by_agent`` (home site + every subnet
-    assigned to the agent) but aggregated across all agents, so a site served
-    by two agents stays covered while only one of them is down.
+    assigned to the agent, plus any whose lease it currently holds) but
+    aggregated across all agents, so a site served by two agents stays covered
+    while only one of them is down. The lease clause is what stops a site whose
+    primary died and whose standby took over from being reported as an outage:
+    it is being collected, by the other agent.
     """
+    from sqlalchemy import or_
+
     covered: set = set()
     for agent in db.scalars(select(m.Agent).where(m.Agent.status == m.AgentStatus.online)):
         covered.add(agent.site_id)
         covered.update(
-            db.scalars(select(m.Subnet.site_id).where(m.Subnet.agent_id == agent.id).distinct())
+            db.scalars(
+                select(m.Subnet.site_id)
+                .where(
+                    or_(
+                        m.Subnet.agent_id == agent.id,
+                        m.Subnet.collector_agent_id == agent.id,
+                    )
+                )
+                .distinct()
+            )
         )
     return covered
 

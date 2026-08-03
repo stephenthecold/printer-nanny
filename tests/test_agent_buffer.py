@@ -419,11 +419,15 @@ async def test_run_once_summarizes_instead_of_crashing_when_central_is_down(
 
     summary = await run_once(_config(tmp_path), backend=FakeSnmpBackend({}))
 
-    # ``definitions`` is the count of device/model definitions in force. Zero
-    # here for the reason that matters: central is down and there is no cache,
-    # so the cycle degrades to the standard Printer-MIB alone rather than
-    # failing.
+    # Two of these keys are zero for reasons worth stating, because zero here
+    # means "degraded correctly", not "nothing happened":
+    #   definitions -- central is down and there is no cache, so the cycle falls
+    #     back to the standard Printer-MIB alone rather than failing.
+    #   withheld -- no collection lease could be renewed while central is
+    #     unreachable, and withholding is what stops a displaced collector from
+    #     double-counting page meters. Zero because this cycle polled nothing,
+    #     not because the check was skipped.
     assert summary == {
         "commands": 0, "spooled": 0, "polled": 0, "applied": 0,
-        "unreachable": 0, "new_pending": 0, "definitions": 0,
+        "unreachable": 0, "new_pending": 0, "definitions": 0, "withheld": 0,
     }
