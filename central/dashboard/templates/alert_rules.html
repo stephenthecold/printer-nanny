@@ -72,7 +72,8 @@
                 <button class="{{ btn('subtle', 'sm') }}">{{ 'Disable' if r.enabled else 'Enable' }}</button>
               </form>
               <form method="post" action="/manage/alert-rules/{{ r.id }}/delete" class="inline"
-                    onsubmit="return confirm('Delete rule {{ r.name }}? Its open alerts resolve on the next worker cycle.');">
+                    data-name="{{ r.name }}"
+                    onsubmit="return confirm('Delete rule ' + this.dataset.name + '? Its open alerts resolve on the next worker cycle.');">
                 <button class="{{ btn('danger', 'sm') }}">Delete</button>
               </form>
             </td>

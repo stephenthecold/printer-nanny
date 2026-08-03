@@ -29,8 +29,12 @@
       <button class="{{ btn('success', 'sm') }}">Approve</button>
     </form>
     {% elif not is_ignored %}
+    {# The IP came off a device on a customer LAN, so it is hostile input: it
+       travels in a data- attribute and is read via `dataset`, never
+       interpolated into the confirm() string. See CLAUDE.md. #}
     <form method="post" action="/manage/printers/{{ printer.id }}/ignore" class="inline"
-          onsubmit="return confirm('Stop monitoring {{ printer.ip }}? Agents will no longer poll it.')">
+          data-ip="{{ printer.ip }}"
+          onsubmit="return confirm('Stop monitoring ' + this.dataset.ip + '? Agents will no longer poll it.')">
       <button class="{{ btn('warning', 'sm') }}">Stop monitoring</button>
     </form>
     {% else %}
@@ -40,7 +44,8 @@
     {% endif %}
     {% if user.role.value == 'admin' %}
     <form method="post" action="/manage/printers/{{ printer.id }}/delete" class="inline"
-          onsubmit="return confirm('Delete printer {{ printer.ip }} and all its history? This cannot be undone.')">
+          data-ip="{{ printer.ip }}"
+          onsubmit="return confirm('Delete printer ' + this.dataset.ip + ' and all its history? This cannot be undone.')">
       <button class="{{ btn('danger', 'sm') }}">Delete</button>
     </form>
     {% endif %}

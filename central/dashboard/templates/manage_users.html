@@ -38,7 +38,8 @@
               <a href="/manage/users/{{ u.id }}/edit" class="text-xs text-sky-700 hover:underline rounded">Edit</a>
               {% if u.id != user.id %}
               <form method="post" action="/manage/users/{{ u.id }}/delete" class="inline"
-                    onsubmit="return confirm('Delete user {{ u.username }}?')">
+                    data-username="{{ u.username }}"
+                    onsubmit="return confirm('Delete user ' + this.dataset.username + '?')">
                 <button class="text-xs text-red-600 hover:underline rounded">Delete</button>
               </form>
               {% endif %}
