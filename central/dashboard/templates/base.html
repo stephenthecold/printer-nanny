@@ -47,6 +47,7 @@
                     {'href': '/manage/maintenance', 'label': 'Maintenance'}] -%}
 {%- if user.role.value != 'client_readonly' -%}
   {%- set _ = g_manage.append({'href': '/manage/onboard', 'label': 'Onboard'}) -%}
+  {%- set _ = g_manage.append({'href': '/manage/alert-rules', 'label': 'Alert rules'}) -%}
   {%- set _ = g_manage.append({'href': '/manage/suppression', 'label': 'Quiet hours'}) -%}
 {%- endif -%}
 {%- set g_admin = [] -%}

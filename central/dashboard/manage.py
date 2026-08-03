@@ -2065,3 +2065,255 @@ def suppression_delete(window_id: int, request: Request, db: Session = Depends(g
     db.commit()
     _flash(request, f"Window '{window.name}' deleted.")
     return _redirect("/manage/suppression")
+
+
+# --------------------------------------------------------------------------- #
+# Alert rules
+#
+# Rules existed from the beginning but had no operator surface at all: the four
+# defaults came from central.seed and per-client ones from onboarding defaults,
+# and after that the only way to change a threshold was SQL. That was tolerable
+# while every condition type was a single number an installer could pick a
+# sensible value for; occurrence_rate is not -- "ten jams a day" is three
+# operator decisions (what counts, how many, over how long) and none of them has
+# a defensible default.
+# --------------------------------------------------------------------------- #
+# What an operator may type into a rate rule's window. The evaluator clamps
+# independently (worker.jobs.OCCURRENCE_MAX_WINDOW_MINUTES) -- this is the half
+# that explains the refusal instead of silently narrowing the rule.
+_MAX_RULE_WINDOW_MINUTES = 60 * 24 * 30
+
+# Condition types an operator can create here: label, and what `threshold` means
+# for each. ``predicted_depletion`` is deliberately absent -- it is raised by the
+# forecast pass against alerts.reorder_lead_days, not by a rule, so offering it
+# would create a row that never fires.
+_CONDITION_LABELS = {
+    m.AlertConditionType.supply_below: ("Supply below (%)", "percent"),
+    m.AlertConditionType.error_severity: ("Printer error at/above severity", None),
+    m.AlertConditionType.offline_minutes: ("Agent offline (minutes)", "minutes"),
+    m.AlertConditionType.printer_offline: ("Printer offline (minutes)", "minutes"),
+    m.AlertConditionType.occurrence_rate: ("Occurrence rate (N events in a window)", "count"),
+    m.AlertConditionType.maintenance_due: ("Maintenance due", None),
+}
+
+
+def _rule_threshold_unit(rule: m.AlertRule) -> Optional[str]:
+    labelled = _CONDITION_LABELS.get(rule.condition_type)
+    return labelled[1] if labelled else None
+
+
+def _fmt_rule_window(minutes) -> str:
+    """Minutes as an operator says them (45m / 6h / 7d). Mirrors worker.jobs."""
+    if not minutes:
+        return ""
+    minutes = int(minutes)
+    if minutes % 1440 == 0:
+        return f"{minutes // 1440}d"
+    if minutes % 60 == 0:
+        return f"{minutes // 60}h"
+    return f"{minutes}m"
+
+
+def _parse_window_minutes(amount: str, unit: str) -> Optional[int]:
+    """'12' + 'hours' -> 720. None when unparseable or out of range.
+
+    Returned as None rather than clamped so the caller can refuse with a message.
+    A window the operator did not choose is a rule firing on a period nobody
+    picked, which is worse than being made to type it again.
+    """
+    try:
+        value = int((amount or "").strip())
+    except (TypeError, ValueError):
+        return None
+    per = {"minutes": 1, "hours": 60, "days": 1440}.get(unit, 60)
+    minutes = value * per
+    if minutes < 1 or minutes > _MAX_RULE_WINDOW_MINUTES:
+        return None
+    return minutes
+
+
+@router.get("/alert-rules", response_class=HTMLResponse)
+def alert_rules_home(request: Request, db: Session = Depends(get_db)):
+    """List every alert rule, with the occurrence-rate ones fully spelled out."""
+    user = _manager(request, db)
+    if user is None:
+        return _redirect("/login")
+    rules = list(db.scalars(
+        select(m.AlertRule).order_by(m.AlertRule.condition_type, m.AlertRule.id)
+    ))
+    clients = list(db.scalars(select(m.Client).order_by(m.Client.name)))
+    sites = list(db.scalars(select(m.Site).order_by(m.Site.name)))
+    printers = list(db.scalars(
+        select(m.Printer)
+        .where(m.Printer.discovery_state == m.DiscoveryState.approved)
+        .order_by(m.Printer.client_id, m.Printer.ip)
+    ))
+    runtime = load_settings(db)
+    return _tpl(
+        request, "alert_rules.html", db,
+        user=user, rules=rules, clients=clients, sites=sites, printers=printers,
+        condition_labels={k.value: v[0] for k, v in _CONDITION_LABELS.items()},
+        threshold_unit=_rule_threshold_unit,
+        fmt_window=_fmt_rule_window,
+        clear_margin_pct=float(runtime.get("alerts.occurrence_clear_margin_pct", 0) or 0),
+        flap_cooldown_min=int(runtime.get("alerts.renotify_cooldown_min", 0) or 0),
+        max_window_days=_MAX_RULE_WINDOW_MINUTES // 1440,
+        flash=_pop_flash(request),
+    )
+
+
+@router.post("/alert-rules")
+def alert_rules_create(
+    request: Request,
+    name: str = Form(...),
+    condition_type: str = Form("supply_below"),
+    scope: str = Form("global"),
+    scope_id: str = Form(""),
+    severity: str = Form("warning"),
+    threshold: str = Form(""),
+    window_amount: str = Form(""),
+    window_unit: str = Form("hours"),
+    match_code: str = Form(""),
+    match_min_severity: str = Form(""),
+    db: Session = Depends(get_db),
+):
+    """Create a rule. A half-specified one is refused, never stored.
+
+    Same rule as the suppression form next door: an alert rule that quietly
+    never matches is worse than an error message, because the operator believes
+    they are covered. For occurrence_rate that means both the count and the
+    window are mandatory -- neither has a defensible default.
+    """
+    actor = _manager(request, db)
+    if actor is None:
+        return _redirect("/login")
+    name = name.strip()
+    if not name:
+        _flash(request, "Rule name is required.")
+        return _redirect("/manage/alert-rules")
+
+    try:
+        condition = m.AlertConditionType(condition_type)
+    except ValueError:
+        condition = None
+    if condition not in _CONDITION_LABELS:
+        _flash(request, "That condition type cannot be created here.")
+        return _redirect("/manage/alert-rules")
+
+    try:
+        sev = m.EventSeverity(severity)
+    except ValueError:
+        sev = m.EventSeverity.warning
+
+    scope_enum, target = _window_scope(scope, scope_id)
+    if scope_enum is None:
+        _flash(request, "Pick a target for a client/site/printer-scoped rule.")
+        return _redirect("/manage/alert-rules")
+
+    limit: Optional[float] = None
+    raw_threshold = (threshold or "").strip()
+    if raw_threshold:
+        try:
+            limit = float(raw_threshold)
+        except ValueError:
+            _flash(request, "The threshold must be a number.")
+            return _redirect("/manage/alert-rules")
+
+    window = None
+    code = None
+    floor = None
+    if condition == m.AlertConditionType.occurrence_rate:
+        if limit is None or limit < 1:
+            _flash(request, "An occurrence-rate rule needs a count of 1 or more.")
+            return _redirect("/manage/alert-rules")
+        window = _parse_window_minutes(window_amount, window_unit)
+        if window is None:
+            _flash(request,
+                   "An occurrence-rate rule needs a window between 1 minute and "
+                   f"{_MAX_RULE_WINDOW_MINUTES // 1440} days.")
+            return _redirect("/manage/alert-rules")
+        # Free text from an operator. It reaches SQL only as a bound LIKE
+        # parameter with the metacharacters escaped (worker.jobs._like_contains)
+        # and the dashboard renders it through Jinja autoescaping, so the only
+        # reason to bound the length here is to keep an accidental paste out of
+        # a column that would truncate it silently.
+        code = (match_code or "").strip()[:80] or None
+        if match_min_severity:
+            try:
+                floor = m.EventSeverity(match_min_severity)
+            except ValueError:
+                floor = None
+    elif condition in (
+        m.AlertConditionType.supply_below,
+        m.AlertConditionType.offline_minutes,
+        m.AlertConditionType.printer_offline,
+    ):
+        if limit is None:
+            _flash(request, "That condition type needs a threshold.")
+            return _redirect("/manage/alert-rules")
+
+    rule = m.AlertRule(
+        name=name,
+        scope=scope_enum,
+        scope_id=target,
+        condition_type=condition,
+        threshold=limit,
+        severity=sev,
+        window_minutes=window,
+        match_code=code,
+        match_min_severity=floor,
+        enabled=True,
+    )
+    db.add(rule)
+    record(db, request, actor, "alert_rule.create",
+           target=f"rule:{name}",
+           detail=(f"condition={condition.value} scope={scope_enum.value}:{target or '-'} "
+                   f"threshold={limit if limit is not None else '-'} "
+                   f"severity={sev.value} window={window or '-'}min "
+                   f"match_code={code or '*'} "
+                   f"match_min_severity={floor.value if floor else '-'}"))
+    db.commit()
+    _flash(request, f"Rule '{name}' added.")
+    return _redirect("/manage/alert-rules")
+
+
+@router.post("/alert-rules/{rule_id}/toggle")
+def alert_rules_toggle(rule_id: int, request: Request, db: Session = Depends(get_db)):
+    """Enable/disable without deleting.
+
+    A disabled rule stops contributing keys to the evaluator's active set, so
+    its open alerts auto-resolve on the next cycle rather than being stranded --
+    that is _resolve_stale's existing behaviour for an orphaned key, and it is
+    what makes disabling safe to offer beside deleting.
+    """
+    actor = _manager(request, db)
+    if actor is None:
+        return _redirect("/login")
+    rule = db.get(m.AlertRule, rule_id)
+    if rule is None:
+        _flash(request, "That rule no longer exists.")
+        return _redirect("/manage/alert-rules")
+    rule.enabled = not rule.enabled
+    record(db, request, actor, "alert_rule.update",
+           target=f"rule:{rule.name}", detail=f"enabled={rule.enabled}")
+    db.commit()
+    _flash(request, f"Rule '{rule.name}' {'enabled' if rule.enabled else 'disabled'}.")
+    return _redirect("/manage/alert-rules")
+
+
+@router.post("/alert-rules/{rule_id}/delete")
+def alert_rules_delete(rule_id: int, request: Request, db: Session = Depends(get_db)):
+    actor = _manager(request, db)
+    if actor is None:
+        return _redirect("/login")
+    rule = db.get(m.AlertRule, rule_id)
+    if rule is None:
+        _flash(request, "That rule no longer exists.")
+        return _redirect("/manage/alert-rules")
+    record(db, request, actor, "alert_rule.delete",
+           target=f"rule:{rule.name}",
+           detail=f"condition={rule.condition_type.value} scope={rule.scope.value}")
+    db.delete(rule)
+    db.commit()
+    _flash(request, f"Rule '{rule.name}' deleted.")
+    return _redirect("/manage/alert-rules")
