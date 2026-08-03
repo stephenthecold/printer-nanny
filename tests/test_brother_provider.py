@@ -180,6 +180,19 @@ def test_parse_alert_never_takes_a_color_from_a_word_tail(word):
         assert _parse_alert(text) == (None, None), text
 
 
+def _fuzz_id(text):
+    """Name the huge cases by shape rather than by content.
+
+    pytest puts the node ID in ``PYTEST_CURRENT_TEST``, and Windows caps an
+    environment variable at 32767 characters -- so the 100k-character case below
+    errors at both setup and teardown there, for a reason that has nothing to do
+    with the parser under test. Returning None lets pytest name the rest.
+    """
+    if isinstance(text, str) and len(text) > 64:
+        return f"long-{len(text)}"
+    return None
+
+
 @pytest.mark.parametrize("text", [
     "", "   ", "\t\n", None,
     "0x00", "0xdeadbeef",
@@ -192,7 +205,7 @@ def test_parse_alert_never_takes_a_color_from_a_word_tail(word):
     "Replace" * 500,              # very long: no severity/consumable pair
     "A" * 100000,                 # very long garbage
     "Drum " * 5000 + "Low",       # very long non-toner alert
-])
+], ids=_fuzz_id)
 def test_parse_alert_yields_nothing_for_junk_and_hostile_input(text):
     """Adversarial strings must produce no reading -- and must not raise."""
     assert _parse_alert(text) == (None, None)
