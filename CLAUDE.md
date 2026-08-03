@@ -129,6 +129,11 @@ enforced; none of them is optional.
     `DirectorySnapshot`), `entra.py` / `google.py` / `ad.py`, `registry.py`
     (builds a provider from a connection row; the one place a secret is
     decrypted), `sync.py` (applies a snapshot).
+  - `device_definitions.py` — the **device/model definition** data language and
+    its validator. Vendored into the agent (`printer_nanny_agent.definitions`)
+    and held to it by `tests/test_device_definitions_parity.py`, which asserts
+    the *source below the docstring* is identical as well as the behaviour.
+  - `dashboard/definitions.py` — the operator surface at `/manage/definitions`.
   - `snmp_parse.py` — brand-agnostic SNMP supply/level parsing (shared w/ agent).
   - `snmp.md` — Printer-MIB OID reference.
   - `static/` — **vendored** `tailwind.css` + `htmx.min.js`, served at `/static`.
@@ -152,10 +157,15 @@ enforced; none of them is optional.
     what it can do (`SUPPORTS_VENDOR_DRIVERS`, an optional `make_runner`) rather
     than the orchestrator branching on `sys.platform`, so a Mac neither builds a
     PowerShell runner nor unpacks a Windows driver archive it cannot stage.
+  - `definitions.py` + `providers/definitions.py` — the agent half of
+    server-pushed model definitions: the vendored validator, the signed local
+    cache, and the provider that applies them. Registered **last** in the
+    registry, which is what makes the precedence rule true rather than merely
+    documented.
   - `mdns.py` — optional Bonjour/DNS-SD discovery (`agent[mdns]` extras).
   - `updater.py` — self-update via `update_agent` command; writes
     `.pn-update-result.json` so the dashboard can show success/failure.
-- `migrations/` — Alembic environment + versions (0001 → 0033). Revision 0001 is
+- `migrations/` — Alembic environment + versions (0001 → 0039). Revision 0001 is
   `Base.metadata.create_all()`, so **the ORM metadata is what builds a fresh DB** —
   an index declared only in a later migration is silently absent on new installs.
   Declare indexes in the model's `__table_args__` and mirror them in the migration.
@@ -584,6 +594,70 @@ enforced; none of them is optional.
   wins would make a workstation's default printer depend on dict ordering.
   Inactive users resolve to **nothing** while keeping their rows, so
   deprovisioning takes effect immediately and history survives.
+- **Device definitions are DATA the agent interprets, never code it runs.** A
+  new printer model whose supply levels live only in a vendor-private OID used
+  to need a new *provider* — Python, in the agent package, shipped by a release.
+  `device_definitions` moves the model-specific part into a row an operator
+  writes at `/manage/definitions`, which agents fetch, cache and apply. The
+  rules that make that safe rather than merely convenient:
+  - **No regular expressions, ever**, and that is a design decision rather than
+    an omission. A pattern supplied by a definition runs on every agent in the
+    fleet, and there is no way to inspect an arbitrary pattern and prove it is
+    not catastrophically backtracking — so one bad row stalls the whole fleet at
+    once. Extraction is `text_between`, which slices between two **literal**
+    delimiters and is linear whatever an operator types. A definition carrying
+    `regex`/`pattern`/`re`/`eval`/… is refused *by name* so the message reads as
+    a decision. Same stance as the workstation client's PowerShell rule: make
+    the question moot instead of handling it.
+  - **Closed vocabulary, unknown keys refused, everything bounded.** Six decode
+    kinds; OIDs validated by a character loop (not a regex — this is the gate
+    that keeps `1.3.6; rm -rf /` out of an SNMP call); caps on payload bytes,
+    definition count, OIDs, map entries, string lengths and JSON depth. The
+    depth check is **iterative**, because a recursive one over hostile input
+    raises `RecursionError` from somewhere unrelated and the guard becomes the
+    failure.
+  - **Validated on ingest AND on the agent**, on receipt and on every cache
+    load. Central signs the feed, and a signature proves who produced bytes, not
+    that the bytes are safe — an agent must be able to defend itself against a
+    central it authenticates.
+  - **Built-ins run FIRST; a definition runs LAST and fills only.** This is the
+    precedence decision, and registration order in `providers/__init__.py` is
+    what enforces it. Built-in providers are hardware-proven; a definition is
+    data that has never executed anywhere, so it may fill a `level_pct` that is
+    still `None`, add a row nobody produced, and fill absent meters/status —
+    and may **not** replace a value a built-in established. `override_builtin`
+    is the deliberate exception (a built-in that decodes one model wrongly is
+    exactly what you want to fix without a release): default off, an operator
+    checkbox, audited, and every displaced field is named in `provider_trace` on
+    that printer's own detail page. The contract is "never **silently**", not
+    "never".
+  - **One definition per printer; an exact tie is refused.** Most specific wins
+    (model tag, then brand, then enterprise, compared as a tuple so a model
+    criterion always beats a brand one). Two definitions over one device's
+    supply rows is a coin flip whose losing side looks exactly like data — same
+    discipline as an ambiguous driver-package match. A definition with **no**
+    match criteria is refused outright: it would point one vendor's private MIB
+    at every printer in every client.
+  - **A changed feed carries the FULL set, not a delta.** A delta needs
+    tombstones, and a missed tombstone leaves a *withdrawn* definition running
+    on an agent forever — precisely the failure this design exists to prevent.
+    The version is a content digest, so an unchanged feed transfers nothing
+    (`{"version": v, "changed": false}`), which is the steady state on every
+    poll of every agent. Deletion changes the digest, so withdrawal actually
+    takes effect.
+  - **Scoped per agent.** Global definitions (hardware knowledge, `client_id IS
+    NULL`) plus those scoped to clients the agent actually collects for, so one
+    tenant's custom definition never reaches another's site. Note the trap the
+    schema hides: `UNIQUE(key, client_id)` does **not** stop duplicate *global*
+    keys, because SQL treats NULLs as distinct — a partial unique index over
+    `client_id IS NULL` is what enforces it, declared in both the model and the
+    migration.
+  - **Degrading is the default.** No definitions → `detect()` is False and the
+    provider is never entered, not even a trace row; the reading is byte-for-byte
+    what the pre-feature agent produced. A failed fetch, a refused signature or
+    a malformed feed keeps whatever is already active — failing *forward* into
+    "no definitions" would let anyone who can break the response turn the
+    feature off fleet-wide.
 - **Checkbox booleans need a presence marker.** An unchecked box posts nothing,
   so a handler that ignores empty fields (`subnet_update`) cannot tell "unchecked"
   from "this form didn't carry the field" — reading it directly makes an inline
@@ -1335,6 +1409,17 @@ generic webhook. Attachments supported on email for reports.
 - **Xerox**, **Kyocera**, **Canon**, **Ricoh**, **Konica Minolta** — defensive
   scaffolding (brand tag + front-panel message). Exact private-MIB supply
   decoding extended per-model when a probe lands.
+
+**Device definitions** (`/manage/definitions`): server-pushed, so a new model no
+longer needs an agent release. Definitions are validated data — no regex, closed
+vocabulary, bounded — served over the existing agent API, signed against the
+requesting agent's own credential, cached locally, and applied by a provider that
+runs **after** every built-in and fills only what is missing. See the conventions
+above for the precedence decision and why the feed is a full set rather than a
+delta. Verified end-to-end against a fake SNMP backend on a freshly seeded DB:
+the same agent build reports a `-3` "some remaining" bucket before the row exists
+and a real 47% after it, with the trace naming the definition on the printer's
+detail page.
 
 **Discovery**: SNMP sweep across configured subnets + optional mDNS / Bonjour
 (zeroconf, `agent[mdns]` extras) on the agent's local subnet.

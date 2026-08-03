@@ -165,6 +165,67 @@ def get_targets(
     return targets
 
 
+@router.get("/device-definitions")
+def get_device_definitions(
+    since: str = "",
+    agent: m.Agent = Depends(authenticated_agent),
+    db: Session = Depends(get_db),
+):
+    """The device/model definitions this agent should hold.
+
+    VERSIONED SO NOTHING MOVES WHEN NOTHING CHANGED
+    -----------------------------------------------
+    ``version`` is a content digest of the scoped feed. An agent sends the
+    version it holds; if it still matches, the response is
+    ``{"version": v, "changed": false}`` with no definitions at all -- which is
+    the steady state on every poll of every agent forever, so it is the case
+    worth making free.
+
+    WHY THE CHANGED CASE SENDS THE WHOLE SET, NOT A DELTA
+    -----------------------------------------------------
+    A row-level delta needs tombstones, and a missed tombstone leaves a
+    *withdrawn* definition running on an agent indefinitely -- which is
+    precisely the "a definition made a working printer stop working" failure the
+    whole design is arranged to prevent. The set is small (bounded at
+    MAX_DEFINITIONS) and only travels when it actually changed, so
+    correct-by-construction costs nothing worth having.
+
+    SCOPING
+    -------
+    ``device_definition_feed`` serves global definitions plus those scoped to
+    clients this agent actually collects for, so one tenant's custom definition
+    never reaches another's site.
+
+    SIGNATURE
+    ---------
+    HMAC-SHA256 keyed on this agent's API-key hash. See
+    ``central.device_definitions`` for exactly what that does and does not
+    prove -- in short, it binds the feed to this credential so a cache file
+    lifted from another agent fails closed. It does not excuse the agent from
+    re-validating every definition, and the agent does.
+    """
+    from central.device_definitions import feed_version, payload_signature
+
+    touch_heartbeat(agent)
+    rows = services.device_definition_feed(db, agent)
+    db.commit()
+
+    # Rows were validated on the way in, so this is a read of stored canonical
+    # form rather than a second parse. A row whose spec is somehow not a dict
+    # (hand-edited database) is dropped rather than served: the agent would
+    # refuse it anyway, and refusing here keeps the version digest honest.
+    definitions = [row.spec for row in rows if isinstance(row.spec, dict)]
+    version = feed_version(definitions)
+    if since and since == version:
+        return {"version": version, "changed": False}
+    return {
+        "version": version,
+        "changed": True,
+        "definitions": definitions,
+        "signature": payload_signature(agent.api_key_hash or "", version, definitions),
+    }
+
+
 @router.get("/commands", response_model=list[s.CommandOut])
 def get_commands(
     agent: m.Agent = Depends(authenticated_agent),

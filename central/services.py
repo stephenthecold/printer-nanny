@@ -1169,3 +1169,79 @@ def driver_package_for(
     if len(untagged) == 1:
         return untagged[0]
     return None
+
+
+# --------------------------------------------------------------------------- #
+# Device/model definitions -- the server-pushed feed
+# --------------------------------------------------------------------------- #
+def clients_served_by_agent(db: Session, agent: m.Agent) -> set:
+    """The set of client_ids this agent collects for.
+
+    Derived from the sites it serves rather than stored, for the same reason
+    printer assignment refuses to denormalise ``client_id``: a stored copy goes
+    stale the moment a site moves between clients, and a stale tenancy value is
+    worse than a join.
+    """
+    site_ids = sites_served_by_agent(db, agent)
+    if not site_ids:
+        return set()
+    return set(
+        db.scalars(select(m.Site.client_id).where(m.Site.id.in_(site_ids)).distinct())
+    )
+
+
+def device_definition_feed(db: Session, agent: m.Agent) -> list:
+    """The definitions this agent should hold, in a stable order.
+
+    Scoping: every enabled global definition (``client_id IS NULL`` -- hardware
+    knowledge, not tenant data) plus those scoped to a client this agent
+    actually collects for. An agent never receives another tenant's custom
+    definition, which is why the scope is computed from the agent rather than
+    the feed being served wholesale.
+
+    Sorted by key so the feed digest and the signature are computed over a
+    stable sequence; an unordered query would change the version on every call
+    and make every agent re-download on every poll.
+    """
+    client_ids = clients_served_by_agent(db, agent)
+    scope = m.DeviceDefinition.client_id.is_(None)
+    if client_ids:
+        scope = scope | m.DeviceDefinition.client_id.in_(client_ids)
+    rows = db.scalars(
+        select(m.DeviceDefinition)
+        .where(m.DeviceDefinition.enabled.is_(True), scope)
+        .order_by(m.DeviceDefinition.key)
+    ).all()
+
+    # A client-scoped definition overrides a global one with the same key --
+    # that is what "scoped to this customer" has to mean, or the narrower row
+    # would be silently ignored.
+    #
+    # Two *different* clients scoping the same key is the one case that has no
+    # answer, and it is reachable: one agent at HQ collecting for several
+    # customers. Serving either is a coin flip over what that fleet reads, so
+    # the key is dropped and said out loud -- the same discipline as an
+    # ambiguous driver-package match. Global definitions are unaffected,
+    # because the partial unique index makes duplicate global keys impossible.
+    import logging
+
+    globals_by_key = {r.key: r for r in rows if r.client_id is None}
+    scoped_by_key: dict = {}
+    ambiguous = set()
+    for row in rows:
+        if row.client_id is None:
+            continue
+        if row.key in scoped_by_key:
+            ambiguous.add(row.key)
+        scoped_by_key[row.key] = row
+
+    if ambiguous:
+        logging.getLogger(__name__).warning(
+            "agent %s is served by %d client(s) that scope the same definition "
+            "key(s) %s; refusing to guess -- serving neither",
+            agent.id, len(client_ids), ", ".join(sorted(ambiguous)),
+        )
+
+    merged = dict(globals_by_key)
+    merged.update(scoped_by_key)
+    return [merged[k] for k in sorted(merged) if k not in ambiguous]

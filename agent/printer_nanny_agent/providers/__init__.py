@@ -19,6 +19,24 @@ from printer_nanny_agent.snmp import SnmpBackend, SnmpParams
 log = logging.getLogger("printer_nanny_agent.providers")
 
 
+def enterprise_matches(prefix: str, sys_object_id: Optional[str]) -> bool:
+    """True if ``sys_object_id`` sits under enterprise ``prefix``.
+
+    Matches both the pysnmp-rendered ``enterprises.<N>`` form and the raw
+    numeric ``1.3.6.1.4.1.<N>`` form (with or without a leading dot).
+
+    Lifted out of ``PrinterProvider.detect`` so the definition-driven provider
+    can ask the same question and get the same answer. Two implementations of
+    "is this a Brother?" would agree right up until one of them was fixed.
+    """
+    sys_oid = sys_object_id or ""
+    return (
+        f"enterprises.{prefix}" in sys_oid
+        or f"1.3.6.1.4.1.{prefix}." in sys_oid
+        or sys_oid.endswith(f"1.3.6.1.4.1.{prefix}")
+    )
+
+
 class PrinterProvider:
     name = "generic"
     enterprise_prefixes: tuple = ()  # e.g. ("2435",) for Brother
@@ -27,14 +45,8 @@ class PrinterProvider:
         """Return True if this provider applies to this device."""
         if not self.enterprise_prefixes:
             return False
-        sys_oid = sys_object_id or ""
-        # Match both the pysnmp-rendered "enterprises.<N>" form and the raw
-        # numeric "1.3.6.1.4.1.<N>" form (with or without a leading dot).
         return any(
-            f"enterprises.{p}" in sys_oid
-            or f"1.3.6.1.4.1.{p}." in sys_oid
-            or sys_oid.endswith(f"1.3.6.1.4.1.{p}")
-            for p in self.enterprise_prefixes
+            enterprise_matches(p, sys_object_id) for p in self.enterprise_prefixes
         )
 
     async def augment(
@@ -180,6 +192,12 @@ async def run_providers(
                 ("_brother_active_alert", "alert"),
                 ("_brother_parsed_severity", "parsed"),
                 ("_brother_source", "source"),
+                # Definition-driven provider breadcrumbs. `overrode` is the one
+                # that matters: it is how an operator sees, on the printer's own
+                # detail page, that a pushed definition displaced a built-in.
+                ("_definition", "definition"),
+                ("_definition_note", "result"),
+                ("_definition_overrode", "overrode"),
             ):
                 val = reading.get(key)
                 if val is not None:
@@ -206,3 +224,9 @@ from printer_nanny_agent.providers import lexmark  # noqa: E402,F401
 # Minolta): brand tag + front-panel status text. Real percentages still
 # come from the standard Printer-MIB on these.
 from printer_nanny_agent.providers import _vendors  # noqa: E402,F401
+# The definition-driven provider is imported LAST, and that ordering is the
+# precedence rule rather than a convention: _REGISTRY is iterated in
+# registration order, so every built-in has already run by the time a
+# server-pushed definition sees the reading -- and a definition fills only what
+# is still missing. See providers/definitions.py for the full decision.
+from printer_nanny_agent.providers import definitions  # noqa: E402,F401

@@ -419,7 +419,11 @@ async def test_run_once_summarizes_instead_of_crashing_when_central_is_down(
 
     summary = await run_once(_config(tmp_path), backend=FakeSnmpBackend({}))
 
+    # ``definitions`` is the count of device/model definitions in force. Zero
+    # here for the reason that matters: central is down and there is no cache,
+    # so the cycle degrades to the standard Printer-MIB alone rather than
+    # failing.
     assert summary == {
         "commands": 0, "spooled": 0, "polled": 0, "applied": 0,
-        "unreachable": 0, "new_pending": 0,
+        "unreachable": 0, "new_pending": 0, "definitions": 0,
     }

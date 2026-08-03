@@ -74,6 +74,16 @@ class AgentConfig:
         """Filesystem path of the store-and-forward readings spool."""
         return os.path.join(self.data_dir, "readings-spool.jsonl")
 
+    def definitions_path(self) -> str:
+        """Filesystem path of the cached device/model definition feed.
+
+        Beside the spool, in the same durable data dir, for the same reason: an
+        agent that reboots with central unreachable -- which is what a freshly
+        imaged site agent does -- must come back knowing how to read its own
+        fleet.
+        """
+        return os.path.join(self.data_dir, "device-definitions.json")
+
     def snmp_for(self, subnet: SubnetConfig) -> SnmpParams:
         """SNMP params for a subnet, applying per-subnet overrides."""
         v3 = subnet.snmp_v3 or {}

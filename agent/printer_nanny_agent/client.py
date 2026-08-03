@@ -63,6 +63,37 @@ class CentralClient:
         resp.raise_for_status()
         return resp.json()
 
+    async def get_device_definitions(self, since: str = "") -> dict:
+        """Fetch the device/model definition feed, sending the version we hold.
+
+        The size cap is applied to the RAW BYTES, before anything is parsed.
+        That ordering is the point: a JSON bomb has to be refused by its length,
+        because by the time it has been decoded far enough to have a shape, it
+        has already cost whatever it was going to cost.
+
+        A central that predates this feature answers 404. That is not an error
+        worth a traceback -- it is "no definitions", which is the state this
+        whole feature degrades to safely -- so it comes back as an empty
+        unchanged response rather than raising.
+        """
+        from printer_nanny_agent.definitions import MAX_PAYLOAD_BYTES
+
+        resp = await self._client.get(
+            self._url("/device-definitions"), params={"since": since or ""}
+        )
+        if resp.status_code == 404:
+            return {"version": since or "", "changed": False}
+        resp.raise_for_status()
+        if len(resp.content) > MAX_PAYLOAD_BYTES:
+            raise ValueError(
+                f"device definition feed is {len(resp.content)} bytes, over the "
+                f"{MAX_PAYLOAD_BYTES}-byte cap; refusing to parse it"
+            )
+        payload = resp.json()
+        if not isinstance(payload, dict):
+            raise ValueError("device definition feed is not an object")
+        return payload
+
     async def get_commands(self) -> List[dict]:
         resp = await self._client.get(self._url("/commands"))
         resp.raise_for_status()
