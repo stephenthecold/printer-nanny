@@ -23,6 +23,7 @@ from starlette.background import BackgroundTask
 from central import branding as branding_lib
 from central import models as m
 from central import queries
+from central import ratelimit
 from central import services
 from central import suppression
 from central.audit import record
@@ -2017,8 +2018,36 @@ def users_home(request: Request, db: Session = Depends(get_db)):
         request, "manage_users.html", db,
         user=_admin(request, db), users=users, clients=clients,
         roles=[r.value for r in m.UserRole],
+        # One grouped query for the whole table rather than one per row.
+        locked_users=ratelimit.locked_usernames(
+            db, ratelimit.Policy.from_settings(load_settings(db))
+        ),
         flash=_pop_flash(request),
     )
+
+
+@router.post("/users/{user_id}/unlock")
+def user_unlock(user_id: int, request: Request, db: Session = Depends(get_db)):
+    """Clear a sign-in throttle early.
+
+    Not a lockout release -- a throttle expires on its own inside the window, and
+    that self-expiry is what stops it being usable as a denial of service against
+    a real operator. This is for the admin who does not want to wait, and it is
+    audited because clearing an attacker's budget mid-attack is worth being able
+    to see afterwards.
+    """
+    actor = _admin(request, db)
+    if actor is None:
+        return _redirect("/login" if _user(request, db) is None else "/")
+    target = db.get(m.User, user_id)
+    if target is None:
+        return _redirect("/manage/users")
+    cleared = ratelimit.clear(db, username=target.username)
+    record(db, request, actor, "user.unlock",
+           target=f"user:{target.username}", detail=f"cleared={cleared}")
+    db.commit()
+    _flash(request, f"Sign-in throttle cleared for '{target.username}'.")
+    return _redirect("/manage/users")
 
 
 # --------------------------------------------------------------------------- #

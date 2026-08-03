@@ -28,6 +28,7 @@ from sqlalchemy import (
     String,
     Text,
     UniqueConstraint,
+    false,
     text,
     true,
 )
@@ -1277,6 +1278,16 @@ class User(Base):
     # in the SCIM ``externalId`` field so the provisioning system can correlate
     # its record with ours across renames. None for locally-created users.
     scim_external_id: Mapped[Optional[str]] = mapped_column(String(200), default=None)
+    # Set when the account's password was generated FOR the person rather than
+    # chosen BY them -- today only the first-run bootstrap (central/seed.py),
+    # which prints the generated password to the container log where it then
+    # stays forever. Until it is cleared the dashboard serves nothing but the
+    # change-password screen, which is what retires that logged value. Kept as a
+    # column rather than a session flag alone so the requirement survives the
+    # operator closing the tab and coming back.
+    must_change_password: Mapped[bool] = mapped_column(
+        Boolean, default=False, server_default=false()
+    )
     # For client_readonly users: restrict visibility to this client.
     client_id: Mapped[Optional[int]] = mapped_column(
         ForeignKey("clients.id", ondelete="SET NULL"), default=None
@@ -1329,6 +1340,43 @@ class AuditLog(Base):
     # Human-readable object reference, e.g. "printer:42 10.4.1.120".
     target: Mapped[Optional[str]] = mapped_column(String(300), default=None)
     detail: Mapped[Optional[str]] = mapped_column(Text, default=None)
+
+
+class LoginAttempt(Base):
+    """One row per FAILED local sign-in, in two independent scopes.
+
+    This is operational state, NOT a second audit trail -- ``audit_log`` already
+    records every failure with the attempted username, and this table is pruned.
+    They are kept apart deliberately: if the throttle counted audit rows, then
+    trimming the audit log (a routine, legitimate act) would unlock every account
+    at once, and the mechanism would be hostage to a retention policy that has
+    nothing to do with it.
+
+    It lives in the database rather than in process memory because the counter
+    has to be shared and durable. api and worker are separate containers, the api
+    is scalable to more than one replica, and an attacker who can restart a
+    container -- or simply wait for a deploy -- would otherwise get a fresh
+    budget every time.
+
+    ``scope`` is "user" (a normalised username) or "ip" (the resolved source
+    address, see central/net.py). Rows are never updated, only inserted and
+    deleted, so concurrent failures cannot lose a count to a read-modify-write
+    race: the count is whatever ``SELECT count(*)`` sees.
+    """
+
+    __tablename__ = "login_attempts"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    ts: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+    scope: Mapped[str] = mapped_column(String(8))
+    key: Mapped[str] = mapped_column(String(200))
+
+    __table_args__ = (
+        # The read path is always (scope, key, ts >= window start).
+        Index("ix_login_attempts_scope_key_ts", "scope", "key", "ts"),
+        # The prune path is ts alone, across every key.
+        Index("ix_login_attempts_ts", "ts"),
+    )
 
 
 class AppSetting(Base):

@@ -22,7 +22,16 @@
         <tbody>
         {% for u in users %}
           <tr class="{{ tr_cls() }}">
-            <td class="{{ td_cls('left', 'font-medium') }}">{{ u.username }}</td>
+            <td class="{{ td_cls('left', 'font-medium') }}">
+              {{ u.username }}
+              {# A throttled account is not a disabled one: it drains by itself
+                 within the window (Settings → Authentication → Login
+                 protection). Unlock is here for the operator who does not want
+                 to wait, not because anything stays locked. #}
+              {% if u.username|lower in locked_users %}
+                {{ badge('throttled', 'warning') }}
+              {% endif %}
+            </td>
             <td class="{{ td_cls('left', 'text-slate-500') }}">{{ u.email or '—' }}</td>
             <td class="{{ td_cls() }}">
               {% set tones = {'admin': 'error', 'tech': 'info', 'client_readonly': 'muted'} %}
@@ -36,6 +45,11 @@
             <td class="{{ td_cls('left', 'text-slate-500') }}">{{ u.auth_provider }}</td>
             <td class="{{ td_cls('right', 'space-x-2 whitespace-nowrap') }}">
               <a href="/manage/users/{{ u.id }}/edit" class="text-xs text-sky-700 hover:underline rounded">Edit</a>
+              {% if u.username|lower in locked_users %}
+              <form method="post" action="/manage/users/{{ u.id }}/unlock" class="inline">
+                <button class="text-xs text-sky-700 hover:underline rounded">Clear throttle</button>
+              </form>
+              {% endif %}
               {% if u.id != user.id %}
               <form method="post" action="/manage/users/{{ u.id }}/delete" class="inline"
                     onsubmit="return confirm('Delete user {{ u.username }}?')">
