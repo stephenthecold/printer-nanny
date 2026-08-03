@@ -143,7 +143,7 @@ def overview(request: Request, db: Session = Depends(get_db)):
         db=db,
         user=user,
         summary=queries.fleet_summary(db, client_filter),
-        low=queries.low_supplies(db)[:10],
+        low=queries.low_supplies(db, limit=10),
         errors=queries.recent_errors(db, 10),
         alerts=queries.open_alerts(db, 10),
         clients=list(db.scalars(select(m.Client).order_by(m.Client.name))),
@@ -184,14 +184,14 @@ def customer_portal(request: Request, db: Session = Depends(get_db)):
         .order_by(m.Printer.site_id, m.Printer.ip)
     ))
     runway = queries.supply_runway(db, [p.id for p in printers])
-    low = [
-        s for s in queries.low_supplies(db)
-        if s.printer and s.printer.client_id == client.id
-    ][:10]
-    alerts = [
-        a for a in queries.open_alerts(db, 30)
-        if a.printer_id and db.get(m.Printer, a.printer_id).client_id == client.id
-    ][:10]
+    # Both of these are scoped and capped IN SQL. They used to fetch the fleet
+    # and narrow it in Python, which for the alerts meant taking the newest 30
+    # alerts across every tenant and only THEN keeping this client's: a customer
+    # with an open critical fault saw "No open issues right now" as soon as
+    # thirty newer alerts belonged to other customers. Filtering after a LIMIT
+    # is not a slow correct answer, it is a wrong one.
+    low = queries.low_supplies(db, client_id=client.id, limit=10)
+    alerts = queries.open_alerts(db, 10, client_id=client.id)
     from central.runtime import load_settings as _ls
     rt = _ls(db)
     freescout_on = bool(rt.get("freescout.enabled"))

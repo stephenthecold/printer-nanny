@@ -7,7 +7,7 @@ from datetime import datetime, timedelta, timezone
 from typing import Optional
 
 from sqlalchemy import func, select
-from sqlalchemy.orm import Session
+from sqlalchemy.orm import Session, contains_eager
 
 from central import models as m
 
@@ -70,26 +70,47 @@ def low_supply_threshold(db: Session) -> float:
         return DEFAULT_LOW_SUPPLY_PCT
 
 
-def low_supplies(db: Session, threshold: Optional[float] = None) -> list[m.Supply]:
+def low_supplies(
+    db: Session,
+    threshold: Optional[float] = None,
+    client_id: Optional[int] = None,
+    limit: Optional[int] = None,
+) -> list[m.Supply]:
     """Supplies at or below the threshold percentage, lowest first.
 
     ``threshold=None`` means "use the operator's configured value"; callers
     that genuinely want a specific cutoff (the reporting API) still pass one.
+
+    ``client_id`` scopes the result to one tenant IN SQL, and ``limit`` caps it
+    IN SQL. Both must stay in the query rather than being applied to the result
+    in Python: a tenant-scoped caller that fetches the whole fleet and then
+    narrows it is at best loading every other customer's rows to display ten of
+    its own, and -- the moment a cap is involved -- silently shows a tenant
+    nothing at all because the cap was spent on rows belonging to somebody else.
+    See ``open_alerts`` for the version of that bug which actually shipped.
+
+    The printer is eager-loaded via the join we already make, because every
+    caller's template renders ``supply.printer`` -- without it each row costs
+    its own SELECT.
     """
     if threshold is None:
         threshold = low_supply_threshold(db)
-    return list(
-        db.scalars(
-            select(m.Supply)
-            .join(m.Printer, m.Supply.printer_id == m.Printer.id)
-            .where(
-                m.Supply.level_pct.is_not(None),
-                m.Supply.level_pct <= threshold,
-                m.Printer.discovery_state == m.DiscoveryState.approved,
-            )
-            .order_by(m.Supply.level_pct.asc())
+    stmt = (
+        select(m.Supply)
+        .join(m.Supply.printer)
+        .options(contains_eager(m.Supply.printer))
+        .where(
+            m.Supply.level_pct.is_not(None),
+            m.Supply.level_pct <= threshold,
+            m.Printer.discovery_state == m.DiscoveryState.approved,
         )
     )
+    if client_id is not None:
+        stmt = stmt.where(m.Printer.client_id == client_id)
+    stmt = stmt.order_by(m.Supply.level_pct.asc())
+    if limit is not None:
+        stmt = stmt.limit(limit)
+    return list(db.scalars(stmt))
 
 
 # Days of polling history a printer needs before the consumption slope is
@@ -176,15 +197,32 @@ def recent_errors(db: Session, limit: int = 50) -> list[m.PrinterEvent]:
     )
 
 
-def open_alerts(db: Session, limit: int = 100) -> list[m.Alert]:
-    return list(
-        db.scalars(
-            select(m.Alert)
-            .where(m.Alert.state == m.AlertState.open)
-            .order_by(m.Alert.created_at.desc())
-            .limit(limit)
+def open_alerts(
+    db: Session, limit: int = 100, client_id: Optional[int] = None
+) -> list[m.Alert]:
+    """Newest open alerts, optionally scoped to one tenant.
+
+    ``client_id`` filters IN SQL, joined through the alert's printer, and the
+    LIMIT is applied to the scoped set. That ordering is the whole point and it
+    is not a micro-optimisation: the customer portal used to take the newest 30
+    alerts FLEET-WIDE and narrow them to the tenant in Python afterwards, so a
+    customer with a live critical fault was shown "No open issues right now"
+    whenever thirty newer alerts happened to belong to other customers. A
+    tenant-scoped caller must never spend its limit on rows it is not allowed
+    to see.
+
+    The join is INNER, so agent-scope alerts (``printer_id IS NULL``) are
+    excluded when scoping to a client -- they are a fleet signal about an
+    agent, not a per-tenant one, and the portal already dropped them. Unscoped
+    callers keep the fleet-wide behaviour, agent-scope alerts included.
+    """
+    stmt = select(m.Alert).where(m.Alert.state == m.AlertState.open)
+    if client_id is not None:
+        stmt = stmt.join(m.Printer, m.Printer.id == m.Alert.printer_id).where(
+            m.Printer.client_id == client_id
         )
-    )
+    stmt = stmt.order_by(m.Alert.created_at.desc()).limit(limit)
+    return list(db.scalars(stmt))
 
 
 def undelivered_notifications(db: Session) -> dict:

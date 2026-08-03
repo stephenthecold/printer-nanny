@@ -128,7 +128,7 @@ def build_weekly_summary(db: Session) -> Tuple[str, str]:
     """(subject, plain-text body) for the weekly fleet summary."""
     summary = queries.fleet_summary(db)
     rollup = queries.per_client_rollup(db)
-    low = queries.low_supplies(db)[:15]
+    low = queries.low_supplies(db, limit=15)
 
     lines = [
         "Weekly fleet summary",
