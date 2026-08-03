@@ -26,6 +26,7 @@ from urllib.parse import urlparse
 from fastapi import APIRouter, Depends, File, Form, Request, UploadFile
 from fastapi.responses import HTMLResponse, RedirectResponse, StreamingResponse
 from fastapi.templating import Jinja2Templates
+from sqlalchemy.engine import URL, make_url
 from sqlalchemy.orm import Session
 
 from central import models as m
@@ -76,12 +77,50 @@ def _sqlite_path() -> Path:
     return Path(p if p.startswith("/") else "/" + p)
 
 
+def libpq_target() -> "tuple[str, dict]":
+    """``(dsn, env)`` for a libpq client, from the SQLAlchemy ``DATABASE_URL``.
+
+    Two things the obvious version gets wrong, and both are silent.
+
+    **libpq does not understand SQLAlchemy's driver suffix.** ``DATABASE_URL``
+    in docker-compose.yml is ``postgresql+psycopg://…``; a conninfo string that
+    does not begin exactly ``postgresql://`` or ``postgres://`` and contains no
+    ``=`` is taken by libpq as a bare *database name*, so host, port and user
+    all fall back to defaults. Handing it straight to ``pg_dump --dbname``
+    doesn't error on the scheme -- it quietly tries a local unix socket as the
+    container's OS user, fails with ``role "root" does not exist``, and leaves a
+    **zero-byte** dump file behind. Verified against pg_dump 16: exit 1 with the
+    ``+psycopg`` form, exit 0 with the plain one.
+
+    **A password in argv is readable by every user on the box.** The whole URL
+    used to be one argv element, so ``ps`` disclosed the database password to
+    any local process -- the same rule this project already enforces for the
+    Windows service command line and the macOS LaunchDaemon plist. The password
+    therefore travels in ``PGPASSWORD`` and never appears in the DSN.
+    """
+    url = make_url(settings.database_url)
+    dsn = URL.create(
+        drivername="postgresql",
+        username=url.username,
+        host=url.host,
+        port=url.port,
+        database=url.database,
+        # Preserved so a deployment pinning e.g. sslmode=require keeps it.
+        query=url.query,
+    ).render_as_string(hide_password=False)
+    env = os.environ.copy()
+    if url.password:
+        env["PGPASSWORD"] = url.password
+    return dsn, env
+
+
 def _pg_dump_to_file(out_path: Path) -> None:
     """pg_dump in custom format (pg_restore-compatible, includes the schema)."""
+    dsn, env = libpq_target()
     proc = subprocess.run(
         ["pg_dump", "--format=custom", "--no-owner", "--no-privileges",
-         "--dbname", settings.database_url, "--file", str(out_path)],
-        capture_output=True, text=False, check=False,
+         "--dbname", dsn, "--file", str(out_path)],
+        capture_output=True, text=False, check=False, env=env,
     )
     if proc.returncode != 0:
         raise RuntimeError(
@@ -93,10 +132,11 @@ def _pg_dump_to_file(out_path: Path) -> None:
 def _pg_restore_from_file(src_path: Path) -> None:
     """Restore over the live database. --clean wipes existing objects; the
     dump is in custom format from pg_dump --format=custom."""
+    dsn, env = libpq_target()
     proc = subprocess.run(
         ["pg_restore", "--clean", "--if-exists", "--no-owner", "--no-privileges",
-         "--dbname", settings.database_url, str(src_path)],
-        capture_output=True, text=False, check=False,
+         "--dbname", dsn, str(src_path)],
+        capture_output=True, text=False, check=False, env=env,
     )
     if proc.returncode != 0:
         raise RuntimeError(

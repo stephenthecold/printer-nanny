@@ -126,8 +126,12 @@ def test_the_database_also_refuses_a_two_target_row(db):
         db.execute(text(
             "INSERT INTO printer_assignments "
             "(printer_id, end_user_id, group_id, is_default, created_at) "
-            "VALUES (:p, :u, :g, 0, CURRENT_TIMESTAMP)"
-        ), {"p": printer.id, "u": person.id, "g": group.id})
+            # `is_default` is bound, not written as a literal 0: Postgres refuses
+            # an integer in a boolean column with a ProgrammingError *before* it
+            # ever evaluates the CHECK, so a literal makes this test pass for
+            # entirely the wrong reason -- it would stop proving the CHECK exists.
+            "VALUES (:p, :u, :g, :d, CURRENT_TIMESTAMP)"
+        ), {"p": printer.id, "u": person.id, "g": group.id, "d": False})
         db.flush()
     db.rollback()
 
@@ -140,8 +144,8 @@ def test_the_database_also_refuses_a_targetless_row(db):
         db.execute(text(
             "INSERT INTO printer_assignments "
             "(printer_id, end_user_id, group_id, is_default, created_at) "
-            "VALUES (:p, NULL, NULL, 0, CURRENT_TIMESTAMP)"
-        ), {"p": printer.id})
+            "VALUES (:p, NULL, NULL, :d, CURRENT_TIMESTAMP)"
+        ), {"p": printer.id, "d": False})
         db.flush()
     db.rollback()
 

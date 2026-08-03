@@ -1,9 +1,16 @@
 """Admin DB backup & restore.
 
-The SQLite codepath is fully exercised against a real on-disk DB. The
-Postgres codepath is verified by stubbing the pg_dump/pg_restore seams --
-running real pg_* binaries in CI isn't worth the container overhead, and
-the route's logic above the subprocess call is what we own.
+The SQLite codepath is fully exercised against a real on-disk DB. The Postgres
+codepath here stubs the pg_dump/pg_restore seams, because what these tests own
+is the route's logic *above* the subprocess call -- authorization, the typed
+confirmation, the empty-upload guard, the error bounce.
+
+That stubbing used to be justified as "running real pg_* binaries in CI isn't
+worth the container overhead". It was not: below the seam, the command handed
+libpq a SQLAlchemy URL it does not understand, so pg_dump exited 1 and wrote a
+zero-byte file on every real deployment while this file stayed green. The
+binaries now run for real in tests/test_postgres_paths.py against the Postgres
+service container -- stub the seam to test the route, never to test the tool.
 """
 
 from __future__ import annotations

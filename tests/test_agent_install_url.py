@@ -11,6 +11,7 @@ from central import models as m
 from central import runtime
 from central.main import app
 from central.security import hash_password
+from tests.conftest import TEST_BASE_URL
 
 
 def _enroll_agent(http: TestClient, site_id: int) -> None:
@@ -69,9 +70,12 @@ def test_install_command_falls_back_to_request_when_no_proxy_headers(http, db):
     _enroll_agent(http, http.site_id)
     resp = http.get("/manage/agents")
     assert resp.status_code == 200
-    # The TestClient default base is http://testserver — that's what we expect
-    # the install snippet to use when there are no proxy headers and no pin.
-    assert "--central-url http://testserver" in resp.text
+    # With no proxy headers and no pin, the snippet uses the request URL — so it
+    # must match whatever base the harness is talking on. Read that from conftest
+    # rather than hardcoding http: on Postgres the app marks its session cookie
+    # Secure and the harness speaks https, and a hardcoded scheme would fail
+    # there for a reason that has nothing to do with this route.
+    assert f"--central-url {TEST_BASE_URL}" in resp.text
 
 
 def test_enroll_renders_windows_powershell_command(http, db):

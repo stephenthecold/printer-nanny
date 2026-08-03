@@ -131,15 +131,24 @@ def test_weekly_failed_delivery_releases_marker_for_retry(db, monkeypatch):
 # --------------------------------------------------------------------------- #
 # Leader lock helper
 # --------------------------------------------------------------------------- #
+@pytest.mark.sqlite_only
 def test_try_leader_lock_acquires_on_sqlite():
     """On SQLite the lock is a no-op that always acquires (single-process)."""
     with try_leader_lock() as acquired:
         assert acquired is True
 
 
+@pytest.mark.sqlite_only
 def test_try_leader_lock_releases_cleanly_and_is_reentrant_on_sqlite():
     """The acquire/release contract holds: a second acquisition after the first
-    block exits still succeeds (the no-op released cleanly)."""
+    block exits still succeeds (the no-op released cleanly).
+
+    Marked sqlite_only with its sibling above: on Postgres these two reach the
+    *other* branch entirely -- reentrancy there means a second real session
+    being REFUSED, not granted. Asserting True would be asserting the opposite
+    of the production contract while looking like it passed. The Postgres
+    semantics are covered properly in tests/test_postgres_paths.py.
+    """
     with try_leader_lock(WORKER_CYCLE_LOCK_KEY) as a:
         assert a is True
     # After release, acquiring again still works.
