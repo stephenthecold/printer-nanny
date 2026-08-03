@@ -1,6 +1,7 @@
 {% extends "base.html" %}
 {% from "_components.html" import badge, btn, btn_link, card_cls, empty_row, field,
-        page_title, table_cls, table_wrap, td_cls, th_cls, thead_cls, tr_cls %}
+        page_range, page_title, pager, table_cls, table_wrap, td_cls, th_cls,
+        thead_cls, tr_cls %}
 {% from "base.html" import status_badge %}
 {% block title %}Printers · {{ app.name or 'Printer Nanny' }}{% endblock %}
 {% block body %}
@@ -40,11 +41,7 @@
         No matches
       {% endif %}
     </h2>
-    {% if result.total %}
-    <p class="text-xs text-slate-500 tabular-nums">
-      Showing {{ result.offset + 1 }}–{{ result.offset + result.rows|length }} of {{ result.total }}
-    </p>
-    {% endif %}
+    {{ page_range(result, 'printers') }}
   </div>
 
   <div class="{{ table_wrap() }}">
@@ -108,25 +105,11 @@
     </table>
   </div>
 
-  {% if result.pages > 1 %}
   {# Bounded from the start. The audit found 21 unbounded dashboard queries and
      an audit log capped at 200 rows with no offset, which made 99,800 of 100k
-     rows permanently unreachable; a fleet list is exactly the shape that grows. #}
-  <nav aria-label="Printer results pages" class="flex items-center justify-between gap-3 px-4 py-3 border-t">
-    {% if result.page > 1 %}
-    <a rel="prev" href="/printers?q={{ result.q|urlencode }}&amp;page={{ result.page - 1 }}"
-       aria-label="Previous page of printer results" class="{{ btn('neutral', 'sm') }}">← Previous</a>
-    {% else %}
-    <span class="text-xs text-slate-400">← Previous</span>
-    {% endif %}
-    <span class="text-xs text-slate-500 tabular-nums">Page {{ result.page }} of {{ result.pages }}</span>
-    {% if result.page < result.pages %}
-    <a rel="next" href="/printers?q={{ result.q|urlencode }}&amp;page={{ result.page + 1 }}"
-       aria-label="Next page of printer results" class="{{ btn('neutral', 'sm') }}">Next →</a>
-    {% else %}
-    <span class="text-xs text-slate-400">Next →</span>
-    {% endif %}
-  </nav>
-  {% endif %}
+     rows permanently unreachable; a fleet list is exactly the shape that grows.
+     Shares the `pager` macro with /manage/audit -- two hand-written pagers is
+     precisely the drift the component layer exists to stop. #}
+  {{ pager(result, '/printers', 'printer results') }}
 </section>
 {% endblock %}
