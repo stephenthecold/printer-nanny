@@ -100,14 +100,14 @@ def test_the_spent_claim_code_is_removed_from_the_file(tmp_path):
     path = tmp_path / "agent.toml"
     path.write_text('central_url = "https://c"\nclaim_code = "pnc_used"\n')
     enrollment.persist_credentials(str(path), {"agent_id": 1, "api_key": "pn_k"})
-    assert "claim_code" not in path.read_text()
+    assert "claim_code" not in path.read_text(encoding="utf-8")
 
 
 def test_rewriting_does_not_leave_two_conflicting_identities(tmp_path):
     path = tmp_path / "agent.toml"
     path.write_text('central_url = "https://c"\nagent_id = 1\napi_key = "old"\n')
     enrollment.persist_credentials(str(path), {"agent_id": 2, "api_key": "new"})
-    body = path.read_text()
+    body = path.read_text(encoding="utf-8")
     assert body.count("agent_id") == 1 and body.count("api_key") == 1
     assert "old" not in body
 
@@ -124,6 +124,11 @@ def test_other_settings_survive_the_rewrite(tmp_path):
     assert cfg.data_dir == "/var/tmp/pn"
 
 
+@pytest.mark.skipif(
+    os.name == "nt",
+    reason="POSIX mode bits; on Windows os.chmod only toggles the read-only "
+           "attribute and the MSI restricts this file by ACL instead",
+)
 def test_the_credential_file_is_owner_only(tmp_path):
     path = tmp_path / "agent.toml"
     enrollment.persist_credentials(str(path), {"agent_id": 4, "api_key": "pn_k"})
@@ -147,8 +152,8 @@ def test_claim_code_in_config_enrolls_and_persists(tmp_path, monkeypatch):
     cfg = agent_config.load_config(str(path))
     assert cfg.agent_id == 9 and cfg.api_key == "pn_new"
     # Persisted, so the (single-use) code is never needed again.
-    assert "pn_new" in path.read_text()
-    assert "claim_code" not in path.read_text()
+    assert "pn_new" in path.read_text(encoding="utf-8")
+    assert "claim_code" not in path.read_text(encoding="utf-8")
 
 
 def test_second_start_does_not_redeem_again(tmp_path, monkeypatch):

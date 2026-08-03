@@ -35,12 +35,12 @@ OPT_IN_SERVICES = {"caddy", "agent", "mailhog"}
 
 @pytest.fixture(scope="module")
 def compose() -> dict:
-    return yaml.safe_load(COMPOSE_PATH.read_text())
+    return yaml.safe_load(COMPOSE_PATH.read_text(encoding="utf-8"))
 
 
 @pytest.fixture(scope="module")
 def compose_text() -> str:
-    return COMPOSE_PATH.read_text()
+    return COMPOSE_PATH.read_text(encoding="utf-8")
 
 
 def test_every_variable_has_one_agreed_default(compose_text: str) -> None:
@@ -194,8 +194,8 @@ def test_shipped_override_example_is_usable_verbatim(tmp_path) -> None:
 
     work = tmp_path / "stack"
     work.mkdir()
-    (work / "docker-compose.yml").write_text(COMPOSE_PATH.read_text())
-    (work / "docker-compose.override.yml").write_text(example.read_text())
+    (work / "docker-compose.yml").write_text(COMPOSE_PATH.read_text(encoding="utf-8"))
+    (work / "docker-compose.override.yml").write_text(example.read_text(encoding="utf-8"))
 
     out = subprocess.run(
         ["docker", "compose", "config", "--quiet"],

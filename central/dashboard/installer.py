@@ -52,8 +52,8 @@ def _nssm_cache_path(arch: str) -> Path:
 @router.get("/install-agent.sh", response_class=PlainTextResponse)
 def install_script() -> PlainTextResponse:
     try:
-        body = _SCRIPT_PATH.read_text()
-    except OSError:
+        body = _SCRIPT_PATH.read_text(encoding="utf-8")
+    except (OSError, UnicodeDecodeError):
         return PlainTextResponse("# install-agent.sh not found on server\n", status_code=500)
     return PlainTextResponse(body, media_type="text/x-shellscript")
 
@@ -63,8 +63,8 @@ def install_script_ps1() -> PlainTextResponse:
     """Windows installer - operator runs:
        iwr -useb https://CENTRAL/install-agent.ps1 -OutFile $p; & $p"""
     try:
-        body = _PS1_PATH.read_text()
-    except OSError:
+        body = _PS1_PATH.read_text(encoding="utf-8")
+    except (OSError, UnicodeDecodeError):
         return PlainTextResponse("# install-agent.ps1 not found on server\n", status_code=500)
     return PlainTextResponse(body, media_type="text/plain")
 

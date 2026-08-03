@@ -268,7 +268,7 @@ def _patch_pth(python_dir: Path) -> None:
     if not pths:
         raise RuntimeError("embeddable runtime has no python*._pth to patch")
     for pth in pths:  # normally exactly one; patch all defensively
-        lines = pth.read_text().splitlines()
+        lines = pth.read_text(encoding="utf-8").splitlines()
         out: list[str] = []
         have_site_pkgs = False
         for line in lines:
@@ -282,7 +282,7 @@ def _patch_pth(python_dir: Path) -> None:
         if not have_site_pkgs:
             out.append("Lib\\site-packages")
         out.append("import site")
-        pth.write_text("\n".join(out) + "\n")
+        pth.write_text("\n".join(out) + "\n", encoding="utf-8")
 
 
 def _pip_install_agent(site_packages: Path, agent_src: Path, python_exe: str) -> None:
@@ -765,7 +765,10 @@ def build_msi(
     try:
         wxs = generate_wxs(payload, product_version=product_version)
         wxs_name = f"agent-{safe_slug}.wxs"
-        (payload / wxs_name).write_text(wxs)
+        # _WXS_TEMPLATE declares encoding="utf-8", so the bytes have to be utf-8
+        # whatever the build host's locale says -- otherwise the file contradicts
+        # its own declaration and wixl mis-reads any non-ASCII in a client name.
+        (payload / wxs_name).write_text(wxs, encoding="utf-8")
 
         cmd = [cap.wixl or "wixl", "--arch", "x64", "-o", str(msi_path), wxs_name]
         log.info("running wixl: %s (cwd=%s)", " ".join(cmd), payload)
@@ -886,7 +889,7 @@ def lock_config_permissions(msi_path: Path, config_name: str) -> str:
     )
     with tempfile.TemporaryDirectory(prefix="pn-msi-acl-") as td:
         idt_path = Path(td) / "LockPermissions.idt"
-        idt_path.write_text(idt)
+        idt_path.write_text(idt, encoding="utf-8")
         proc = subprocess.run(
             ["msibuild", str(msi_path), "-i", str(idt_path)],
             capture_output=True, text=True,
@@ -932,8 +935,8 @@ def _extract_member(path: Path, name: str) -> Optional[str]:
             return None
         for found in Path(td).rglob(name):
             try:
-                return found.read_text()
-            except OSError:
+                return found.read_text(encoding="utf-8")
+            except (OSError, UnicodeDecodeError):
                 return None
     return None
 
@@ -1080,7 +1083,10 @@ def build_workstation_msi(
             payload, product_version=product_version, profile=WORKSTATION_PROFILE
         )
         wxs_name = f"workstation-{safe_slug}.wxs"
-        (payload / wxs_name).write_text(wxs)
+        # _WXS_TEMPLATE declares encoding="utf-8", so the bytes have to be utf-8
+        # whatever the build host's locale says -- otherwise the file contradicts
+        # its own declaration and wixl mis-reads any non-ASCII in a client name.
+        (payload / wxs_name).write_text(wxs, encoding="utf-8")
 
         cmd = [cap.wixl or "wixl", "--arch", "x64", "-o", str(msi_path), wxs_name]
         log.info("running wixl: %s (cwd=%s)", " ".join(cmd), payload)

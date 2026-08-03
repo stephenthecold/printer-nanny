@@ -101,7 +101,7 @@ class World:
         (self.site / "docker-compose.yml").write_text(compose)
 
     def compose(self) -> str:
-        return (self.site / "docker-compose.yml").read_text()
+        return (self.site / "docker-compose.yml").read_text(encoding="utf-8")
 
     def head(self) -> str:
         return _git_out(self.site, "rev-parse", "--short", "HEAD")
@@ -236,14 +236,14 @@ def test_migrate_compose_preserves_edits_and_restores_the_file(world: World) -> 
     assert world.compose() == BASE_COMPOSE
     backups = list(world.site.glob("docker-compose.yml.bak.*"))
     assert len(backups) == 1, "the edited file must be recoverable in full"
-    assert backups[0].read_text() == edited
+    assert backups[0].read_text(encoding="utf-8") == edited
 
     override = world.site / "docker-compose.override.yml"
     assert override.exists()
-    assert "shm_size: 1g" in override.read_text(), "edits not carried into the override"
+    assert "shm_size: 1g" in override.read_text(encoding="utf-8"), "edits not carried into the override"
 
     import yaml
-    yaml.safe_load(override.read_text())  # must be loadable, not just written
+    yaml.safe_load(override.read_text(encoding="utf-8"))  # must be loadable, not just written
 
 
 def test_migrate_compose_then_update_succeeds(world: World) -> None:
@@ -275,7 +275,7 @@ def test_migrate_compose_never_clobbers_an_existing_override(world: World) -> No
     result = world.run("--migrate-compose")
 
     assert result.returncode == 0, result.stdout + result.stderr
-    assert override.read_text() == "services:\n  api:\n    shm_size: 64m\n"
+    assert override.read_text(encoding="utf-8") == "services:\n  api:\n    shm_size: 64m\n"
     migrated = list(world.site.glob("docker-compose.override.yml.migrated-*"))
     assert len(migrated) == 1
     assert "does NOT read" in result.stdout, "operator not told the file is inert"

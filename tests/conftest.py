@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import atexit
 import os
+import pathlib
+import subprocess
 import tempfile
 
 # Must be set before importing anything under `central` (engine binds at import).
@@ -29,6 +31,40 @@ def _cleanup_tmp_db() -> None:
             os.unlink(_TMP_DB + suffix)
         except OSError:
             pass
+
+
+_REPO_ROOT = pathlib.Path(__file__).resolve().parent.parent
+
+
+@pytest.fixture(scope="session")
+def git_file_mode():
+    """A callable giving a path's mode as *git* records it, or None.
+
+    The executable bit on a shipped script is a property of the repository, not
+    of whichever filesystem a checkout happened to land on. Git on Windows does
+    not materialise the bit in the working tree, so ``stat()`` there says
+    nothing about what ships -- it reports 0o666 for a file git has as 100755,
+    and a test asserting on it fails for a reason that has nothing to do with
+    the packaging it is trying to guard.
+
+    Asking git is the same question the packagers and CI ask. Returns None when
+    there is no git checkout to ask (a source tarball, an export), so callers
+    can skip rather than fail on a question that cannot be posed.
+    """
+
+    def mode(path) -> "str | None":
+        try:
+            proc = subprocess.run(
+                ["git", "ls-files", "-s", "--", str(path)],
+                cwd=str(_REPO_ROOT), capture_output=True, text=True,
+            )
+        except OSError:  # no git on PATH
+            return None
+        if proc.returncode != 0 or not proc.stdout.strip():
+            return None
+        return proc.stdout.split()[0]
+
+    return mode
 
 
 @pytest.fixture()

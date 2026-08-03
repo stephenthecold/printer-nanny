@@ -160,7 +160,7 @@ def test_no_external_asset_references(template: Path) -> None:
     """
     offenders = [
         line.strip()
-        for line in template.read_text().splitlines()
+        for line in template.read_text(encoding="utf-8").splitlines()
         if EXTERNAL_REF.search(line)
     ]
     assert not offenders, (
@@ -191,11 +191,11 @@ def test_every_template_class_is_in_the_vendored_css() -> None:
     "forgot to run scripts/build-assets.sh" into a red test instead of a layout
     bug an operator finds later.
     """
-    css = (STATIC_DIR / "tailwind.css").read_text()
+    css = (STATIC_DIR / "tailwind.css").read_text(encoding="utf-8")
 
     missing: dict[str, set[str]] = {}
     for template in TEMPLATES:
-        for token in _class_tokens(template.read_text()):
+        for token in _class_tokens(template.read_text(encoding="utf-8")):
             if token in NON_UTILITY_TOKENS:
                 continue
             if f".{_css_escape(token)}" not in css:

@@ -19,12 +19,22 @@ the unwind, the budget.
 from __future__ import annotations
 
 import hashlib
+import os
 import subprocess
 
 import pytest
 
 from printer_nanny_agent.platforms import macos
 from printer_nanny_agent.workstation_service import DefaultPrinterError
+
+# This file deliberately runs everywhere against a fake ``_run``, and almost all
+# of it is separator-agnostic. The exceptions are the few tests that compare a
+# path the backend built with ``os.path.join`` against a literal POSIX string:
+# on Windows those differ by the separator alone, which says nothing about the
+# behaviour under test. The backend itself only ever runs on macOS.
+posix_paths_only = pytest.mark.skipif(
+    os.name == "nt", reason="compares POSIX path strings built by the macOS backend"
+)
 
 
 class FakeRun:
@@ -688,6 +698,7 @@ def test_a_missing_binary_is_a_stated_reason(monkeypatch):
 # --------------------------------------------------------------------------- #
 
 
+@posix_paths_only
 def test_state_dir_is_machine_wide(monkeypatch):
     monkeypatch.delenv("PN_STATE_DIR_BASE", raising=False)
     assert macos.default_state_dir() == (
@@ -695,6 +706,7 @@ def test_state_dir_is_machine_wide(monkeypatch):
     )
 
 
+@posix_paths_only
 def test_state_dir_is_overridable_for_tests(monkeypatch):
     monkeypatch.setenv("PN_STATE_DIR_BASE", "/tmp/pn")
     assert macos.default_state_dir() == "/tmp/pn/PrinterNanny"
@@ -904,6 +916,7 @@ def test_a_tampered_package_never_reaches_the_installer(
     assert "checksum mismatch" in report.skipped["PN_Front_Desk_MFP_(7)"]
 
 
+@posix_paths_only
 def test_a_ppd_driver_binds_the_ppd_from_the_package(
     macos_provision, fake, tmp_path
 ):
@@ -1010,7 +1023,12 @@ def test_a_symlink_out_of_an_allowed_root_is_refused(tmp_path, monkeypatch):
     secret = tmp_path / "secret"
     secret.write_text("x")
     link = tmp_path / "link.ppd"
-    link.symlink_to(secret)
+    try:
+        link.symlink_to(secret)
+    except OSError as exc:
+        # Windows needs admin or Developer Mode to create one. The guard being
+        # tested is real everywhere; only the rig for it is unavailable here.
+        pytest.skip(f"cannot create a symlink in this environment: {exc}")
     monkeypatch.setattr(macos, "_SYSTEM_PPD_ROOTS", (str(tmp_path) + "/link",))
     with pytest.raises(macos.DriverStagingError, match="not under a directory"):
         macos._resolve_system_ppd(str(link))

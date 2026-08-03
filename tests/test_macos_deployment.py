@@ -13,12 +13,21 @@ installer generates, because they are two files and only one of them ships.
 from __future__ import annotations
 
 import io
+import os
 import plistlib
 import re
+import shutil
 import subprocess
 from pathlib import Path
 
 import pytest
+
+# `bash -n` is a syntax check, not a platform assertion -- it is just as valid
+# run from Windows, when a bash is on PATH. Skip rather than fail when there is
+# none, so a missing interpreter does not read as a broken script.
+requires_bash = pytest.mark.skipif(
+    shutil.which("bash") is None, reason="no bash on PATH to syntax-check with"
+)
 
 ROOT = Path(__file__).resolve().parent.parent
 PLIST = ROOT / "deploy" / "com.printernanny.workstation.plist"
@@ -32,7 +41,7 @@ LABEL = "com.printernanny.workstation"
 def _installer_plist() -> dict:
     """The plist the installer writes, with its shell variables filled in."""
     body = re.search(
-        r'cat > "\$PLIST" <<PLISTEOF\n(.*?)\nPLISTEOF', INSTALLER.read_text(), re.S
+        r'cat > "\$PLIST" <<PLISTEOF\n(.*?)\nPLISTEOF', INSTALLER.read_text(encoding="utf-8"), re.S
     )
     assert body, "the installer no longer writes a plist heredoc"
     text = body.group(1)
@@ -120,12 +129,12 @@ def test_the_plist_sets_no_environment_variables(plist):
 def test_the_installer_writes_the_config_before_starting_the_daemon():
     """Otherwise there is a window in which the daemon runs without its key, and
     a window in which the key exists at the default umask."""
-    text = INSTALLER.read_text()
+    text = INSTALLER.read_text(encoding="utf-8")
     assert text.index("chmod 600") < text.index("launchctl bootstrap")
 
 
 def test_the_installer_locks_down_the_config_and_state_dir():
-    text = INSTALLER.read_text()
+    text = INSTALLER.read_text(encoding="utf-8")
     assert 'chmod 600 "$CONFIG"' in text
     assert 'chmod 700 "$STATE_DIR"' in text
     # launchd refuses a group- or world-writable plist outright.
@@ -136,7 +145,7 @@ def test_the_installer_does_not_pass_the_key_on_a_command_line():
     """It may accept --enroll-key as its OWN argument; what it must never do is
     put it into the plist it writes."""
     body = re.search(
-        r'cat > "\$PLIST" <<PLISTEOF\n(.*?)\nPLISTEOF', INSTALLER.read_text(), re.S
+        r'cat > "\$PLIST" <<PLISTEOF\n(.*?)\nPLISTEOF', INSTALLER.read_text(encoding="utf-8"), re.S
     ).group(1)
     assert "ENROLL_KEY" not in body
 
@@ -149,7 +158,7 @@ def test_the_installer_does_not_pass_the_key_on_a_command_line():
 def test_uninstall_keeps_the_machine_identity():
     """Removing the state directory turns a reinstall into a brand-new machine
     and strands this Mac's assignments on a record nobody looks at again."""
-    text = INSTALLER.read_text()
+    text = INSTALLER.read_text(encoding="utf-8")
     uninstall = text[text.index('if [ "$UNINSTALL" = "true" ]'):text.index("[ -n \"$SERVER\" ]")]
     assert 'rm -rf "$INSTALL_DIR"' in uninstall
     assert 'rm -rf "$STATE_DIR"' not in uninstall
@@ -161,6 +170,7 @@ def test_uninstall_keeps_the_machine_identity():
 # --------------------------------------------------------------------------- #
 
 
+@requires_bash
 @pytest.mark.parametrize("script", [INSTALLER, TESTBED])
 def test_shell_scripts_parse(script):
     proc = subprocess.run(
@@ -170,14 +180,22 @@ def test_shell_scripts_parse(script):
 
 
 @pytest.mark.parametrize("script", [INSTALLER, TESTBED, CHECKER])
-def test_scripts_are_executable(script):
-    assert script.stat().st_mode & 0o111, f"{script.name} is not executable"
+def test_scripts_are_executable(script, git_file_mode):
+    """Asserted against git, not the filesystem -- see the fixture for why."""
+    mode = git_file_mode(script)
+    if mode is None:
+        pytest.skip("not a git checkout; the exec bit is a repository property")
+    assert mode == "100755", f"{script.name} is {mode} in git, not 100755"
+    if os.name != "nt":
+        # Where the OS has mode bits, the checkout is what pkgbuild and the
+        # installer actually see, so keep asserting it too.
+        assert script.stat().st_mode & 0o111, f"{script.name} is not executable"
 
 
 def test_the_checker_only_ever_removes_its_own_queues():
     """It runs against a real scheduler, which on a Mac is somebody's actual
     printers. A sweep that is not prefix-scoped deletes them."""
-    text = CHECKER.read_text()
+    text = CHECKER.read_text(encoding="utf-8")
     assert 'PREFIX = "PNCHK_"' in text
     sweep = text[text.index("def sweep("):text.index("def check_enumeration(")]
     assert "startswith(PREFIX)" in sweep
@@ -186,7 +204,7 @@ def test_the_checker_only_ever_removes_its_own_queues():
 def test_the_checker_is_honest_about_needing_real_hardware():
     """A green run without --printer-uri proves nothing about driverless
     printing, and must not read as though it does."""
-    text = CHECKER.read_text()
+    text = CHECKER.read_text(encoding="utf-8")
     assert "--printer-uri" in text
     assert "so nothing here proves a queue " in text
     assert "before claiming driverless" in text
@@ -195,8 +213,8 @@ def test_the_checker_is_honest_about_needing_real_hardware():
 
 
 def test_the_installer_refuses_to_run_on_non_macos():
-    assert 'uname -s' in INSTALLER.read_text()
+    assert 'uname -s' in INSTALLER.read_text(encoding="utf-8")
 
 
 def test_the_installer_still_guards_the_placeholder_pip_source():
-    assert "your-org" in INSTALLER.read_text()
+    assert "your-org" in INSTALLER.read_text(encoding="utf-8")
