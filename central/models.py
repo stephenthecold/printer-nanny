@@ -27,6 +27,7 @@ from sqlalchemy import (
     Text,
     UniqueConstraint,
     text,
+    true,
 )
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
@@ -819,8 +820,14 @@ class SuppressionWindow(Base):
         _enum(EventSeverity), default=EventSeverity.critical
     )
     # ...unless this is False, in which case nothing breaks through at all.
+    # ``true()`` renders per dialect (1 on SQLite, TRUE on Postgres). A literal
+    # ``text("1")`` here made ``alembic upgrade head`` fail outright on a fresh
+    # Postgres -- "column is of type boolean but default expression is of type
+    # integer" -- so the documented compose bootstrap could not create its
+    # schema at all. SQLite accepts 1 for a boolean, which is exactly why the
+    # whole suite passed over it; see tests/test_postgres_bootstrap.py.
     allow_breakthrough: Mapped[bool] = mapped_column(
-        Boolean, default=True, server_default=text("1")
+        Boolean, default=True, server_default=true()
     )
     # -- recurring (quiet_hours) --------------------------------------------- #
     # Minutes from LOCAL midnight, 0..1439. end <= start wraps past midnight.
@@ -985,7 +992,11 @@ class User(Base):
     # and central.deps.current_user) but the row is kept so the audit trail and
     # any historical references survive. This is the enterprise off-boarding
     # gate -- an IdP flips ``active`` to false via SCIM PATCH on termination.
-    active: Mapped[bool] = mapped_column(Boolean, default=True, server_default="1")
+    # ``true()`` rather than "1": a string default renders as DEFAULT '1', which
+    # Postgres only accepts because it coerces the literal. Keeping every boolean
+    # default dialect-rendered is what makes the rule in
+    # tests/test_postgres_bootstrap.py a clean one.
+    active: Mapped[bool] = mapped_column(Boolean, default=True, server_default=true())
     # SCIM external id: the IdP's stable identifier for this user, echoed back
     # in the SCIM ``externalId`` field so the provisioning system can correlate
     # its record with ours across renames. None for locally-created users.
