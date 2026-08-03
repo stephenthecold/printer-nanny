@@ -180,6 +180,8 @@
   {% endif %}
 </section>
 
+{% if remote_enabled %}{% include "_remote_panel.html" %}{% endif %}
+
 {% if can_manage and printer.last_provider_trace %}
 <details class="{{ card_cls('none', 'mb-6') }}">
   <summary class="px-4 py-3 cursor-pointer font-semibold text-sm flex items-center gap-2">

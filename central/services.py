@@ -1259,3 +1259,62 @@ def device_definition_feed(db: Session, agent: m.Agent) -> list:
     merged = dict(globals_by_key)
     merged.update(scoped_by_key)
     return [merged[k] for k in sorted(merged) if k not in ambiguous]
+
+
+# --------------------------------------------------------------------------- #
+# Remote hands
+# --------------------------------------------------------------------------- #
+def apply_remote_result(
+    db: Session, req: "m.RemoteRequest", result: "s.RemoteResultIn"
+) -> "m.RemoteRequest":
+    """Fold one agent-reported outcome into its request, and into capability.
+
+    CAPABILITY IS UPDATED FROM EVIDENCE, WHEREVER THE EVIDENCE COMES FROM
+    --------------------------------------------------------------------
+    A probe is not the only thing that proves writability -- a write that the
+    device accepted proves it just as well, and a write the device refused
+    disproves it. So both feed ``printers.remote_capability``, which is what
+    keeps the recorded capability from going stale between probes. A *fetch*
+    never touches it: HTTP reachability says nothing about whether SNMP writes
+    are permitted, and conflating the two is exactly the inference this feature
+    refuses to make.
+
+    A transport failure (``ok`` false with no verdict) leaves capability alone.
+    "The agent could not reach the device" is not evidence that the device is
+    read-only, and downgrading on it would mean one sleeping printer silently
+    revoking a capability that was properly proven yesterday.
+    """
+    now = _now()
+    req.completed_at = now
+    req.error = (result.error or None) and result.error[:600]
+    req.detail = result.detail if isinstance(result.detail, dict) else None
+    req.status = (
+        m.RemoteRequestStatus.succeeded if result.ok else m.RemoteRequestStatus.failed
+    )
+
+    if req.kind == m.RemoteRequestKind.fetch:
+        req.http_status = result.http_status
+        req.content_type = (result.content_type or None) and result.content_type[:120]
+        req.body = result.body
+        req.body_bytes = result.body_bytes
+        req.truncated = bool(result.truncated)
+    else:
+        req.verified = result.verified
+
+    printer = req.printer or db.get(m.Printer, req.printer_id)
+    if printer is not None and result.writable is not None:
+        printer.remote_capability = (
+            m.RemoteCapability.writable if result.writable else m.RemoteCapability.read_only
+        )
+        printer.remote_capability_at = now
+        # Written from the agent's stated reason, bounded. This string is
+        # rendered to an operator, and it originates in an SNMP error message
+        # from a device -- so it is bounded here and escaped by Jinja there,
+        # never interpolated into markup.
+        detail = result.error or (
+            "the device accepted a no-op SNMP write with the credentials we hold"
+            if result.writable
+            else "the device refused the write"
+        )
+        printer.remote_capability_detail = detail[:400]
+    return req

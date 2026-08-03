@@ -275,12 +275,49 @@ class CommandType(str, enum.Enum):
     # then exit so the service manager (systemd / NSSM) restarts the process
     # against the freshly-installed code. payload: {"pip_source": "git+..."}.
     update_agent = "update_agent"
+    # --- Remote hands (see central/remote.py) ---------------------------------
+    # These three carry a ``request_id`` and are the only command types whose
+    # result travels BACK to central. They are never enqueueable through the
+    # JSON command API: each one has to pass a capability gate, a rate limit and
+    # a tenancy check that only the remote routes perform, so ``CommandIn``
+    # refuses them outright rather than letting a caller construct one directly.
+    remote_fetch = "remote_fetch"    # payload: {request_id, ip, scheme, port, path}
+    remote_probe = "remote_probe"    # payload: {request_id, ip}
+    remote_write = "remote_write"    # payload: {request_id, ip, op, oid, snmp_type, value}
 
 
 class CommandStatus(str, enum.Enum):
     pending = "pending"
     sent = "sent"
     done = "done"
+
+
+class RemoteCapability(str, enum.Enum):
+    """Whether this device accepts writes FROM US, as proven by a probe.
+
+    ``unknown`` is the shipped state of every printer and behaves exactly like
+    ``read_only`` -- a device that has not been proven writable is read-only.
+    The two are kept distinct only so the UI can say "not checked yet" instead
+    of asserting a result nobody measured.
+    """
+
+    unknown = "unknown"
+    read_only = "read_only"
+    writable = "writable"
+
+
+class RemoteRequestKind(str, enum.Enum):
+    fetch = "fetch"    # read-only HTTP GET against the device's web server
+    probe = "probe"    # no-op SNMP SET to establish capability
+    write = "write"    # a named operation from remote.WRITE_OPS
+
+
+class RemoteRequestStatus(str, enum.Enum):
+    pending = "pending"
+    sent = "sent"
+    succeeded = "succeeded"
+    failed = "failed"
+    expired = "expired"
 
 
 # --------------------------------------------------------------------------- #
@@ -650,6 +687,27 @@ class Printer(Base):
     # finishings). Diagnostics only -- nothing keys off its contents, so the
     # probe can add fields without a migration.
     ipp_capabilities: Mapped[Optional[dict]] = mapped_column(JSON, default=None)
+
+    # --- remote hands ------------------------------------------------------
+    # What a capability probe OBSERVED, and separately what an operator
+    # DECIDED -- the same two-column shape as driver_tier above, for the same
+    # reason: a re-probe must refresh what we saw without discarding a human's
+    # decision. The asymmetry is the security property, and it is why the
+    # operator column is a boolean rather than a mirror of the enum: an
+    # operator may pin a device read-only, and may NOT pin one writable. A
+    # "writable" override would be an inference standing in for evidence, which
+    # is the one thing this feature must never do (central/remote.py).
+    remote_capability: Mapped[RemoteCapability] = mapped_column(
+        _enum(RemoteCapability), default=RemoteCapability.unknown
+    )
+    remote_capability_at: Mapped[Optional[datetime]] = mapped_column(
+        DateTime(timezone=True), default=None
+    )
+    # What the probe (or a real write) actually observed, in words an operator
+    # can act on: "the device refused the SET (noAccess) -- SNMP writes are
+    # disabled, or the community we hold is read-only".
+    remote_capability_detail: Mapped[Optional[str]] = mapped_column(String(400), default=None)
+    remote_write_disabled: Mapped[bool] = mapped_column(Boolean, default=False)
 
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
 
@@ -1227,6 +1285,104 @@ class Command(Base):
     done_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), default=None)
 
     agent: Mapped[Agent] = relationship(back_populates="commands")
+
+
+class RemoteRequest(Base):
+    """One operator-initiated remote-hands action and whatever came back.
+
+    The request row is the durable half; the ``Command`` it spawns is the
+    transport. Keeping them apart is what lets the answer outlive the command
+    (an operator reads a captured page minutes later), and what gives the
+    agent-facing result endpoint something to authorise against: a result is
+    accepted only for a request whose ``agent_id`` is the agent posting it.
+
+    ON STORING THE BODY IN THE DATABASE
+    -----------------------------------
+    Driver packages deliberately live on a volume so ``pg_dump`` stays small,
+    and the same question was asked here. The answer is different because the
+    shapes are different: a driver archive is tens of megabytes and permanent,
+    an EWS page is tens of kilobytes and disposable. It is capped at
+    ``remote.MAX_BODY_BYTES`` on both sides of the wire, and a captured body is
+    a transient diagnostic -- there is no correctness cost to it being pruned,
+    which is exactly what makes a file store the wrong trade here.
+
+    THE BODY IS HOSTILE INPUT AND IS NEVER RENDERED IN OUR ORIGIN
+    ------------------------------------------------------------
+    It is HTML written by a device on a customer LAN. See
+    ``dashboard/remote.py`` for the isolation the one route that serves it
+    applies, and what an evil device can and cannot do with it.
+    """
+
+    __tablename__ = "remote_requests"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    printer_id: Mapped[int] = mapped_column(
+        ForeignKey("printers.id", ondelete="CASCADE"), index=True
+    )
+    # The agent asked to carry this out. SET NULL rather than CASCADE: deleting
+    # an agent must not silently erase the record that somebody restarted a
+    # customer's printer through it.
+    agent_id: Mapped[Optional[int]] = mapped_column(
+        ForeignKey("agents.id", ondelete="SET NULL"), default=None, index=True
+    )
+    command_id: Mapped[Optional[int]] = mapped_column(
+        ForeignKey("commands.id", ondelete="SET NULL"), default=None
+    )
+    kind: Mapped[RemoteRequestKind] = mapped_column(_enum(RemoteRequestKind))
+    status: Mapped[RemoteRequestStatus] = mapped_column(
+        _enum(RemoteRequestStatus), default=RemoteRequestStatus.pending, index=True
+    )
+
+    # --- what was asked for (validated by central/remote.py before it is stored)
+    scheme: Mapped[Optional[str]] = mapped_column(String(8), default=None)
+    port: Mapped[Optional[int]] = mapped_column(Integer, default=None)
+    path: Mapped[Optional[str]] = mapped_column(String(600), default=None)
+    #: WRITE_OPS key for a write; NULL otherwise.
+    op: Mapped[Optional[str]] = mapped_column(String(40), default=None)
+    #: The value sent to the device. Operator-supplied free text (a location, a
+    #: contact) -- never a credential, because no write in the vocabulary takes
+    #: one. Recorded so the audit trail and this row agree on what was written.
+    op_value: Mapped[Optional[str]] = mapped_column(String(400), default=None)
+
+    # --- who asked
+    requested_by_user_id: Mapped[Optional[int]] = mapped_column(
+        ForeignKey("users.id", ondelete="SET NULL"), default=None
+    )
+    requested_by: Mapped[Optional[str]] = mapped_column(String(120), default=None)
+
+    # --- what came back
+    http_status: Mapped[Optional[int]] = mapped_column(Integer, default=None)
+    #: The content type the DEVICE declared. Recorded and displayed as metadata;
+    #: deliberately never echoed as a response header (see dashboard/remote.py).
+    content_type: Mapped[Optional[str]] = mapped_column(String(120), default=None)
+    body: Mapped[Optional[str]] = mapped_column(Text, default=None)
+    body_bytes: Mapped[Optional[int]] = mapped_column(Integer, default=None)
+    #: True when the body was cut off at the cap -- so the UI can say so rather
+    #: than showing a truncated page as if it were the whole one.
+    truncated: Mapped[bool] = mapped_column(Boolean, default=False)
+    #: A write only reports success when the read-back agrees. NULL for a
+    #: restart, which has nothing readable afterwards and says so.
+    verified: Mapped[Optional[bool]] = mapped_column(Boolean, default=None)
+    error: Mapped[Optional[str]] = mapped_column(String(600), default=None)
+    #: Free-shape detail from the agent (redirect Location, probe OID, read-back
+    #: value). Diagnostics only; nothing keys off its contents.
+    detail: Mapped[Optional[dict]] = mapped_column(JSON, default=None)
+
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+    completed_at: Mapped[Optional[datetime]] = mapped_column(
+        DateTime(timezone=True), default=None
+    )
+
+    printer: Mapped[Printer] = relationship()
+
+    __table_args__ = (
+        # The panel reads "this printer's requests, newest first" and the rate
+        # limiter reads "this printer's most recent request" -- one printer, one
+        # ordering. Declared here as well as in the migration because revision
+        # 0001 is create_all, so an index that lives only in a migration is
+        # absent on every fresh install.
+        Index("ix_remote_requests_printer_created", "printer_id", "created_at"),
+    )
 
 
 class User(Base):

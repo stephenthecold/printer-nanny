@@ -463,6 +463,8 @@ def printer_detail(printer_id: int, request: Request, db: Session = Depends(get_
             .order_by(m.MaintenanceRecord.performed_at.desc())
         )
     )
+    from central.dashboard.remote import panel_context
+
     return _render(
         request,
         "printer.html",
@@ -475,6 +477,10 @@ def printer_detail(printer_id: int, request: Request, db: Session = Depends(get_
         maintenance=maint,
         spark=_sparkline_points([r.page_count for r in history]),
         printer_label=_printer_label,
+        # Remote hands. Returns {"remote_enabled": False} for a client_readonly
+        # user or a switched-off install, so the card simply is not rendered --
+        # the controls do not exist in the DOM to be found and posted to.
+        **panel_context(db, printer, user),
     )
 
 

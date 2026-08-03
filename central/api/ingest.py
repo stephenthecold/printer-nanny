@@ -5,7 +5,7 @@ from __future__ import annotations
 import logging
 from datetime import datetime, timezone
 
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy import or_, select
 from sqlalchemy.orm import Session
 
@@ -353,6 +353,64 @@ def get_device_definitions(
         "definitions": definitions,
         "signature": payload_signature(agent.api_key_hash or "", version, definitions),
     }
+
+
+@router.post("/remote-results/{request_id}")
+def post_remote_result(
+    request_id: int,
+    payload: s.RemoteResultIn,
+    agent: m.Agent = Depends(authenticated_agent),
+    db: Session = Depends(get_db),
+):
+    """One remote-hands outcome, from the agent that was asked to produce it.
+
+    AUTHORISATION
+    -------------
+    Bearer-authenticated as the agent, and then the request row must name THIS
+    agent. That second check is the tenancy boundary on the ingest side: agent
+    credentials are per-agent and an MSP's agents sit in different customers'
+    networks, so without it any agent could post a body for any other agent's
+    request and have it rendered to an operator as that customer's device. A
+    request belonging to someone else is a plain 404, never a 403 -- the same
+    rule the driver-package download follows, so an id cannot be probed.
+
+    WHY A COMPLETED REQUEST IS NOT RE-WRITABLE
+    ------------------------------------------
+    Commands are delivered at-least-once, so a duplicate result is expected
+    rather than exceptional. The first answer wins and later ones are
+    acknowledged and dropped: the alternative is an operator reading a captured
+    page while a second delivery replaces it underneath them.
+
+    WHAT IS NOT ACCEPTED
+    --------------------
+    The body is bounded again here even though the agent bounds it. The agent is
+    the party this endpoint is defending against as much as it is defending the
+    agent -- a compromised or simply old agent must not be able to put an
+    unbounded blob in the database, and re-checking costs one comparison.
+    """
+    from central.remote import MAX_BODY_BYTES
+
+    touch_heartbeat(agent)
+    req = db.get(m.RemoteRequest, request_id)
+    if req is None or req.agent_id != agent.id:
+        db.commit()
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "No such remote request")
+    if req.status not in (m.RemoteRequestStatus.pending, m.RemoteRequestStatus.sent):
+        db.commit()
+        return {"accepted": False, "reason": "already answered"}
+
+    body = payload.body
+    if body is not None and len(body.encode("utf-8", "replace")) > MAX_BODY_BYTES:
+        db.commit()
+        # 413 by number: starlette renamed the constant
+        # (HTTP_413_REQUEST_ENTITY_TOO_LARGE -> HTTP_413_CONTENT_TOO_LARGE) and
+        # emits a DeprecationWarning for the old spelling while older pinned
+        # versions lack the new one. The integer is stable across both.
+        raise HTTPException(413, f"body exceeds the {MAX_BODY_BYTES}-byte cap")
+
+    services.apply_remote_result(db, req, payload)
+    db.commit()
+    return {"accepted": True}
 
 
 @router.get("/commands", response_model=list[s.CommandOut])

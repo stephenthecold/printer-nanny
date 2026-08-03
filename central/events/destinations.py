@@ -122,13 +122,19 @@ def _refuse_unless_allowed(ip) -> Optional[str]:
     return None
 
 
-def _normalise(ip):
+def normalise_address(ip):
     """Fold an IPv4-mapped IPv6 address down to its IPv4 form.
 
     ``::ffff:127.0.0.1`` is a loopback address wearing IPv6 clothing;
     ``IPv6Address.is_loopback`` is False for it, so without this the classifier
     below would read it as ordinary and let it through under a setting that only
     ever meant to allow real IPv6.
+
+    Public because it is not only ``classify``'s business: any caller that asks
+    a question ``classify`` does not answer -- ``central.remote`` refuses
+    loopback outright, which ``classify`` deliberately permits -- has to ask it
+    of the SAME address this does, or the two disagree on exactly the spelling
+    that was invented to make them disagree.
     """
     mapped = getattr(ip, "ipv4_mapped", None)
     return mapped if mapped is not None else ip
@@ -137,7 +143,7 @@ def _normalise(ip):
 def classify(address: str, *, allow_private: bool) -> Optional[str]:
     """Why this literal IP is refused, or None if it is acceptable."""
     try:
-        ip = _normalise(ipaddress.ip_address(address))
+        ip = normalise_address(ipaddress.ip_address(address))
     except ValueError:
         return None  # Not an IP literal; the caller resolves the name instead.
     reason = _refuse_always(ip)

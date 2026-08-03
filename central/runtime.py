@@ -381,6 +381,36 @@ SPECS: List[Spec] = [
          "collector really looks gone and the standby is alive, and audits it "
          "as subnet.collector_takeover. A primary that comes back does NOT "
          "reclaim the subnet either way; that is always an operator's decision."),
+    # Remote hands. The read proxy and the write channel are separate settings
+    # because they are separate risks: a GET to a device's own web page is
+    # something the Brother provider already does on every poll, while an SNMP
+    # SET changes the device. So reads ship ON and writes ship OFF, and turning
+    # writes on is an explicit, audited decision that still does not make any
+    # single device writable -- each one has to pass its own capability probe.
+    Spec("remote.enabled", "bool", "Remote hands",
+         "Allow viewing a device's web page", True,
+         "Lets an operator ask the site agent to fetch one page from a printer's "
+         "embedded web server and show it back, isolated. Read-only by "
+         "construction: no write ever travels this path. Off disables the whole "
+         "feature, writes included."),
+    Spec("remote.allow_writes", "bool", "Remote hands",
+         "Allow write actions on devices", False,
+         "Off (the default) means every device is read-only however capable it "
+         "is. On enables the named write actions -- set location / contact / "
+         "name, and restart -- but ONLY on devices that have passed the "
+         "capability check. A device is never assumed writable from its brand "
+         "or model, and an operator cannot pin one writable; they can only pin "
+         "one read-only."),
+    Spec("remote.min_interval_seconds", "int", "Remote hands",
+         "Minimum seconds between requests to one printer", 15,
+         "Rate limit, per printer. Stops a stuck page or an impatient refresh "
+         "turning the proxy into a scanner aimed at a customer's device. 0 "
+         "disables the interval check (the outstanding-request cap still applies)."),
+    Spec("remote.max_open_per_printer", "int", "Remote hands",
+         "Maximum unanswered requests per printer", 3,
+         "Commands are pulled on the agent's heartbeat, so an unbounded backlog "
+         "is work the agent will do minutes after anyone wanted it. 0 disables "
+         "this cap."),
     Spec("onboarding.apply_defaults", "bool", "Onboarding defaults",
          "Apply defaults to new clients", True,
          "When a client is created through Onboard, give it the starting alert "
@@ -458,8 +488,8 @@ SETTINGS_GROUPS: "Dict[str, tuple]" = {
     "polling": ("Polling & SNMP", ["Polling", "SNMP defaults", "Data retention"]),
     "auth": ("Authentication",
              ["Single sign-on (OIDC)", "SCIM provisioning", "Directory sync"]),
-    "agents": ("Agents", ["Agent install", "Collector redundancy", "Workstations",
-                          "Onboarding defaults"]),
+    "agents": ("Agents", ["Agent install", "Collector redundancy", "Remote hands",
+                          "Workstations", "Onboarding defaults"]),
 }
 DEFAULT_SETTINGS_GROUP = "branding"
 

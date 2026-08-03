@@ -172,6 +172,41 @@ class AgentConfigOut(BaseModel):
     subnets: list[AgentSubnetConfig]
 
 
+class RemoteResultIn(BaseModel):
+    """What an agent reports back after carrying out one remote-hands request.
+
+    Everything here originates on a device on a customer LAN, so every field is
+    bounded at the schema before it reaches a column, and the two that are pure
+    device text (``content_type`` and ``body``) are the reason the render route
+    exists. ``ok`` is separate from ``http_status`` for the same reason
+    ``ChannelResult.sent`` is separate from ``ok``: a device answering 401 is a
+    request that *succeeded* and an answer the operator needs to see, while a
+    connection refused is a request that did not happen at all.
+    """
+
+    ok: bool
+    # A stated reason when ok is False. Truncated here rather than at the column
+    # so an over-long transport error is a clean 422 to the agent, not a silent
+    # cut on the way into the database.
+    error: Optional[str] = Field(default=None, max_length=600)
+
+    # --- fetch
+    http_status: Optional[int] = Field(default=None, ge=100, le=599)
+    content_type: Optional[str] = Field(default=None, max_length=120)
+    body: Optional[str] = None            # length checked in the route, against MAX_BODY_BYTES
+    body_bytes: Optional[int] = Field(default=None, ge=0)
+    truncated: bool = False
+
+    # --- probe / write
+    #: The probe's verdict, as an observation rather than a policy: "the device
+    #: accepted a SET" / "it refused one". Central maps it onto RemoteCapability.
+    writable: Optional[bool] = None
+    #: A write reports success only when the read-back agrees. None means "there
+    #: was nothing readable to compare" (a restart), never "we did not check".
+    verified: Optional[bool] = None
+    detail: Optional[dict] = None
+
+
 # --------------------------------------------------------------------------- #
 # Management CRUD
 # --------------------------------------------------------------------------- #
@@ -363,6 +398,19 @@ COMMAND_PAYLOAD_KEYS = {
     m.CommandType.update_agent: frozenset(),
 }
 
+#: Command types this API will not construct at all, whatever the payload.
+#: Each remote-hands command has to clear a capability gate, a per-printer rate
+#: limit and an address check that only ``central/dashboard/remote.py`` applies,
+#: and it carries a ``request_id`` naming a row this API cannot create. An
+#: empty-payload command of one of these types would otherwise sail through the
+#: key check above (no keys, so no unknown keys) and reach an agent as a
+#: malformed instruction. Refused by TYPE, not by payload shape.
+COMMAND_TYPES_NOT_ENQUEUEABLE = frozenset({
+    m.CommandType.remote_fetch,
+    m.CommandType.remote_probe,
+    m.CommandType.remote_write,
+})
+
 
 class CommandIn(BaseModel):
     agent_id: int
@@ -371,6 +419,12 @@ class CommandIn(BaseModel):
 
     @model_validator(mode="after")
     def _check_payload(self) -> CommandIn:
+        if self.type in COMMAND_TYPES_NOT_ENQUEUEABLE:
+            raise ValueError(
+                f"{self.type.value} is not enqueueable through this API: remote-hands "
+                "actions are created from the printer page, where the capability, "
+                "rate-limit and address checks live"
+            )
         keys = set(self.payload or {})
         if "pip_source" in keys:
             # Rejected loudly rather than quietly stripped: a request naming its

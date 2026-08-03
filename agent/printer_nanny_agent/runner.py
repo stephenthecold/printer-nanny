@@ -552,6 +552,67 @@ async def poll_one_target(
     return {"polled": 1, "applied": applied, "unreachable": 0}
 
 
+async def handle_remote(
+    client: CentralClient,
+    backend: SnmpBackend,
+    config: AgentConfig,
+    ctype: str,
+    payload: dict,
+) -> None:
+    """Carry out one remote-hands command and report the outcome, always.
+
+    EVERY PATH REPORTS. A refusal, a transport failure, an unexpected exception
+    -- each comes back as a result with a stated reason. An operator watching a
+    request that never resolves cannot tell "the agent declined" from "the agent
+    is gone", and this codebase has paid for absence-read-as-something before.
+
+    Deliberately NOT gated on the collection lease. The lease governs who
+    *collects*, because two collectors interleaving readings corrupt the page
+    series that billing reads. A remote request produces no reading, and central
+    names exactly one agent per request, so there is nothing here for a lease to
+    prevent -- gating on it would only mean a displaced primary silently
+    ignoring an operator's button.
+    """
+    from printer_nanny_agent import remote as rh
+
+    request_id = payload.get("request_id")
+    if not request_id:
+        log.warning("%s command with no request_id; nothing to report to", ctype)
+        return
+
+    try:
+        if ctype == "remote_fetch":
+            result = await rh.fetch_page(payload)
+        else:
+            ip = payload.get("ip")
+            # Resolve this printer's own SNMP credentials the same way an
+            # on-demand poll does, so a v3 subnet or a per-printer community is
+            # honoured here exactly as it is during polling. Falling back to the
+            # agent defaults would make a probe report "read-only" for a device
+            # that is merely authenticating differently.
+            try:
+                targets = await client.get_targets()
+            except Exception as exc:  # noqa: BLE001 - central down; use local config
+                log.warning("could not fetch targets for remote command: %s", exc)
+                targets = []
+            target = next((t for t in targets if t.get("ip") == ip), {"ip": ip})
+            params = _params_for_target(target, config)
+            if ctype == "remote_probe":
+                result = await rh.probe_writable(backend, ip, params)
+            elif ctype == "remote_write":
+                result = await rh.perform_write(backend, payload, params)
+            else:  # pragma: no cover - guarded by the dispatcher above
+                result = {"ok": False, "error": "unknown remote command %s" % ctype}
+    except Exception as exc:  # noqa: BLE001 - a refusal or a bug must still report
+        result, why = rh.result_for_exception(exc)
+        log.warning("remote command %s %s: %s", ctype, why, exc)
+
+    try:
+        await client.post_remote_result(int(request_id), result)
+    except Exception as exc:  # noqa: BLE001 - central unreachable; the request expires
+        log.warning("could not report remote result #%s: %s", request_id, exc)
+
+
 async def handle_commands(
     client: CentralClient,
     backend: SnmpBackend,
@@ -582,6 +643,8 @@ async def handle_commands(
                 await poll_one_target(client, backend, config, ip, spool, leases)
             else:
                 log.warning("poll_printer command #%s missing 'ip' in payload", cmd.get("id"))
+        elif ctype in ("remote_fetch", "remote_probe", "remote_write"):
+            await handle_remote(client, backend, config, ctype, cmd.get("payload") or {})
         elif ctype == "update_config":
             # Config is file-managed; log and rely on the operator/automation to apply.
             log.info("update_config requested (payload: %s) -- apply via config file", cmd.get("payload"))
