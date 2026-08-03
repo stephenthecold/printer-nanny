@@ -86,6 +86,63 @@ inline-flex items-center rounded text-slate-600 hover:text-slate-900
 {{ sizes.get(size, sizes['md']) }} {{ _focus }} {{ extra }}
 {%- endmacro %}
 
+{#
+  ------------------------------------------------------------------- pager -#}
+{#
+  Prev / "Page N of M" / Next for an OFFSET-paged list.
+
+  `result` is the envelope `queries.search_printers` / `queries.audit_page`
+  return: {page, pages, per_page, total, offset, q}. `base` is the path, `label`
+  names WHAT is being paged -- "printer results", "audit entries" -- because a
+  screen reader reading links out of context gets "Next page" from every pager
+  on the site otherwise, and this app renders more than one.
+
+  It exists as a macro rather than as markup copied per page for the reason the
+  whole component layer exists: the first two pagers written by hand would agree,
+  and the third would not. The disabled edges are <span>, not a disabled <a>:
+  there is no such thing, and an <a href="#"> at page 1 is a keyboard trap that
+  silently reloads the page.
+
+  Renders nothing at all for a single page -- a pager under a 3-row table is
+  noise, and `aria-label`ing it does not make it less so.
+
+  `label` is interpolated bare, with no `|capitalize`. Tailwind's scanner reads
+  templates as text and cannot tell a Jinja filter from a class name, so
+  `{{ x|capitalize }}` put a live `.capitalize` rule in the vendored stylesheet
+  -- dead weight nobody would ever find. Prose in a template has the same
+  effect; keep both out of the scanned files where it costs nothing to.
+#}
+{% macro pager(result, base, label, extra_params='') -%}
+{%- if result.pages > 1 -%}
+{%- set qs = ('q=' ~ (result.q or '')|urlencode ~ (('&' ~ extra_params) if extra_params else '')) -%}
+<nav aria-label="Pages of {{ label }}"
+     class="flex items-center justify-between gap-3 px-4 py-3 border-t">
+  {% if result.page > 1 %}
+  <a rel="prev" href="{{ base }}?{{ qs }}&amp;page={{ result.page - 1 }}"
+     aria-label="Previous page of {{ label }}" class="{{ btn('neutral', 'sm') }}">← Previous</a>
+  {% else %}
+  <span class="text-xs text-slate-400">← Previous</span>
+  {% endif %}
+  <span class="text-xs text-slate-500 tabular-nums">Page {{ result.page }} of {{ result.pages }}</span>
+  {% if result.page < result.pages %}
+  <a rel="next" href="{{ base }}?{{ qs }}&amp;page={{ result.page + 1 }}"
+     aria-label="Next page of {{ label }}" class="{{ btn('neutral', 'sm') }}">Next →</a>
+  {% else %}
+  <span class="text-xs text-slate-400">Next →</span>
+  {% endif %}
+</nav>
+{%- endif -%}
+{%- endmacro %}
+
+{#- "Showing 101–200 of 100,000" -- the count a pager alone does not give. -#}
+{% macro page_range(result, noun) -%}
+{%- if result.total -%}
+<p class="text-xs text-slate-500 tabular-nums">
+  Showing {{ result.offset + 1 }}–{{ result.offset + result.rows|length }} of {{ result.total }} {{ noun }}
+</p>
+{%- endif -%}
+{%- endmacro %}
+
 {#- ------------------------------------------------------------------ cards -#}
 {#
   pad='none' is for cards whose child is a full-bleed table.

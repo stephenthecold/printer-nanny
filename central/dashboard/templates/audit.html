@@ -1,6 +1,6 @@
 {% extends "base.html" %}
-{% from "_components.html" import badge, btn, card_cls, empty_row, field, table_cls,
-        table_wrap, td_cls, th_cls, thead_cls, tr_cls %}
+{% from "_components.html" import badge, btn, card_cls, empty_row, field, page_range,
+        pager, table_cls, table_wrap, td_cls, th_cls, thead_cls, tr_cls %}
 {% block title %}Audit · {{ app.name or 'Printer Nanny' }}{% endblock %}
 {% block body %}
 <div class="flex items-end justify-between mb-4 flex-wrap gap-2">
@@ -17,10 +17,15 @@
 <p class="text-sm text-slate-500 mb-4">
   Who did what, from where. Logins (including failures), settings changes,
   user / agent / subnet / printer management, approvals, and alert actions.
-  Latest 200 entries{% if q %} matching "{{ q }}"{% endif %}.
+  {# The whole trail, paged -- not "the latest 200". ?q= narrows in SQL across
+     every row, so a search finds an entry however old it is. #}
+  {{ result.total }} entr{{ 'y' if result.total == 1 else 'ies' }}{% if q %} matching “{{ q }}”{% endif %}.
 </p>
 
 <section class="{{ card_cls('none') }}">
+  <div class="flex items-center justify-end gap-3 flex-wrap px-4 py-2 border-b">
+    {{ page_range(result, 'entries') }}
+  </div>
   <div class="{{ table_wrap() }}">
     <table class="{{ table_cls() }}">
       <thead class="{{ thead_cls() }}">
@@ -52,5 +57,6 @@
       </tbody>
     </table>
   </div>
+  {{ pager(result, '/manage/audit', 'audit entries') }}
 </section>
 {% endblock %}

@@ -225,6 +225,34 @@ def test_audit_page_renders_rows_and_filters(db):
     assert "user:alice" not in filtered
 
 
+def test_audit_page_is_paginated_not_truncated(db):
+    """The page shipped as ``LIMIT 200`` with no offset, so on any install with
+    real history the overwhelming majority of the trail was unreachable from
+    anywhere in the product -- and looked complete while being so. Row 1 of 250
+    must be reachable through the UI, not merely present in the table."""
+    admin = _mk_user(db, "admin", m.UserRole.admin)
+    for i in range(250):
+        record(db, None, admin, "printer.approve", target=f"printer:{i}",
+               detail=f"entry-{i:04d}")
+    db.commit()
+    cli = _login("admin")
+
+    first = cli.get("/manage/audit", follow_redirects=False).text
+    assert "entry-0249" in first          # newest
+    assert "entry-0000" not in first      # ...and the oldest is NOT on page 1
+    assert 'aria-label="Next page of audit entries"' in first
+    assert "Page 1 of 3" in first
+
+    last = cli.get("/manage/audit?page=3", follow_redirects=False).text
+    assert "entry-0000" in last, "the oldest entry is unreachable"
+    assert 'aria-label="Previous page of audit entries"' in last
+
+    # A filter narrows the whole trail, and its own pages are the matches'.
+    filtered = cli.get("/manage/audit?q=printer:1&page=2", follow_redirects=False)
+    assert filtered.status_code == 200
+    assert "printer.approve" in filtered.text
+
+
 # ---------- helper robustness ----------
 
 def test_record_never_raises_on_bad_input(db):

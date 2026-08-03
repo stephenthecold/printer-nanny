@@ -22,6 +22,7 @@ from starlette.background import BackgroundTask
 
 from central import branding as branding_lib
 from central import models as m
+from central import queries
 from central import services
 from central import suppression
 from central.audit import record
@@ -1944,30 +1945,26 @@ def users_home(request: Request, db: Session = Depends(get_db)):
 # Audit trail (admin only)
 # --------------------------------------------------------------------------- #
 @router.get("/audit", response_class=HTMLResponse)
-def audit_home(request: Request, q: str = "", db: Session = Depends(get_db)):
-    """Latest audit rows, newest first. ``?q=`` filters by substring across
-    action / target / username -- enough for 'what did tech2 touch last week'
-    without building a query designer."""
+def audit_home(
+    request: Request, q: str = "", page: int = 1, db: Session = Depends(get_db)
+):
+    """The audit trail, newest first, paginated. ``?q=`` filters by substring
+    across action / target / username -- enough for 'what did tech2 touch last
+    week' without building a query designer.
+
+    Paginated rather than capped: this used to be ``LIMIT 200`` with no offset,
+    so on any install with real history the overwhelming majority of the trail
+    could not be reached from anywhere in the product. Filtering happens in SQL
+    ahead of the LIMIT (see ``queries.audit_page``), so a filter searches the
+    whole trail and not just the page you were already on.
+    """
     admin = _admin(request, db)
     if admin is None:
         return _redirect("/login" if _user(request, db) is None else "/")
-    stmt = select(m.AuditLog).order_by(m.AuditLog.ts.desc()).limit(200)
-    if q.strip():
-        needle = f"%{q.strip()}%"
-        stmt = (
-            select(m.AuditLog)
-            .where(
-                m.AuditLog.action.ilike(needle)
-                | m.AuditLog.target.ilike(needle)
-                | m.AuditLog.username.ilike(needle)
-            )
-            .order_by(m.AuditLog.ts.desc())
-            .limit(200)
-        )
-    rows = list(db.scalars(stmt))
+    result = queries.audit_page(db, q=q, page=page)
     return _tpl(
         request, "audit.html", db,
-        user=admin, rows=rows, q=q.strip(),
+        user=admin, rows=result["rows"], q=result["q"], result=result,
     )
 
 
