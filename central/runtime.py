@@ -241,6 +241,22 @@ SPECS: List[Spec] = [
     Spec("polling.poll_interval_seconds", "int", "Polling", "Poll interval (seconds)", 300),
     Spec("polling.discovery_interval_seconds", "int", "Polling", "Discovery interval (seconds)", 3600),
     Spec("polling.heartbeat_interval_seconds", "int", "Polling", "Heartbeat interval (seconds)", 60),
+    # Dashboard auto-refresh -- the BROWSER's poll cadence, which is why it sits
+    # beside the agent's. Only the "data as of" indicator refreshes on it, never
+    # a whole page, so an open NOC screen re-asks one cheap question rather than
+    # re-running the fleet queries.
+    Spec("dashboard.autorefresh_enabled", "bool", "Dashboard",
+         "Auto-refresh the freshness indicator", True,
+         "Keeps the 'data as of' strip on fleet pages current without a reload. "
+         "Turn it off and the strip still reports the true age of the data at "
+         "the moment the page was loaded, and the age still counts up in the "
+         "browser — it just stops re-checking the server for newer readings."),
+    Spec("dashboard.autorefresh_seconds", "int", "Dashboard",
+         "Auto-refresh interval (seconds)", 60,
+         "Clamped to 15–3600. There is nothing to gain below the SNMP poll "
+         "interval above (300s by default): a faster browser refresh cannot "
+         "surface a reading the agents have not taken yet, it only re-asks the "
+         "same question once per open tab."),
     # SNMP defaults (pushed to agents)
     Spec("snmp.community", "str", "SNMP defaults", "Community", "public"),
     Spec("snmp.version", "str", "SNMP defaults", "Version (1 / 2c)", "2c"),
@@ -455,7 +471,11 @@ SETTINGS_GROUPS: "Dict[str, tuple]" = {
                ["Alerts", "Supplies (reorder)", "Reports", "ESG / Sustainability"]),
     # Retention lives here because it is the other half of polling: how often we
     # ask, and how long we keep what comes back.
-    "polling": ("Polling & SNMP", ["Polling", "SNMP defaults", "Data retention"]),
+    # "Dashboard" is here because it is the third half of the same question:
+    # how often we ask the devices, how long we keep the answers, and how often
+    # the browser re-checks how old they are.
+    "polling": ("Polling & SNMP",
+                ["Polling", "Dashboard", "SNMP defaults", "Data retention"]),
     "auth": ("Authentication",
              ["Single sign-on (OIDC)", "SCIM provisioning", "Directory sync"]),
     "agents": ("Agents", ["Agent install", "Collector redundancy", "Workstations",

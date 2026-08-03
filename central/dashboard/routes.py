@@ -40,6 +40,122 @@ def _forbidden_client(user, client_id) -> bool:
     return user.role == m.UserRole.client_readonly and user.client_id != client_id
 
 
+# --- "Data as of ..." freshness strip ---------------------------------------- #
+#: Path the strip polls. One constant so the route, the middleware that keeps it
+#: from rolling the session, and every page's hx-get can never disagree.
+FRESHNESS_PATH = "/fragments/freshness"
+
+
+def _scope_label(db: Session, client_id) -> str:
+    """"Fleet", or the client's own name when the view is scoped to one."""
+    if client_id is None:
+        return "Fleet"
+    client = db.get(m.Client, client_id)
+    return client.name if client is not None else "Fleet"
+
+
+def _freshness_ctx(request: Request, db: Session, user, client_id=None, scope_label="Fleet"):
+    """Context for base.html's freshness strip, or ``{}`` if it can't be measured.
+
+    Added to every page that renders fleet state. Pages that show no device
+    state (settings, users, the audit log) deliberately don't get it: a "data as
+    of" stamp on a page whose data is not time-sensitive is noise, and it would
+    cost those pages three aggregates apiece for nothing.
+
+    Returning ``{}`` on failure is the safe direction -- ``fleet_freshness``
+    already swallows its own errors, and a freshness indicator that 500s the
+    page it exists to qualify would be a remarkable own goal.
+    """
+    from central.freshness import fleet_freshness, refresh_seconds
+
+    fresh = fleet_freshness(db, client_id=client_id, scope_label=scope_label, user=user)
+    if fresh is None:
+        return {}
+    endpoint = FRESHNESS_PATH
+    if client_id is not None:
+        endpoint = f"{FRESHNESS_PATH}?client_id={int(client_id)}"
+    return {
+        "freshness": fresh,
+        "poll_seconds": refresh_seconds(db),
+        "fresh_endpoint": endpoint,
+    }
+
+
+#: htmx cancels an element's polling when a response carries this status. Used
+#: for every terminal condition -- signed out, or a scope that no longer
+#: resolves -- so a dead poll stops asking instead of hammering on, and so a
+#: session that expired never gets the whole login page swapped into a 2cm strip.
+HTMX_STOP_POLLING = 286
+
+
+@router.get(FRESHNESS_PATH, response_class=HTMLResponse)
+def freshness_fragment(request: Request, db: Session = Depends(get_db)):
+    """Re-render just the freshness strip.
+
+    Cheap by construction: three one-row aggregates, no nav count, no page
+    queries, no template inheritance. This is what an open NOC tab re-asks on a
+    timer, so it must stay that way -- anything added here is multiplied by
+    every open tab of every operator.
+
+    It writes nothing. No audit row (a passive read on a timer would bury the
+    audit log in noise and drown the events that matter), no session mutation,
+    and -- see ``central.main`` -- no session cookie refresh either, so an
+    unattended screen still times out on schedule rather than being kept alive
+    forever by its own auto-refresh.
+
+    Tenancy: a client_readonly user's scope comes from their own row and the
+    ``client_id`` query parameter is ignored outright, so the poll cannot be
+    pointed at another tenant by editing a URL.
+    """
+    from central.freshness import fleet_freshness, refresh_seconds
+
+    user = _user(request, db)
+    if user is None:
+        return _stop_polling(request, "Signed out — reload the page to sign in again.")
+
+    readonly = user.role == m.UserRole.client_readonly
+    if readonly:
+        client_id = user.client_id
+        if client_id is None:
+            return _stop_polling(request, "Reload the page.")
+    else:
+        raw = (request.query_params.get("client_id") or "").strip()
+        try:
+            client_id = int(raw) if raw else None
+        except ValueError:
+            return _stop_polling(request, "Reload the page.")
+
+    scope_label = "Fleet"
+    if client_id is not None:
+        client = db.get(m.Client, client_id)
+        if client is None:
+            # The page above this strip would have redirected; stop polling and
+            # let a reload take the operator wherever they now belong.
+            return _stop_polling(request, "Reload the page.")
+        scope_label = client.name
+
+    fresh = fleet_freshness(db, client_id=client_id, scope_label=scope_label, user=user)
+    if fresh is None:
+        return _stop_polling(request, "Freshness unavailable — reload the page.")
+    endpoint = FRESHNESS_PATH
+    if client_id is not None:
+        endpoint = f"{FRESHNESS_PATH}?client_id={int(client_id)}"
+    return _templates.TemplateResponse(
+        request,
+        "_freshness.html",
+        {"freshness": fresh, "poll_seconds": refresh_seconds(db),
+         "fresh_endpoint": endpoint},
+    )
+
+
+def _stop_polling(request: Request, message: str) -> HTMLResponse:
+    """A terminal strip that replaces itself and cancels its own timer."""
+    return _templates.TemplateResponse(
+        request, "_freshness_stopped.html", {"message": message},
+        status_code=HTMX_STOP_POLLING,
+    )
+
+
 def _render(
     request: Request, template: str, db: Optional[Session] = None, **ctx
 ) -> HTMLResponse:
@@ -160,6 +276,9 @@ def overview(request: Request, db: Session = Depends(get_db)):
         rollup=rollup,
         recent_activity=queries.recent_activity(db, 12),
         printer_label=_printer_label,
+        # The overview is the screen most likely to be left open on a wall, and
+        # the one whose green tiles are most readily believed.
+        **_freshness_ctx(request, db, user),
     )
 
 
@@ -229,6 +348,11 @@ def customer_portal(request: Request, db: Session = Depends(get_db)):
         urgency_now=reorder_mod.URGENCY_NOW,
         printer_label=_printer_label,
         portal_flash=request.session.pop("portal_flash", None),
+        # Scoped to this client, and labelled with their own name rather than
+        # "Fleet" -- the portal is the one surface where "the fleet" means
+        # theirs. This is also the only view whose reader is never shown the
+        # stalled-worker banner, which is why freshness.warn_worker exists.
+        **_freshness_ctx(request, db, user, client_id=client.id, scope_label=client.name),
     )
 
 
@@ -380,6 +504,7 @@ def client_detail(client_id: int, request: Request, db: Session = Depends(get_db
         site_stats=site_stats,
         client_stats=client_stats,
         printer_label=_printer_label,
+        **_freshness_ctx(request, db, user, client_id=client.id, scope_label=client.name),
     )
 
 
@@ -435,6 +560,13 @@ def printer_search(request: Request, db: Session = Depends(get_db)):
         result=result,
         scoped_to_client=readonly,
         printer_label=_printer_label,
+        # Same scoping the search itself uses: a client_readonly user's strip
+        # counts their own fleet, never everyone's.
+        **_freshness_ctx(
+            request, db, user,
+            client_id=user.client_id if readonly else None,
+            scope_label=_scope_label(db, user.client_id if readonly else None),
+        ),
     )
 
 
@@ -529,6 +661,10 @@ def supplies_reorder(request: Request, db: Session = Depends(get_db)):
         clients=clients,
         selected_client_id=selected_id,
         urgency_now=reorder_mod.URGENCY_NOW,
+        # A reorder list computed from supply levels nobody has refreshed since
+        # yesterday is exactly as wrong as a green fleet that is on fire.
+        **_freshness_ctx(request, db, user, client_id=selected_id,
+                         scope_label=_scope_label(db, selected_id)),
     )
 
 
@@ -583,6 +719,8 @@ def security_posture(request: Request, db: Session = Depends(get_db)):
         flag_meta=queries.POSTURE_FLAG_META,
         grade_meta=queries.SNMP_GRADE_META,
         printer_label=_printer_label,
+        **_freshness_ctx(request, db, user, client_id=selected_client_id,
+                         scope_label=_scope_label(db, selected_client_id)),
     )
 
 
@@ -714,6 +852,10 @@ def alerts_inbox(request: Request, db: Session = Depends(get_db)):
     return _render(
         request, "alerts.html", db=db, user=user, alerts=rows,
         undelivered=queries.undelivered_notifications(db),
+        # An empty alerts inbox is the most reassuring screen in the product and
+        # the one most worth qualifying: "no open alerts" over four-hour-old
+        # readings means nobody has looked, not that nothing is wrong.
+        **_freshness_ctx(request, db, user),
     )
 
 
