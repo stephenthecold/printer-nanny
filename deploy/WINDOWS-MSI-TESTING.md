@@ -446,22 +446,31 @@ learn that in one trial than after three hours.
 the replay server here, the spooler there -- and how you reach the Windows box
 (WinRM, SSH, a shared folder) is site-specific, so no version of it in this repo
 could be honestly claimed to work. The contract is small: read the attribute names
-from stdin, serve them with `ipp_replay.py serve ... --from good.ipp <names>` and
-`printer-uuid=$PN_TRIAL_UUID`, provision the queue, print, poll, and emit
+from stdin, serve them with `ipp_replay.py serve ... --from good.ipp <names>`,
+`printer-uuid=$PN_TRIAL_UUID` and `printer-make-and-model=$PN_TRIAL_IDENTITY`,
+provision the queue, print, poll, and emit
 
     VERDICT: PASS | FAIL | INDETERMINATE
     QUERIES: <Get-Printer-Attributes seen by the replay server>
-    IDENTITY: <printer-make-and-model actually served>
+    IDENTITY: <printer-make-and-model read back from the server over IPP>
 
 Each trial must **tear the queue down and mint a fresh UUID** -- Windows keys IPP
 devices on `printer-uuid`, and a reused one is answered from cache.
+
+`deploy/WINDOWS-IPP-BISECT-PROMPT.md` is the operator's brief for that run: the
+rig, the capture commands, the oracle step by step, and what the 1-minimal set
+does and does not license you to conclude. It is a brief, not a record -- the
+search has not been run.
 
 **The third outcome is the point.** `INDETERMINATE` exists so that "the job had
 not finished yet", "the replay server died and the old config kept serving" and
 "Windows never asked us anything" cannot be recorded as FAIL. The driver retries
 such a trial and then **stops the whole run**; it never guesses. Coercing that
-case into a verdict is precisely what invalidated the earlier attempt, and
-`QUERIES: 0` is forced to INDETERMINATE however the oracle voted.
+case into a verdict is precisely what invalidated the earlier attempt, so two of
+the three are refused structurally rather than by discipline: `QUERIES: 0` and an
+`IDENTITY` that is not the `$PN_TRIAL_IDENTITY` this trial minted are both forced
+to INDETERMINATE however the oracle voted. Only the fixed-wait trap is left to
+the oracle, because only the oracle can see how long a job was given.
 
 ### The harness lied three times before it told the truth
 
@@ -474,7 +483,10 @@ Every one of these produced a confident, wrong answer. Any runner around
    `Address already in use`, dies in the background, and the *previous*
    configuration keeps serving -- so results get attributed to the wrong config.
    Wait for the port to close, check the log for a traceback, then confirm over
-   IPP that the server answers with the identity you set.
+   IPP that the server answers with the identity you set. Under `ipp_bisect.py`
+   that identity is `$PN_TRIAL_IDENTITY`, minted fresh per trial, and a trial
+   reporting any other one is refused -- read it back from the server rather
+   than echoing the variable, or the check passes while testing nothing.
 3. **Confirm the client actually queried you.** A run where the replay server saw
    zero `Get-Printer-Attributes` is a verdict about a cached device. Windows keys
    devices on `printer-uuid`; use a fresh one per run.
