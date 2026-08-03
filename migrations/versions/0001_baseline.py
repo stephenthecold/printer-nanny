@@ -9,6 +9,7 @@ from alembic import op
 
 from central.db import Base
 import central.models  # noqa: F401  (register all tables on Base.metadata)
+from migrations.guard import refuse_if_populated
 
 revision = "0001_baseline"
 down_revision = None
@@ -23,4 +24,11 @@ def upgrade() -> None:
 
 
 def downgrade() -> None:
-    Base.metadata.drop_all(bind=op.get_bind())
+    # drop_all goes straight to SQLAlchemy and never reaches op.drop_table, so
+    # the guard env.py installs cannot see it. This is the total-loss step --
+    # every table in the schema -- so it asks explicitly. Reaching it from head
+    # normally trips an earlier revision's guard first; a database stamped at
+    # 0001/0002 with rows in it does not, and that is the case this covers.
+    bind = op.get_bind()
+    refuse_if_populated(bind, *(t.name for t in Base.metadata.sorted_tables))
+    Base.metadata.drop_all(bind=bind)
