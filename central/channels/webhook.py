@@ -64,6 +64,25 @@ class WebhookChannel(NotificationChannel):
         return self.meets_severity(severity)
 
     def build_payload(self, note: Notification) -> dict:
+        """Build the JSON body. Values are carried verbatim, deliberately.
+
+        Every sibling channel escapes what it interpolates, because each one
+        composes a document in a markup language (FreeScout: HTML; Slack: its
+        control-sequence syntax; Teams: HTML *and* Markdown). This channel
+        composes nothing -- the values are discrete JSON string values, and
+        ``httpx(json=…)`` serialises them with ``json.dumps``, which is the
+        complete encoding for that format. There is no template, so there is
+        no injection: a printer_label of ``<img src=x onerror=…>`` arrives as
+        the six-word string it is.
+
+        So do not "harden" this by escaping here. The payload is documented
+        above as a stable shape subscribers parse, and this channel makes no
+        claim about how they render it -- HTML-escaping would corrupt the data
+        for the PSA that stores it or the router that matches on it, and would
+        still be the wrong encoding for the one that does render HTML. That
+        escaping belongs at the subscriber's own output boundary, which is the
+        only place that knows what the boundary is.
+        """
         return {
             "source": "printer-nanny",
             "app": self.setting("app.name", "Printer Nanny") or "Printer Nanny",

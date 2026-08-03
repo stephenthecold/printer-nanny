@@ -24,6 +24,32 @@ from sqlalchemy.orm import Session
 from central.channels.base import ChannelResult, Notification, NotificationChannel
 
 
+def _header_safe(value: object) -> str:
+    """Fold a composed header value onto one line.
+
+    ``EmailMessage`` under ``email.policy.default`` *refuses* a header
+    containing CR or LF -- ``ValueError: Header values may not contain linefeed
+    or carriage return characters`` -- and that refusal is why this channel has
+    no header-injection bug: a title of ``Low toner\\nBcc: attacker@evil`` can
+    never become a second header.
+
+    But refusing is not the same as handling, and the raw value is not operator
+    text. The subject is built from ``alert.title``, which is built from
+    ``printers.model`` -- an SNMP string copied verbatim off the device, and a
+    multi-line ``sysDescr`` is ordinary rather than exotic. Handed through raw,
+    one such printer raises out of ``build_message`` on *every* evaluation:
+    ``dispatch`` catches it as ``unhandled: Header values may not…``, the alert
+    never mails, and the operator gets a stack-trace fragment instead of a
+    low-toner warning -- permanently, for that printer. Collapsing the
+    whitespace delivers the alert and keeps the header single-line, which is
+    what the policy was protecting in the first place.
+
+    Deliberately not applied to ``To``/``From``: those are operator-configured
+    addresses, and silently rewriting an address is worse than refusing it.
+    """
+    return " ".join(str(value).split())
+
+
 class EmailChannel(NotificationChannel):
     type = "email"
 
@@ -49,9 +75,20 @@ class EmailChannel(NotificationChannel):
         return []
 
     def build_message(self, note: Notification) -> EmailMessage:
+        """Build the outgoing message. The body is plain text, deliberately.
+
+        Unlike the FreeScout, Slack and Teams channels, nothing here escapes
+        the interpolated values, and nothing should: ``set_content`` with a
+        ``str`` and no ``add_alternative`` produces a ``text/plain`` part, so
+        there is no markup language for a device string to escape into. A
+        ``printer_label`` of ``<img src=x onerror=…>`` is displayed as those
+        characters. Adding an HTML alternative here would change that in one
+        line and silently reintroduce the whole class -- if that is ever
+        wanted, the HTML part needs its own escaping pass, like FreeScout's.
+        """
         msg = EmailMessage()
         app_name = self.setting("app.name", "Printer Nanny") or "Printer Nanny"
-        msg["Subject"] = f"[{app_name}][{note.severity.upper()}] {note.title}"
+        msg["Subject"] = _header_safe(f"[{app_name}][{note.severity.upper()}] {note.title}")
         msg["From"] = self.config.get("from") or self.setting("smtp.from")
         msg["To"] = ", ".join(self._recipients())
         lines = [note.body, ""]
