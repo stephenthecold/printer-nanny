@@ -155,7 +155,7 @@ enforced; none of them is optional.
   - `mdns.py` — optional Bonjour/DNS-SD discovery (`agent[mdns]` extras).
   - `updater.py` — self-update via `update_agent` command; writes
     `.pn-update-result.json` so the dashboard can show success/failure.
-- `migrations/` — Alembic environment + versions (0001 → 0025). Revision 0001 is
+- `migrations/` — Alembic environment + versions (0001 → 0033). Revision 0001 is
   `Base.metadata.create_all()`, so **the ORM metadata is what builds a fresh DB** —
   an index declared only in a later migration is silently absent on new installs.
   Declare indexes in the model's `__table_args__` and mirror them in the migration.
@@ -163,9 +163,19 @@ enforced; none of them is optional.
   `install-workstation-macos.sh`), sample systemd unit and launchd plists,
   `macos-pkg/` (the `preinstall`/`postinstall` the `.pkg` runs as root — the same
   files that ship, never a second copy), plus `WINDOWS-MSI-TESTING.md` (build +
-  Server 2016→2025 smoke) and `MACOS-CLIENT-TESTING.md` (real-CUPS verification,
-  the `.pkg` procedure, and the outstanding real-Mac smoke).
-- `tests/` — pytest suite (~1725 tests; ~6.5min end-to-end on Postgres-less SQLite).
+  Server 2016→2025 smoke, and the 2026-07-30 real-spooler run with the three
+  defects it found) and `MACOS-CLIENT-TESTING.md` (real-CUPS verification, the
+  `.pkg` procedure, and the 2026-07-30 real-Mac run — done items marked and dated,
+  the rest still open).
+- `tests/` — pytest suite (~1740 tests, serial, on Postgres-less SQLite).
+  **Quote the machine with the number**: ~2.5min on a GitHub `ubuntu-latest`
+  runner, ~6-7min on a 4-vCPU container. A bare figure is unfalsifiable, which
+  is how a run on a *busy* box (9min) gets reported as a regression against a
+  documented one — that happened. ~80% of the wall clock is
+  `create_all`/`drop_all` rebuilding the schema per fixture (measured: 282s of
+  353s across 744 rebuilds), so the total tracks single-core speed and is the
+  first thing to attack if it ever needs to be faster. Password hashing, the
+  obvious suspect, is **1.8%** — measured, after it was assumed.
   `test_compose_deployment.py` / `test_install_update.py` cover the deployment
   contract above; both skip cleanly where the docker CLI is absent.
   `test_macos_deployment.py` does the same for the LaunchDaemon plist and its
@@ -501,12 +511,14 @@ different levels of proof:
   real `pkgbuild`, and — since 2026-07-30 — a real Mac: an actual
   `installer -pkg`, the LaunchDaemon running as root, and a page out of a real
   printer.** See below for exactly which parts, and what is still untouched.
-- **The Windows workstation client has never executed against a real spooler,
-  driver store or console session.** Queue provisioning, driver staging, the
-  default printer, the MSI — every test above `PowerShellRunner` uses a fake,
-  which is exactly the blindness that let tier 1 ship broken for its entire
-  existence. Treat `deploy/WINDOWS-MSI-TESTING.md` as the outstanding work, not as
-  documentation of work already done.
+- **The Windows workstation client has now executed against a real spooler, in
+  the LocalSystem service context, as of 2026-07-30** — and that one run found
+  **three** defects, two of them features that had never worked at all. It is no
+  longer unverified; it is also not proven, because one real printer still cannot
+  be printed to for reasons not yet identified. Everything above
+  `PowerShellRunner` is still a fake in CI.
+  `deploy/WINDOWS-MSI-TESTING.md` now records what ran, what it found, and what
+  is left — read it as both, not as outstanding work alone.
 
 **Why the macOS half sits better, precisely.** Its CUPS logic *is* verified against
 a real scheduler: `scripts/macos_cups_testbed.sh` stands up a throwaway `cupsd` on
@@ -516,8 +528,8 @@ the required end-to-end smoke found a **seventh**, and fixing the third
 *introduced* the seventh — see the conventions above. Two of them made the assigned
 default printer impossible in different ways, and two were the tier-1 bug in CUPS
 clothing (a queue that exists, lists, converges clean and cannot print), which with
-the original Windows one makes three times this codebase has shipped that exact
-failure. Its **`.pkg` is built by Apple's own tooling on a `macos-latest` runner**
+the original Windows one made three times this codebase had shipped that exact
+failure — and the real-spooler run below makes **four**. Its **`.pkg` is built by Apple's own tooling on a `macos-latest` runner**
 (`.github/workflows/macos-pkg.yml`), which confirms the identifier, the payload,
 the scripts and that the enrollment key's `0600` survives the round trip.
 
@@ -550,8 +562,9 @@ than a green log line is that the device's **real supply telemetry came back
 through the queue while it printed** (`marker-levels=0,20,20,20`,
 `toner-low-warning`) — a loopback or synthetic queue cannot produce that — and the
 paper was confirmed by hand. So the tier-1 failure this codebase has now shipped
-three times (a queue that exists, lists, converges clean and cannot print) is
-excluded on macOS by observation rather than by inference.
+four times (a queue that exists, lists, converges clean and cannot print) is
+excluded **on macOS** by observation rather than by inference — which is exactly
+what has not yet been achieved on Windows.
 
 What is **still** unverified: a non-English system locale, fast user switching,
 the login-window case, a directory-bound (AD/Entra) Mac, MDM interaction,
@@ -559,6 +572,57 @@ notarization (needs a Developer ID certificate), Intel hardware, and the
 vendor-driver `pkg` shape with `allow_macos_pkg_install` enabled.
 `deploy/MACOS-CLIENT-TESTING.md` tracks the list, with the done items marked and
 dated.
+
+**And the Windows half has now run on real hardware**, on 2026-07-30: Windows 11
+ARM64 under x64 emulation (the bundled runtime is `python-3.12.10-embed-amd64`
+and there is no ARM64 build), installed with `msiexec /qn`, the service enrolling
+and polling as LocalSystem under NSSM in **session 0** — the context nothing else
+reaches, and the reason all three of these were invisible until now:
+
+- **The assigned default printer had never once applied.** The write to
+  `LegacyDefaultPrinterMode` went through `HKEY_CURRENT_USER` on the stated
+  assumption that impersonation redirects it; HKCU resolves against the
+  **process** token, so in a session-0 service it never leaves SYSTEM's hive. It
+  raised `[WinError 5]`, and because that write runs *before* `SetDefaultPrinter`
+  it took the entire feature down with the shipped setting ON. Fixed with
+  `RegOpenCurrentUser`, which follows the *thread* token. The identical call
+  **succeeds outside the service**, which is precisely why no amount of testing
+  short of a real install could reach it. It is the same defect as the macOS one
+  where the assigned default had never once worked, arrived at by a completely
+  different road.
+- **A queue that passes every check and cannot print** — the **fourth** instance,
+  on the `-IppURL` path that was meant to have ended it, and this time
+  `windows_provision_check.py` had passed against that exact printer minutes
+  earlier. Half of it was ours and is fixed: the disproof was reading a *label*
+  rather than the transport (`Description = "IPP Port"` while
+  `PortMonitor = "WSD Port Monitor"`). The rest is **open** — see below.
+- **The MSI shipped the enrollment key world-readable.** It set no ACL at all, so
+  `icacls` reported `BUILTIN\Users:(I)(RX)` on the file the key was moved into
+  *precisely because* a service command line is readable by any logged-in user.
+  Fixed with a post-processed `LockPermissions` table (SYSTEM + Administrators
+  only); the sibling `install-agent.ps1` had done this correctly all along.
+
+**The open one, stated plainly**, because it is the most important thing on this
+page that is not yet true: a Brother MFC-L8900CDW that the probe marks
+`driverless` accepts a job and discards it in the print processor
+(`0x80004005`, no `id=307`) while reporting `PrinterStatus=Normal` — and the same
+device prints from CUPS over the same IPP endpoint, and from the same Windows box
+over raw 9100. **Three** explanations have been proposed and all three tested and
+killed: the routed hop, a missing `application/pdf`, and `ipp-features-supported`.
+`scripts/ipp_replay.py` is what killed them — capture a device's real
+`Get-Printer-Attributes`, replay it byte-for-byte, change exactly one attribute,
+so a behaviour change is attributable to that attribute and nothing else. What it
+has established is worth more than the hypotheses it disposed of: the failure is
+**fully determined by what the device advertises** (importing 78 non-identity
+attributes from a working device makes it print), and Windows fails while
+**rendering**, before it ever contacts the device — so a probe *could* predict
+this. But it is a combination, neither half of those 78 suffices, and the
+responsible attributes are **not identified**. The `driverless` criterion is
+therefore **deliberately unchanged**: tightening it on the leading hunch would
+have downgraded every working AirPrint-only printer to `driver_required` — vendor
+package or skip — for no benefit whatsoever. And before trusting any result from
+that harness, read its guards: three separate harness bugs each produced a
+confident wrong answer first, and one of them invalidated a whole bisect.
 
 **Print management** (the Printix-shaped half, feature-complete): end users,
 groups, and per-user / per-group printer assignment with a deterministic
