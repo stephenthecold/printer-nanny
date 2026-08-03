@@ -1092,6 +1092,70 @@ FORECAST_MIN_HISTORY_DAYS = 3.0  # ...spanning at least this long (matches RUNWA
 # bound and drags alert latency down with it as a deployment ages. A month is
 # far more than the fit needs (it segments to the current cartridge anyway).
 FORECAST_HISTORY_WINDOW_DAYS = 30
+# The same confidence gate expressed on the PAGES axis. A segment spanning three
+# printed pages has a slope, and it is meaningless -- toner level readings are
+# coarse (many devices report in 1% or 10% steps), so the fit needs enough pages
+# for a real percentage change to have occurred. 50 pages is the floor at which
+# a 1% step is a plausible measurement rather than quantisation noise.
+FORECAST_MIN_PAGES_SPAN = 50.0
+
+
+def _fit_depleting_segment(
+    points: list, min_span: float, refill_tolerance: float = 5.0
+) -> Optional[tuple]:
+    """Least-squares fit of supply level against an increasing axis.
+
+    ``points`` is [(x, level_pct)] where x is any monotonically increasing
+    measure of consumption -- elapsed days for the days-to-empty forecast,
+    cumulative page count for the pages-to-empty one. The maths is identical on
+    both axes, which is exactly why it lives here once: the two forecasts must
+    never be able to disagree about what counts as a refill, a confidence floor,
+    or a depleting series.
+
+    Returns ``(rate_per_x, level_now)`` -- percent consumed per unit of x, and
+    the FITTED level at the last point -- or ``None`` when there is no
+    trustworthy estimate. ``None`` covers: too few points, a segment spanning
+    less than ``min_span``, no variation in x, and a series that is rising or
+    flat rather than depleting.
+
+    A jump UP of more than ``refill_tolerance`` points is a fresh cartridge, and
+    resets the baseline to that index, so a spent cartridge's slope is never
+    averaged against its replacement's.
+    """
+    if len(points) < FORECAST_MIN_POINTS:
+        return None
+    start = 0
+    for i in range(1, len(points)):
+        if points[i][1] > points[i - 1][1] + refill_tolerance:
+            start = i  # refill detected — baseline resets here
+    seg = points[start:]
+    if len(seg) < FORECAST_MIN_POINTS:
+        return None
+
+    # x is re-based on the segment's first point. The fit is invariant to this
+    # shift, but the page-count axis carries absolute meter values (hundreds of
+    # thousands), and squaring those in var_x throws away significant digits.
+    x0 = seg[0][0]
+    xs = [x - x0 for x, _ in seg]
+    ys = [lvl for _, lvl in seg]
+    if xs[-1] - xs[0] < min_span:
+        return None  # not enough history to trust the slope yet
+
+    n = len(seg)
+    mean_x = sum(xs) / n
+    mean_y = sum(ys) / n
+    var_x = sum((x - mean_x) ** 2 for x in xs)
+    if var_x <= 0:
+        return None  # every reading at the same x — no slope
+    cov_xy = sum((x - mean_x) * (y - mean_y) for x, y in zip(xs, ys))
+    slope = cov_xy / var_x  # percent change per unit x (negative when depleting)
+    rate = -slope  # percent consumed per unit x
+    if rate <= 0:
+        return None  # not depleting (rising or flat fit)
+
+    intercept = mean_y - slope * mean_x
+    level_now = intercept + slope * xs[-1]  # fitted level at the latest reading
+    return rate, level_now
 
 
 def forecast_days_to_empty(
@@ -1116,41 +1180,74 @@ def forecast_days_to_empty(
     clean linear series, so legacy expectations are unchanged).
     """
     points = sorted([(t, lvl) for t, lvl in readings if lvl is not None], key=lambda p: p[0])
-    if len(points) < FORECAST_MIN_POINTS:
+    if not points:
         return None
-    start = 0
-    for i in range(1, len(points)):
-        if points[i][1] > points[i - 1][1] + refill_tolerance:
-            start = i  # refill detected — baseline resets here
-    seg = points[start:]
-    if len(seg) < FORECAST_MIN_POINTS:
+    t0 = points[0][0]
+    # x in days since the first reading; y in percent remaining.
+    fit = _fit_depleting_segment(
+        [((t - t0).total_seconds() / 86400.0, lvl) for t, lvl in points],
+        min_span=FORECAST_MIN_HISTORY_DAYS,
+        refill_tolerance=refill_tolerance,
+    )
+    if fit is None:
         return None
-
-    t0 = seg[0][0]
-    # x in days since the segment's first reading; y in percent remaining.
-    xs = [(t - t0).total_seconds() / 86400.0 for t, _ in seg]
-    ys = [lvl for _, lvl in seg]
-    span = xs[-1] - xs[0]
-    if span < FORECAST_MIN_HISTORY_DAYS:
-        return None  # not enough elapsed history to trust the slope yet
-
-    n = len(seg)
-    mean_x = sum(xs) / n
-    mean_y = sum(ys) / n
-    var_x = sum((x - mean_x) ** 2 for x in xs)
-    if var_x <= 0:
-        return None  # all readings at the same instant — no slope
-    cov_xy = sum((x - mean_x) * (y - mean_y) for x, y in zip(xs, ys))
-    slope = cov_xy / var_x  # percent change per day (negative when depleting)
-    rate = -slope  # percent consumed per day
-    if rate <= 0:
-        return None  # not depleting (rising or flat fit)
-
-    intercept = mean_y - slope * mean_x
-    level_now = intercept + slope * xs[-1]  # fitted level at the latest reading
+    rate, level_now = fit
     if level_now <= 0:
         return 0.0  # already projected empty
     return round(level_now / rate, 1)
+
+
+def forecast_pages_to_empty(
+    readings: list, refill_tolerance: float = 5.0
+) -> Optional[float]:
+    """Pages until level→0, fitting supply level against the printer's page meter.
+
+    ``readings`` is [(page_count, level_pct)]. This is deliberately a SEPARATE
+    measure rather than ``days_to_empty * pages_per_day``, because the two answer
+    different questions and the derived version inherits the weakness of the one
+    it is derived from. Days-remaining is volatile -- a quiet week inflates it,
+    a month-end run collapses it. Pages-remaining is a property of the cartridge:
+    "about 400 pages left" means the same thing on a busy device and an idle one,
+    it is directly comparable against the yield a cartridge is sold by, and it
+    does not move when the customer simply stops printing for a fortnight.
+
+    A page meter that goes BACKWARDS is a meter reset or a replaced formatter
+    board, not negative printing; everything before the drop is discarded rather
+    than fitted through, which would otherwise produce a confidently wrong
+    negative consumption rate.
+
+    Returns ``None`` on the same terms as ``forecast_days_to_empty``: an
+    untrustworthy estimate is no estimate. In particular a printer that has not
+    printed since the cartridge went in has no page-based rate at all (no
+    variation in x), which is correct -- not "it will last forever".
+    """
+    # Input arrives in TIME order (that is how the caller reads it), which is what
+    # makes a meter reset detectable at all: sorting by page count first would
+    # silently interleave the post-reset readings among the pre-reset ones and
+    # hide the discontinuity completely.
+    raw = [
+        (float(pages), float(lvl))
+        for pages, lvl in readings
+        if pages is not None and lvl is not None
+    ]
+    start = 0
+    for i in range(1, len(raw)):
+        if raw[i][0] < raw[i - 1][0]:
+            start = i  # meter reset — everything before this is a different series
+    points = sorted(raw[start:], key=lambda p: p[0])
+    fit = _fit_depleting_segment(
+        points,
+        min_span=FORECAST_MIN_PAGES_SPAN,
+        refill_tolerance=refill_tolerance,
+    )
+    if fit is None:
+        return None
+    rate, level_now = fit
+    if level_now <= 0:
+        return 0.0  # already projected empty
+    # Whole pages: a tenth of a page is not a thing, and the false precision
+    # would read as a measurement rather than an estimate.
+    return float(round(level_now / rate))
 
 
 def forecast_supplies(db: Session, now: Optional[datetime] = None) -> dict:
@@ -1158,11 +1255,15 @@ def forecast_supplies(db: Session, now: Optional[datetime] = None) -> dict:
 
     Three things happen per approved printer, per ``(type, color)`` supply:
 
-      1. Fit ``forecast_days_to_empty`` over the supply's reading history.
-      2. Persist the result onto the matching ``Supply`` row
-         (``days_to_empty`` + ``forecast_at``) so dashboards/portal/reports read
-         it instead of re-fitting on every render. A supply with no trustworthy
-         estimate is cleared back to ``None``.
+      1. Fit ``forecast_days_to_empty`` over the supply's reading history, and
+         ``forecast_pages_to_empty`` over the same readings against the page
+         meter. The second costs no extra query: ``page_count`` is a column on
+         the Reading rows this pass is already loading.
+      2. Persist both onto the matching ``Supply`` row (``days_to_empty``,
+         ``pages_to_empty`` + ``forecast_at``) so dashboards/portal/reports and
+         the reorder recommendations read them instead of re-fitting 30 days of
+         readings on every render. A supply with no trustworthy estimate is
+         cleared back to ``None``.
       3. If the estimate is at/under the operator's reorder lead-time
          (``alerts.reorder_lead_days``), open a ``predicted_depletion`` alert
          deduped PER (printer, supply) — not per printer, so a color device
@@ -1193,8 +1294,12 @@ def forecast_supplies(db: Session, now: Optional[datetime] = None) -> dict:
         for supply in printer.supplies:
             supplies_by_key[f"{supply.type.value}:{supply.color}"] = supply
 
-        # Build per-(type,color) level series from supply_snapshot history.
+        # Build per-(type,color) level series from supply_snapshot history. Two
+        # series per cartridge off the SAME rows: level against time, and level
+        # against the page meter. Both stay in reading (time) order -- the pages
+        # fit needs that to spot a meter reset.
         series: dict[str, list[tuple[datetime, float]]] = {}
+        page_series: dict[str, list] = {}
         for r in db.scalars(
             select(m.Reading)
             .where(
@@ -1210,13 +1315,19 @@ def forecast_supplies(db: Session, now: Optional[datetime] = None) -> dict:
                     continue
                 key = f"{snap.get('type')}:{snap.get('color')}"
                 series.setdefault(key, []).append((_aware(r.ts), float(lvl)))
+                if r.page_count is not None:
+                    page_series.setdefault(key, []).append((r.page_count, float(lvl)))
 
         for key, pts in series.items():
             supply = supplies_by_key.get(key)
             dte = forecast_days_to_empty(pts)
+            pte = forecast_pages_to_empty(page_series.get(key) or [])
             # Persist onto the supply row (None clears a stale estimate).
             if supply is not None:
                 supply.days_to_empty = dte
+                supply.pages_to_empty = pte
+                # forecast_at continues to stamp the DAYS estimate specifically,
+                # which is what every existing reader of it means by it.
                 supply.forecast_at = now if dte is not None else None
                 if dte is not None:
                     forecasted += 1
@@ -1397,3 +1508,67 @@ def sync_directories(db: Session, now: Optional[datetime] = None) -> dict:
     if not ran:
         return {}
     return {"directory_sync": {"ran": ran, "ok": ok, "failed": failed}}
+
+
+# --------------------------------------------------------------------------- #
+# Outbound supply-reorder events (RECOMMEND-ONLY -- see central.reorder)
+# --------------------------------------------------------------------------- #
+# Machine state, not operator config: a plain app_settings row rather than a
+# Spec, exactly like the report send markers in central.reports. load_settings
+# ignores non-Spec keys, so it never leaks into the Settings UI.
+REORDER_EMIT_MARKER = "reorder.last_emit_at"
+
+
+def publish_reorder_recommendations(
+    db: Session, now: Optional[datetime] = None
+) -> dict:
+    """Publish ``supply.reorder_recommended`` for every currently-recommended supply.
+
+    Interval-gated (``reorder.emit_interval_min``, default daily) off a marker
+    row. The worker cycles every 60 seconds and the recommendation set is stable
+    for days at a time, so publishing every cycle would send an ERP the same
+    facts 1,440 times a day. Each event still carries a stable ``dedupe_key``, so
+    a consumer can recognise a repeat regardless of cadence.
+
+    Nothing here writes a recommendation anywhere. The marker records only WHEN
+    we last published -- it is notification bookkeeping of the same kind as the
+    report send markers, not order state, and it must stay that way.
+
+    Off by default: with no event bus installed, and with publishing a
+    customer's fleet to an external system being an opt-in decision, the honest
+    outcome of a default install is "nothing was sent", reported as such.
+    """
+    from central import reorder as _reorder
+
+    settings = load_settings(db)
+    if not settings.get("reorder.emit_events", False):
+        return {"reorder_events": "disabled"}
+
+    now = _aware(now) or _now()
+    try:
+        interval = max(1, int(settings.get("reorder.emit_interval_min", 1440)))
+    except (TypeError, ValueError):
+        interval = 1440
+    last_raw = db.get(m.AppSetting, REORDER_EMIT_MARKER)
+    if last_raw is not None and last_raw.value:
+        try:
+            last = _aware(datetime.fromisoformat(last_raw.value))
+        except ValueError:
+            last = None  # hand-edited/corrupt marker: publish rather than wedge
+        if last is not None and last > now - timedelta(minutes=interval):
+            return {}
+
+    recs = _reorder.recommendations(
+        db, thresholds=_reorder.ReorderThresholds.from_runtime(settings)
+    )
+    result = _reorder.publish_recommendations(db, recs)
+    # The marker moves only when something was actually transmitted. A run that
+    # published nothing because the bus is absent must not consume the interval
+    # -- that would silently swallow the first real window after it is installed.
+    if result.published:
+        if last_raw is None:
+            db.add(m.AppSetting(key=REORDER_EMIT_MARKER, value=now.isoformat()))
+        else:
+            last_raw.value = now.isoformat()
+        db.commit()
+    return {"reorder_events": result.as_dict()}

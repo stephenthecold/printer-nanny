@@ -59,6 +59,11 @@
 {%- endif -%}
 {%- set g_admin = [] -%}
 {%- if user.role.value != 'client_readonly' -%}
+  {#- Supplies to order. In the "watch the fleet" sense it is a list you read,
+      but it sits here with Security because both are cross-fleet reports rather
+      than the day-to-day inbox. client_readonly sees the same recommendations
+      in their portal, scoped to their own fleet. -#}
+  {%- set _ = g_admin.append({'href': '/supplies/reorder', 'label': 'Supplies'}) -%}
   {%- set _ = g_admin.append({'href': '/security/posture', 'label': 'Security'}) -%}
 {%- endif -%}
 {%- if user.role.value == 'admin' -%}

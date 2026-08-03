@@ -165,6 +165,51 @@ SPECS: List[Spec] = [
          "One alert per distinct error code, capped here so a misbehaving "
          "device can't open dozens at once. Codes beyond the cap are counted "
          "in the detail of the alerts that do open, never dropped silently."),
+    # Supplies (reorder) — thresholds for the RECOMMEND-ONLY reorder surface
+    # (central.reorder). These decide what appears on the reorder list, in the
+    # portal panel and in the weekly report; they do not order anything, and
+    # nothing in this product ever will. Three independent triggers, because
+    # level alone is not enough: 20% of a cartridge is a fortnight on one device
+    # and an afternoon on another. Defaults are calibrated against what the
+    # incumbents do, cited per setting.
+    Spec("reorder.level_pct", "float", "Supplies (reorder)",
+         "Recommend at or below level (%)", 20.0,
+         "Konica Minolta's automated supply dispatch triggers at 20% remaining. "
+         "Set to 0 to switch the level trigger off and rely on the forecasts."),
+    Spec("reorder.days_remaining", "int", "Supplies (reorder)",
+         "…or at or below forecast days remaining", 21,
+         "Xerox ASR orders at 2–3 weeks of usage remaining. Fires off the "
+         "days-to-empty regression, so it accounts for how fast THIS device "
+         "actually consumes. 0 switches the days trigger off."),
+    Spec("reorder.pages_remaining", "int", "Supplies (reorder)",
+         "…or at or below forecast pages remaining", 500,
+         "Pages-remaining is stable where days-remaining is volatile: a quiet "
+         "week inflates the days estimate but not the page one, and this number "
+         "is directly comparable against the yield a cartridge is sold by. "
+         "0 switches the pages trigger off."),
+    Spec("reorder.urgent_level_pct", "float", "Supplies (reorder)",
+         "Treat as 'order now' at or below level (%)", 5.0,
+         "A cartridge this low is about to fail regardless of what the forecast "
+         "says, so it is promoted out of 'order soon' even with no estimate. "
+         "The other route to 'order now' is the reorder lead time above — a "
+         "supply that will not outlast delivery is already late."),
+    Spec("reorder.include_in_reports", "bool", "Supplies (reorder)",
+         "Include the reorder list in the weekly fleet email", True,
+         "Aggregated per client and per cartridge, so an MSP orders once rather "
+         "than once per device."),
+    # Outbound events. Default OFF: the recommendation surface works without an
+    # event bus, and publishing a customer's fleet to an external system is an
+    # opt-in decision, not a side effect of upgrading.
+    Spec("reorder.emit_events", "bool", "Supplies (reorder)",
+         "Publish supply.reorder_recommended events", False,
+         "Sends one typed event per recommended cartridge to the outbound event "
+         "bus so your ERP or PSA can act on it. Printer Nanny still places no "
+         "orders and holds no order state — a human orders every cartridge."),
+    Spec("reorder.emit_interval_min", "int", "Supplies (reorder)",
+         "Minimum minutes between event publishes", 1440,
+         "The worker cycles every 60s; a recommendation is a daily-grade "
+         "decision, so publishing every cycle would be a firehose of the same "
+         "facts. Each event carries a stable dedupe key regardless."),
     # ESG / Sustainability — turn page-count history into estimated print
     # footprint (paper, CO2e, energy, trees). Every factor is operator-tunable
     # so a customer can plug in their own paper stock / grid figures. Defaults
@@ -354,7 +399,8 @@ SETTINGS_GROUPS: "Dict[str, tuple]" = {
         "Notifications",
         ["Email (SMTP)", "Microsoft Teams", "Slack", "Webhook (generic)", "FreeScout"],
     ),
-    "alerts": ("Alerts & Reports", ["Alerts", "Reports", "ESG / Sustainability"]),
+    "alerts": ("Alerts & Reports",
+               ["Alerts", "Supplies (reorder)", "Reports", "ESG / Sustainability"]),
     # Retention lives here because it is the other half of polling: how often we
     # ask, and how long we keep what comes back.
     "polling": ("Polling & SNMP", ["Polling", "SNMP defaults", "Data retention"]),

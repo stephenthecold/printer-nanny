@@ -208,6 +208,11 @@ def customer_portal(request: Request, db: Session = Depends(get_db)):
     # ESG / sustainability panel — estimated print footprint for THIS client's
     # fleet, scoped by client_id so one tenant never sees another's totals.
     esg = queries.sustainability_rollup(db, client_id=client.id)
+    # Supplies to order, scoped to THIS client in SQL for the same reason the
+    # two above are. Recommendations only -- the portal shows a customer what is
+    # about to run out; it does not let them (or us) order anything.
+    from central import reorder as reorder_mod
+    reorder_recs = reorder_mod.recommendations(db, client_id=client.id)
     return _render(
         request, "portal.html", db=db, user=user,
         # The portal is THE white-label surface: it renders in this client's
@@ -219,6 +224,9 @@ def customer_portal(request: Request, db: Session = Depends(get_db)):
         low_supplies=low, open_alerts=alerts,
         freescout_enabled=freescout_on,
         esg=esg,
+        reorder_recs=reorder_recs,
+        reorder_summary=reorder_mod.summarize(reorder_recs),
+        urgency_now=reorder_mod.URGENCY_NOW,
         printer_label=_printer_label,
         portal_flash=request.session.pop("portal_flash", None),
     )
@@ -467,6 +475,60 @@ def printer_detail(printer_id: int, request: Request, db: Session = Depends(get_
         maintenance=maint,
         spark=_sparkline_points([r.page_count for r in history]),
         printer_label=_printer_label,
+    )
+
+
+# --- Supplies to order (recommend-only) ------------------------------------- #
+@router.get("/supplies/reorder", response_class=HTMLResponse)
+def supplies_reorder(request: Request, db: Session = Depends(get_db)):
+    """"Order these N cartridges" -- recommendations, not orders.
+
+    Nothing on this page places, tracks or records an order; there is no SKU
+    catalogue, no on-hand stock and no order state anywhere behind it. It reads
+    supply level, days-to-empty and pages-to-empty and applies the operator's
+    thresholds, so it is derived entirely from data the fleet already collects.
+
+    client_readonly users are sent to their portal, which carries the same
+    recommendations scoped to their own fleet -- the same treatment
+    /security/posture gets. Admin/tech may narrow to one client with
+    ``?client_id=``, which is validated against the clients that actually exist
+    rather than trusted from the query string.
+    """
+    from central import reorder as reorder_mod
+
+    user = _user(request, db)
+    if user is None:
+        return _login_redirect()
+    if user.role == m.UserRole.client_readonly:
+        return RedirectResponse("/portal", status_code=303)
+
+    clients = list(db.scalars(select(m.Client).order_by(m.Client.name)))
+    raw_client_id = (request.query_params.get("client_id") or "").strip()
+    selected_id = None
+    if raw_client_id:
+        try:
+            candidate = int(raw_client_id)
+        except ValueError:
+            candidate = None
+        # Only a real client id narrows the view. An unparseable or unknown one
+        # falls back to the whole fleet rather than silently returning an empty
+        # page that reads as "nothing to order".
+        if candidate is not None and any(c.id == candidate for c in clients):
+            selected_id = candidate
+
+    thresholds = reorder_mod.ReorderThresholds.load(db)
+    recs = reorder_mod.recommendations(db, client_id=selected_id, thresholds=thresholds)
+    return _render(
+        request,
+        "reorder.html",
+        db=db,
+        user=user,
+        groups=reorder_mod.group_by_client(recs),
+        summary=reorder_mod.summarize(recs),
+        thresholds=thresholds,
+        clients=clients,
+        selected_client_id=selected_id,
+        urgency_now=reorder_mod.URGENCY_NOW,
     )
 
 
