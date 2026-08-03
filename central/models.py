@@ -9,13 +9,14 @@ tables track service and notifications. Enums are stored as VARCHAR
 from __future__ import annotations
 
 import enum
-from datetime import datetime, timezone
+from datetime import date, datetime, timezone
 from typing import Optional
 
 from sqlalchemy import (
     JSON,
     Boolean,
     CheckConstraint,
+    Date,
     DateTime,
     Enum,
     Float,
@@ -648,7 +649,21 @@ class Supply(Base):
 
 
 class Reading(Base):
-    """Append-only time-series. Postgres partitions this monthly (see migration)."""
+    """Append-only per-poll time-series: the raw material for meters and forecasts.
+
+    NOT partitioned. This docstring used to claim Postgres range-partitioned it
+    monthly "see migration"; migration 0002 explicitly *deferred* partitioning
+    ("can be layered on later if retention volume demands it") and shipped a BRIN
+    index on ``ts`` instead, so the claim described a table that has never
+    existed. Correcting it matters because it was load-bearing in the wrong
+    direction -- it read as "growth is handled", which is how a table with no
+    retention at all reached ~52M rows/year at 500 printers unnoticed.
+
+    Volume is bounded by ``central.retention`` instead: readings older than
+    ``retention.raw_days`` (90) collapse into one ``ReadingRollup`` per printer
+    per UTC day, kept forever, and the raw rows are removed only where an
+    operator has explicitly enabled deletion.
+    """
 
     __tablename__ = "readings"
 
@@ -669,6 +684,99 @@ class Reading(Base):
     supply_snapshot: Mapped[Optional[dict]] = mapped_column(JSON, default=None)
 
     printer: Mapped[Printer] = relationship(back_populates="readings")
+
+    # Every hot query on this table is "one printer, a time range": the forecast
+    # pass (printer_id = X AND ts >= now-30d), supply_runway, page-count trends,
+    # and the retention pass below. Only two single-column indexes existed, so
+    # Postgres scanned every reading a printer had ever produced and filtered by
+    # ts -- on the largest table in the schema, on every worker cycle. Declared
+    # here rather than only in migration 0034 because revision 0001 is
+    # ``create_all()``: an index that lives only in a migration is silently
+    # absent on every fresh install.
+    __table_args__ = (
+        Index("ix_readings_printer_ts", "printer_id", "ts"),
+    )
+
+
+class ReadingRollup(Base):
+    """One row per printer per UTC day, collapsed from the raw ``readings`` series.
+
+    This is what makes retention possible without losing history: raw readings
+    are kept ``retention.raw_days`` (90) days and then reduce to one of these,
+    which is kept forever. See ``central.retention`` for the pass that writes
+    them and the rules that govern deletion.
+
+    **Meters are stored twice on purpose.** ``page_count``/``mono_count``/
+    ``color_count`` are the day's LAST reported (cumulative, lifetime) values and
+    ``*_start`` the day's FIRST. A cumulative meter alone answers "how many pages
+    has this device ever printed"; billing asks "how many during this period",
+    which is a difference. Holding both ends means one row answers it for its own
+    day, so a month's volume is a sum over 30 self-contained rows rather than a
+    chain that silently reads zero wherever a day is missing.
+
+    **Per-supply levels are in here, and that was a decision.** They are not
+    needed by anything today -- ``FORECAST_HISTORY_WINDOW_DAYS`` and
+    ``RUNWAY_HISTORY_WINDOW_DAYS`` are both 30, which the 90-day raw window
+    clears by 3x, so the forecast reads raw readings exclusively and must keep
+    doing so. They are here because the alternative fails silently later:
+    without them, widening the forecast window past 90 days would return exactly
+    the same answer as 90 days, forever, with no error and nothing to grep --
+    the shape of failure this codebase keeps paying for. A daily sample is
+    sufficient for that future because the fit is percent-per-DAY against a
+    3-day confidence floor: toner does not move meaningfully inside one day, so
+    sub-daily samples carry noise, not signal. ``supply_snapshot`` is the
+    end-of-day snapshot in byte-identical shape to ``Reading.supply_snapshot``,
+    so widening the window is a change to the query and not to the parser.
+
+    ``raw_pruned`` says whether the raw readings behind this row are gone. It is
+    not decoration: it selects the write rule. False means the raw rows are still
+    there, so a re-run RECOMPUTES from them (idempotent). True means they were
+    deleted, so a later straggler for the same day is MERGED in (recomputing
+    would silently discard the whole day and keep only the straggler).
+    """
+
+    __tablename__ = "reading_rollups"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    printer_id: Mapped[int] = mapped_column(
+        ForeignKey("printers.id", ondelete="CASCADE")
+    )
+    # UTC calendar day. Deliberately a DATE and deliberately UTC: readings are
+    # stored in UTC, and a rollup bucketed in a local zone would shift whenever
+    # an operator changed a client's timezone, re-bucketing history that has
+    # already been billed.
+    day: Mapped[date] = mapped_column(Date)
+
+    readings_count: Mapped[int] = mapped_column(Integer, default=0)
+    # The real span of the readings behind this row, not the day's boundaries --
+    # a printer that was offline until 18:00 must not read as a full day.
+    first_ts: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    last_ts: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+
+    page_count_start: Mapped[Optional[int]] = mapped_column(Integer, default=None)
+    page_count: Mapped[Optional[int]] = mapped_column(Integer, default=None)
+    mono_count_start: Mapped[Optional[int]] = mapped_column(Integer, default=None)
+    mono_count: Mapped[Optional[int]] = mapped_column(Integer, default=None)
+    color_count_start: Mapped[Optional[int]] = mapped_column(Integer, default=None)
+    color_count: Mapped[Optional[int]] = mapped_column(Integer, default=None)
+
+    supply_snapshot: Mapped[Optional[dict]] = mapped_column(JSON, default=None)
+
+    raw_pruned: Mapped[bool] = mapped_column(Boolean, default=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+
+    printer: Mapped[Printer] = relationship()
+
+    __table_args__ = (
+        # The uniqueness IS the idempotency: "roll up (printer, day)" has to be
+        # safe to re-run after a crash, and a second row for the same day would
+        # double-count every period that summed it.
+        UniqueConstraint("printer_id", "day", name="uq_reading_rollup_printer_day"),
+        # Fleet-wide date ranges ("every printer, last month") lead with the day;
+        # the unique constraint's btree already serves the per-printer direction.
+        Index("ix_reading_rollups_day", "day"),
+    )
 
 
 class PrinterEvent(Base):

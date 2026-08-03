@@ -48,8 +48,15 @@ def get_db() -> Iterator[Session]:
 def create_all() -> None:
     """Create all tables. Used for SQLite dev/tests and the seed script.
 
-    Production (Postgres) should use Alembic migrations instead, which additionally
-    set up monthly range partitioning on the ``readings`` table.
+    Production (Postgres) should use Alembic migrations instead. What those add
+    on top of this metadata is Postgres-only index DDL that SQLAlchemy cannot
+    express portably -- today that is the BRIN index on ``readings.ts``
+    (migration 0002).
+
+    This used to say migrations "additionally set up monthly range partitioning
+    on the readings table". They never have: 0002 deferred partitioning
+    explicitly and shipped BRIN instead. Retention is handled by
+    ``central.retention`` (daily rollup + opt-in pruning), not by partitions.
     """
     import central.models  # noqa: F401  (ensure models are registered on Base)
 

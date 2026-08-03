@@ -191,8 +191,46 @@ enforced; none of them is optional.
 - API is versioned under `/api/v1`. Agents authenticate with a per-agent API key
   (`Authorization: Bearer <key>`, hashed at rest). Dashboard users use signed
   sessions + roles (`admin` / `tech` / `client_readonly`).
-- Time-series lives in `readings`, append-only and indexed by `(printer_id, ts)`.
-  On Postgres a BRIN index on `ts` keeps range scans cheap (migration 0002).
+- Time-series lives in `readings`, append-only, with a composite `(printer_id,
+  ts)` index — every hot query on it is "one printer, a time range". That index
+  is **new in 0034**: this line asserted it for a long time while the schema had
+  only two single-column indexes, so Postgres read every reading a printer had
+  ever produced and filtered by `ts`. Measured on 300k rows / 500 printers: 317
+  buffers with it, 593 without. On Postgres a BRIN index on `ts` keeps range
+  scans cheap (migration 0002). Neither `readings` nor anything else is
+  **partitioned** — `models.Reading` and `db.create_all` both used to claim
+  Postgres range-partitioned it monthly, and it never has; 0002 deferred
+  partitioning explicitly and shipped BRIN instead.
+- **Retention is a rollup, and deletion is opt-in** (`central/retention.py`,
+  `reading_rollups`). Raw readings are kept `retention.raw_days` (90) and then
+  collapse to one row per printer per UTC day, kept forever. Four rules, each
+  because its opposite loses data quietly:
+  - **The rollup UPSERT and the DELETE of the rows it summarises are one
+    transaction**, so there is no ordering to get wrong — the rollup commits iff
+    the readings are gone, and a crash re-does that printer-day from untouched
+    raw rows. `retention.delete_enabled` ships **False**; every pass that
+    deletes writes a `readings.pruned` audit row, and a refusal writes
+    `readings.prune_refused`.
+  - **Deletion is by explicit id, never by predicate.** `ReadingIn.ts` is
+    client-supplied, so an agent can backdate a push; re-issuing the range
+    predicate would destroy a row inserted between the SELECT and the DELETE
+    without ever counting it. A straggler instead survives to the next pass, and
+    `raw_pruned` is what selects the write rule there — False recomputes the day
+    from the raw rows, True *merges*, because recomputing a pruned day would
+    keep the straggler and discard the day.
+  - **Work is bounded per cycle** (`retention.max_batches_per_cycle`). The
+    worker holds a single-leader lock, so one `DELETE` over 52M rows stalls
+    alerting for the whole fleet; each delete covers one printer-day. The job is
+    registered **last** in `JOBS` and needs no schedule: an idle pass is one
+    `MIN(ts)` index probe.
+  - **`retention.raw_days` has a floor computed from the forecast's own window**
+    (`min_raw_days()`), not a literal 30. Supply-runway estimates read raw
+    readings *only*, over 30 days; a shorter raw window starves every estimate
+    without failing anywhere. Below the floor the worker logs and uses the floor
+    — clamping in silence is indistinguishable from no guard. Rollups carry
+    per-supply levels they do not need today for the same reason: widening the
+    forecast window past 90 days would otherwise return the 90-day answer
+    forever, with nothing to grep.
 - SNMP is brand-agnostic via RFC 3805 Printer MIB. Vendor providers add real
   percentages where the standard MIB only reports buckets (Brother) or
   brand-tag/status-message scalars (HP, Lexmark, Xerox, Kyocera, Canon, Ricoh,
