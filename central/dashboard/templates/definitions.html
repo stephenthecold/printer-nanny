@@ -1,0 +1,188 @@
+{% extends "base.html" %}
+{% import "_components.html" as c %}
+{% block title %}Device definitions{% endblock %}
+
+{% block body %}
+{{ c.page_title("Device definitions",
+   "How to read a printer model's private MIB, served to agents as data — so a new model does not need an agent release.") }}
+
+{% if flash %}
+  <div class="{{ c.note('info', 'mb-4') }}">{{ flash }}</div>
+{% endif %}
+
+{# ------------------------------------------------------------- existing -- #}
+<div class="{{ c.card_cls() }} mb-8">
+  {{ c.section_title("Definitions") }}
+
+  <p class="mb-4 text-sm text-slate-600">
+    A definition is <strong>data, never code</strong>. It names OIDs and states, in a
+    fixed vocabulary, how to turn each answer into a supply level, a meter or a
+    status message. Agents fetch the set on every poll, cache it locally, and
+    re-validate it themselves — an agent that cannot reach this server keeps
+    working exactly as it did before.
+  </p>
+
+  <div class="{{ c.table_wrap() }}">
+    <table class="{{ c.table_cls() }}">
+      <thead class="{{ c.thead_cls() }}">
+        <tr>
+          <th class="{{ c.th_cls() }}">Key</th>
+          <th class="{{ c.th_cls() }}">Name</th>
+          <th class="{{ c.th_cls() }}">Scope</th>
+          <th class="{{ c.th_cls() }}">Matches</th>
+          <th class="{{ c.th_cls() }}">Reads</th>
+          <th class="{{ c.th_cls() }}">State</th>
+          <th class="{{ c.th_cls('right') }}"><span class="sr-only">Actions</span></th>
+        </tr>
+      </thead>
+      <tbody>
+        {% for d in definitions %}
+        {% set match = d.spec.get('match', {}) if d.spec else {} %}
+        <tr class="{{ c.tr_cls() }}">
+          <td class="{{ c.td_cls() }}"><code class="text-xs">{{ d.key }}</code></td>
+          <td class="{{ c.td_cls() }}">{{ d.name }}</td>
+          <td class="{{ c.td_cls() }}">
+            {% if d.client %}{{ d.client.name }}{% else %}<span class="text-slate-400">all clients</span>{% endif %}
+          </td>
+          <td class="{{ c.td_cls() }} text-xs">
+            {%- set bits = [] -%}
+            {%- if match.get('enterprise') %}{% set _ = bits.append('enterprise ' ~ match['enterprise']) %}{% endif -%}
+            {%- if match.get('brand') %}{% set _ = bits.append('brand ~ ' ~ match['brand']) %}{% endif -%}
+            {%- if match.get('model') %}{% set _ = bits.append('model ~ ' ~ match['model']) %}{% endif -%}
+            {{ bits | join(', ') }}
+          </td>
+          <td class="{{ c.td_cls() }} text-xs">
+            {{ (d.spec.get('supplies') or []) | length }} supply,
+            {{ (d.spec.get('meters') or []) | length }} meter
+            {%- if d.spec.get('status_text') %}, status{% endif %}
+          </td>
+          <td class="{{ c.td_cls() }}">
+            {% if d.enabled %}{{ c.badge('enabled', 'ok') }}{% else %}{{ c.badge('disabled', 'muted') }}{% endif %}
+            {% if d.spec.get('override_builtin') %}{{ c.badge('overrides built-in', 'warning') }}{% endif %}
+            <span class="ml-1 text-xs text-slate-400">rev {{ d.revision }}</span>
+          </td>
+          <td class="{{ c.td_cls('right') }} whitespace-nowrap">
+            <a href="/manage/definitions?edit={{ d.id }}" class="{{ c.btn('neutral', 'sm') }}"
+               aria-label="Edit definition {{ d.key }}">Edit</a>
+            <form method="post" action="/manage/definitions/{{ d.id }}/delete" class="inline"
+                  onsubmit="return confirm('Remove {{ d.key }}? Agents drop it on their next poll.');">
+              <button type="submit" class="{{ c.btn('danger', 'sm') }}"
+                      aria-label="Delete definition {{ d.key }}">Delete</button>
+            </form>
+          </td>
+        </tr>
+        {% else %}
+          {{ c.empty_row(7, "No definitions. Agents use their built-in vendor providers only.") }}
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+</div>
+
+{# ------------------------------------------------------------------ form -- #}
+<div class="{{ c.card_cls() }} mb-8">
+  {{ c.section_title("Edit definition" if editing else "Add a definition") }}
+
+  <form method="post" action="/manage/definitions/save" class="grid gap-3 sm:grid-cols-2">
+    {% if editing %}<input type="hidden" name="definition_id" value="{{ editing.id }}">{% endif %}
+    <input type="hidden" name="enabled_present" value="1">
+
+    {{ c.field('name', 'Label', value=(editing.name if editing else ''),
+               placeholder='Acme AC-9000 series',
+               help='Operator-facing. The key inside the JSON is what agents match on.') }}
+
+    {% call c.select_field('client_id', 'Scope',
+                           help='A definition describes hardware, so leave it global unless one customer needs a different read.') %}
+      <option value="" {% if editing and not editing.client_id %}selected{% endif %}>All clients</option>
+      {% for cl in clients %}
+        <option value="{{ cl.id }}" {% if editing and editing.client_id == cl.id %}selected{% endif %}>{{ cl.name }}</option>
+      {% endfor %}
+    {% endcall %}
+
+    <div class="sm:col-span-2">
+      {{ c.textarea_field('spec', 'Definition (JSON)', value=editing_spec, rows=18,
+                          required=True, extra_cls='font-mono text-xs',
+                          help='Validated before it is stored, and validated again by every agent that receives it. Unknown fields are refused.') }}
+    </div>
+
+    <div class="sm:col-span-2 grid gap-2">
+      {{ c.checkbox_field('enabled', 'Enabled',
+                          checked=(editing.enabled if editing else True), value='1',
+                          help='Disabled definitions are not served. Agents drop them on the next poll.') }}
+      {{ c.checkbox_field('override_builtin', 'Let this definition overrule the built-in vendor provider',
+                          checked=(editing.spec.get('override_builtin') if editing and editing.spec else False),
+                          value='1',
+                          help='Off by default. Normally a definition only fills values no built-in provider produced, so it can never make a working printer stop working. Turn this on to correct a built-in that decodes a specific model wrongly — every field it displaces is named on the printer detail page and in the audit log.') }}
+    </div>
+
+    {{ c.field('notes', 'Notes', value=(editing.notes if editing else ''),
+               extra_cls='sm:col-span-2',
+               placeholder='Where these OIDs came from — a probe, a vendor MIB, a support case.') }}
+
+    <div class="sm:col-span-2 flex items-center gap-3">
+      <button type="submit" class="{{ c.btn('primary') }}">{{ 'Save definition' if editing else 'Add definition' }}</button>
+      {% if editing %}<a href="/manage/definitions" class="{{ c.btn_link() }}">Cancel</a>{% endif %}
+    </div>
+  </form>
+</div>
+
+{# ------------------------------------------------------------- reference -- #}
+<div class="{{ c.card_cls() }}">
+  {{ c.section_title("What a definition may say") }}
+
+  <div class="grid gap-4 lg:grid-cols-2">
+    <div class="min-w-0 text-sm text-slate-600 space-y-3">
+      <p>
+        <strong>match</strong> — at least one of <code>enterprise</code> (the
+        sysObjectID enterprise number), <code>brand</code> or <code>model</code>
+        (case-insensitive substrings, minimum 3 characters). A definition with no
+        criteria is refused: it would be applied to every printer in every client.
+        The most specific match wins, and an exact tie is refused rather than
+        guessed.
+      </p>
+      <p>
+        <strong>supplies</strong> — each names an <code>oid</code>, a
+        <code>type</code> (toner, ink, drum, fuser, waste, staples, developer,
+        other), an optional <code>color</code>, and a <code>decode</code>.
+      </p>
+      <p>
+        <strong>decode</strong> — one of:
+      </p>
+      <ul class="list-disc pl-5 space-y-1">
+        <li><code>{"kind": "percent"}</code> — the value is already 0–100.</li>
+        <li><code>{"kind": "ratio", "max": 30000}</code> or <code>"max_oid"</code> — a remaining/total pair.</li>
+        <li><code>{"kind": "map", "values": {"1": 100, "2": 50}}</code> — exact sentinel to percentage.</li>
+        <li><code>{"kind": "text_between", "after": "Toner:", "before": "%"}</code> — literal delimiters.</li>
+        <li><code>{"kind": "count"}</code> — a meter reading.</li>
+      </ul>
+      <div class="{{ c.note('warning') }}">
+        <strong>There are no regular expressions</strong>, and there will not be.
+        A pattern supplied here would run on every agent in the fleet, and a
+        catastrophically backtracking one would stall all of them at once — with
+        no way to tell in advance which patterns those are.
+        <code>text_between</code> slices between two literal strings, which is
+        linear whatever you type. A definition carrying
+        <code>regex</code>/<code>pattern</code> is refused with that reason.
+      </div>
+      <p>
+        <strong>meters</strong> — <code>total</code>, <code>mono</code>,
+        <code>color</code>, or any function name (<code>print</code>,
+        <code>copy</code>, <code>fax</code>) which lands in the meter snapshot.
+        <strong>status_text</strong> and <strong>identity</strong> fill the
+        front-panel message, the brand tag and a more precise model.
+      </p>
+      <p class="text-xs text-slate-500">
+        Use <code>printer-nanny-agent probe &lt;ip&gt;</code> against the device to
+        get the OIDs and the raw values to write these against.
+      </p>
+    </div>
+
+    <div class="min-w-0">
+      <p class="mb-1 text-xs text-slate-500">Example</p>
+      <div class="overflow-x-auto rounded bg-slate-900 p-3">
+        <pre class="font-mono text-xs text-slate-100">{{ example_spec }}</pre>
+      </div>
+    </div>
+  </div>
+</div>
+{% endblock %}

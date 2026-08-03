@@ -1689,3 +1689,98 @@ class DirectoryConnection(Base):
         UniqueConstraint("client_id", "provider", name="uq_directory_conn_client_provider"),
         CheckConstraint("provider <> 'manual'", name="ck_directory_conn_not_manual"),
     )
+
+
+class DeviceDefinition(Base):
+    """A server-pushed device/model definition: how to read one printer family's
+    private MIB, expressed as data an agent interprets rather than code it runs.
+
+    WHY THIS TABLE EXISTS
+    ---------------------
+    Today a printer model whose supply levels only live in a vendor-private OID
+    needs a new *provider* -- Python, in the agent package, shipped by a release
+    and rolled out to every site. That makes "we bought a different Brother" an
+    engineering task. A definition moves the model-specific part into a row an
+    operator can add, and the agent fetches it.
+
+    WHAT IS SAFE ABOUT IT
+    ---------------------
+    ``spec`` holds the normalised output of
+    :func:`central.device_definitions.validate_definition`, never an operator's
+    raw text. That validator is the security boundary and it is deliberately
+    narrow: a closed vocabulary of six decoders, numeric-only OIDs, no regular
+    expressions at all, unknown keys refused, and every list/string/depth
+    bounded. The agent re-runs the identical validator on receipt and on every
+    load of its local cache, because a signature proves who produced bytes, not
+    that they are safe.
+
+    SCOPE
+    -----
+    ``client_id`` is NULL for the normal case: a definition describes *hardware*,
+    which is not tenant data, and re-uploading the same Brother definition per
+    customer is how an MSP stops maintaining them. A non-NULL ``client_id``
+    scopes a definition to one customer, and an agent is served only the global
+    set plus the clients it actually collects for -- so one tenant's custom
+    definition never reaches another's site.
+
+    PRECEDENCE (also enforced agent-side; stated here because it is the rule an
+    operator is deciding about when they tick the box)
+    -----------------------------------------------------------------------
+    Built-in providers run FIRST and a definition runs LAST, filling only what
+    is still missing. A definition cannot silently replace a value a
+    hardware-proven provider produced -- that is how a working printer stops
+    working. ``override_builtin`` lets an operator overrule that deliberately;
+    it defaults off, it is shown in the UI, it is audited, and the agent records
+    per-field in ``provider_trace`` that it happened. "Never silently" is the
+    contract, not "never".
+    """
+
+    __tablename__ = "device_definitions"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    #: Stable slug. This -- not the row id -- is what the agent keys on, so a
+    #: definition can be exported, re-imported or restored and still be the
+    #: same definition to every agent holding a cache.
+    key: Mapped[str] = mapped_column(String(64), index=True)
+    name: Mapped[str] = mapped_column(String(200))
+    #: NULL = every client (hardware knowledge). Set = scoped to one tenant.
+    client_id: Mapped[Optional[int]] = mapped_column(
+        ForeignKey("clients.id", ondelete="CASCADE"), default=None, index=True
+    )
+    enabled: Mapped[bool] = mapped_column(Boolean, default=True)
+    #: The validated, normalised definition. Never the operator's raw text.
+    spec: Mapped[dict] = mapped_column(JSON, default=dict)
+    #: Bumped on every content change. Operator-facing ("has this been edited
+    #: since the incident?"); the agent's change detection uses the feed digest,
+    #: which cannot drift from the content the way a hand-bumped number can.
+    revision: Mapped[int] = mapped_column(Integer, default=1)
+    notes: Mapped[Optional[str]] = mapped_column(Text, default=None)
+
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+    created_by_user_id: Mapped[Optional[int]] = mapped_column(
+        ForeignKey("users.id", ondelete="SET NULL"), default=None
+    )
+
+    client: Mapped[Optional[Client]] = relationship()
+
+    __table_args__ = (
+        # One definition per key per scope. Two rows with the same key would
+        # both be served, and the agent -- which dedupes by key -- would take
+        # whichever arrived last: a coin flip over what a fleet reads.
+        UniqueConstraint("key", "client_id", name="uq_device_definitions_key_scope"),
+        # ...and that constraint does NOT cover the common case, which is the
+        # trap worth writing down: SQL treats NULLs as distinct in a UNIQUE, so
+        # the constraint above permits any number of *global* rows sharing a
+        # key -- exactly the rows every agent receives. A partial unique index
+        # is what actually enforces it, and both dialects this project runs on
+        # support one.
+        Index(
+            "uq_device_definitions_global_key",
+            "key",
+            unique=True,
+            sqlite_where=text("client_id IS NULL"),
+            postgresql_where=text("client_id IS NULL"),
+        ),
+        Index("ix_device_definitions_enabled", "enabled"),
+    )

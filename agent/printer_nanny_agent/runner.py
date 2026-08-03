@@ -20,6 +20,13 @@ from printer_nanny_agent.discovery import discover_subnet
 from printer_nanny_agent.driver_probe import DriverProbeCache, attach as attach_driver_probe
 from printer_nanny_agent.mdns import assign_subnet_cidr, discover_mdns, mdns_available
 from printer_nanny_agent.poller import poll_printer
+from printer_nanny_agent.providers.definitions import (
+    DefinitionStore,
+    active,
+    key_fingerprint,
+    set_active,
+)
+from printer_nanny_agent.definitions import signature_ok
 from printer_nanny_agent.snmp import PysnmpBackend, SnmpBackend, SnmpError, SnmpParams
 from printer_nanny_agent.spool import ReadingSpool
 
@@ -68,6 +75,91 @@ class TargetCache:
             return list(self._targets)
         self._targets = list(targets)
         return targets
+
+
+class DefinitionSync:
+    """Keeps the active device/model definitions in step with central.
+
+    Three properties this has to have, and each is a way the feature could
+    otherwise make things worse rather than better:
+
+    * **An unreachable central changes nothing.** A failed fetch keeps whatever
+      is already active, exactly like ``TargetCache`` keeps the last poll list.
+      The definitions describe how to read the fleet; losing them during an
+      outage would degrade every reading at precisely the moment nobody can see
+      it happening.
+    * **A refused feed changes nothing either.** Signature mismatch, a payload
+      over the byte cap, malformed JSON -- all keep the current set. Refusing
+      forward into "no definitions" would let anyone who can break the response
+      turn the feature off fleet-wide.
+    * **A feed that legitimately went empty DOES take effect.** An operator who
+      disables a definition needs it to stop being applied, and that is the
+      whole reason the changed case sends the full set rather than a delta:
+      there is no tombstone to miss.
+
+    Deliberately not persisted beyond the cache file: the version is re-read
+    from the cache at startup so a restart does not force a re-download.
+    """
+
+    def __init__(self, store: "DefinitionStore", api_key: str):
+        self._store = store
+        self._fingerprint = key_fingerprint(api_key)
+        self._version = ""
+
+    @property
+    def version(self) -> str:
+        return self._version
+
+    def load_cache(self) -> int:
+        """Activate the cached feed. Returns how many definitions are active."""
+        payload = self._store.load(self._fingerprint)
+        if payload is None:
+            return 0
+        count = set_active(payload.get("definitions") or [])
+        self._version = str(payload.get("version") or "")
+        if count:
+            log.info(
+                "loaded %d device definition(s) from cache (version %s)",
+                count, self._version or "?",
+            )
+        return count
+
+    async def refresh(self, client: CentralClient) -> Optional[int]:
+        """Fetch and apply. Returns the new active count, or None for no change."""
+        try:
+            payload = await client.get_device_definitions(self._version)
+        except Exception as exc:  # noqa: BLE001 - a feed failure must not cost a cycle
+            log.warning(
+                "could not fetch device definitions, keeping the %d already "
+                "active: %s", len(active()), exc,
+            )
+            return None
+        if not payload.get("changed"):
+            return None
+
+        version = payload.get("version")
+        raw = payload.get("definitions")
+        if not isinstance(version, str) or not isinstance(raw, list):
+            log.warning("device definition feed is malformed; keeping current set")
+            return None
+        if not signature_ok(self._fingerprint, version, raw, payload.get("signature")):
+            # Fail closed onto what we already have. The signature binds the
+            # feed to this agent's own credential, so a mismatch means the
+            # payload was not produced for this agent -- which is exactly the
+            # case where believing it would be worst.
+            log.warning(
+                "device definition feed failed its signature check; keeping the "
+                "%d already active", len(active()),
+            )
+            return None
+
+        count = set_active(raw)
+        self._version = version
+        self._store.save(payload)
+        log.info(
+            "device definitions updated: %d active (version %s)", count, version
+        )
+        return count
 
 
 async def drain_spool(client: CentralClient, spool: ReadingSpool) -> int:
@@ -424,6 +516,8 @@ async def run_once(config: AgentConfig, backend: Optional[SnmpBackend] = None) -
     )
     install_path, update_result = _startup_diagnostics()
     spool = _spool_for(config)
+    definitions = DefinitionSync(DefinitionStore(config.definitions_path()), config.api_key)
+    definitions.load_cache()
     commands: List[dict] = []
     disc = {"new_pending": 0}
     try:
@@ -433,12 +527,21 @@ async def run_once(config: AgentConfig, backend: Optional[SnmpBackend] = None) -
             # spooled during a prior outage before doing anything else this cycle.
             await drain_spool(client, spool)
             config = await _effective_config(client, config)
+            # Before the poll, so a definition an operator saved a minute ago is
+            # in force on this cycle rather than the next one.
+            await definitions.refresh(client)
             commands = await client.get_commands()
             await handle_commands(client, backend, config, commands, spool)
         poll = await poll_targets(client, backend, config, spool)
         if online:
             disc = await discover_all(client, backend, config)
-        return {"commands": len(commands), "spooled": spool.count(), **poll, **disc}
+        return {
+            "commands": len(commands),
+            "spooled": spool.count(),
+            "definitions": len(active()),
+            **poll,
+            **disc,
+        }
     finally:
         await client.aclose()
         await backend.close()
@@ -466,9 +569,14 @@ async def run_forever(config: AgentConfig, backend: Optional[SnmpBackend] = None
     # Likewise one target cache: it is what lets the poll below keep running
     # (and spooling) while central is unreachable.
     target_cache = TargetCache()
+    # Definitions come off the local cache before the first heartbeat, so an
+    # agent that boots into an outage still reads its fleet the way it did
+    # before the reboot rather than falling back to the standard MIB alone.
+    definitions = DefinitionSync(DefinitionStore(config.definitions_path()), config.api_key)
+    definitions.load_cache()
     log.info(
-        "agent %d started -> %s (install: %s, version: %s)",
-        config.agent_id, config.central_url, install_path, __version__,
+        "agent %d started -> %s (install: %s, version: %s, definitions: %d)",
+        config.agent_id, config.central_url, install_path, __version__, len(active()),
     )
     try:
         while True:
@@ -484,6 +592,7 @@ async def run_forever(config: AgentConfig, backend: Optional[SnmpBackend] = None
                 if online:
                     await drain_spool(client, spool)
                     effective = await _effective_config(client, config, effective)
+                    await definitions.refresh(client)
                     commands = await client.get_commands()
                     await handle_commands(client, backend, effective, commands, spool)
             except Exception:  # noqa: BLE001 - a bad sync must not cost us the poll
