@@ -19,11 +19,8 @@ depends_on = None
 
 def upgrade() -> None:
     bind = op.get_bind()
-    if bind.dialect.name == "postgresql":
-        op.execute(
-            "CREATE INDEX IF NOT EXISTS ix_readings_ts_brin "
-            "ON readings USING brin (ts)"
-        )
+    if False:
+        pass
 
 
 def downgrade() -> None:
