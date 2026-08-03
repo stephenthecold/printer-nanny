@@ -13,6 +13,7 @@ from sqlalchemy.orm import Session
 
 from central import models as m
 from central import queries
+from central import supplies as supplies_lib
 from central.channels import (
     Notification,
     routable_channels,
@@ -924,6 +925,16 @@ def evaluate_alerts(db: Session, now: Optional[datetime] = None) -> dict:
                 deadband = float(runtime.get("alerts.supply_deadband_pct", 0) or 0)
                 for supply in printer.supplies:
                     if supply.level_pct is None:
+                        continue
+                    # A receptacle's level is how FULL it is, so "below N%" is
+                    # the healthy end for it: an emptied waste box reading 2
+                    # opened "Low waste at 2%" against a part that had just been
+                    # serviced, and would only resolve once the box filled up
+                    # again. Skipped rather than inverted -- this rule is
+                    # "supply_below" and a nearly-full container is a different
+                    # condition, surfaced by central.reorder. See
+                    # central.supplies.
+                    if supplies_lib.is_receptacle(supply):
                         continue
                     key = f"rule:{rule.id}:printer:{printer.id}:supply:{supply.id}"
                     label = supply.color or supply.type.value

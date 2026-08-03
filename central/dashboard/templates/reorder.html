@@ -121,7 +121,10 @@
             {% if rec.urgency == urgency_now %}{{ badge('order now', 'error', 'ml-1') }}{% endif %}
           </td>
           <td class="{{ td_cls('right', 'tabular-nums') }}">
-            {% if rec.level_pct is not none %}{{ '%.0f'|format(rec.level_pct) }}%{% else %}<span class="text-slate-400">—</span>{% endif %}
+            {# "5%" reads as nearly-dead for a cartridge and nearly-empty for a
+               waste box, so a receptacle says which it is rather than leaving
+               the reader to guess from the supply name. #}
+            {% if rec.level_pct is not none %}{{ '%.0f'|format(rec.level_pct) }}%{% if rec.is_receptacle %} full{% endif %}{% else %}<span class="text-slate-400">—</span>{% endif %}
           </td>
           <td class="{{ td_cls('right', 'tabular-nums') }}">
             {% if rec.days_remaining is not none %}{{ '%.0f'|format(rec.days_remaining) }}{% else %}<span class="text-slate-400">—</span>{% endif %}

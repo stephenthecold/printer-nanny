@@ -193,6 +193,20 @@ SPECS: List[Spec] = [
          "says, so it is promoted out of 'order soon' even with no estimate. "
          "The other route to 'order now' is the reorder lead time above — a "
          "supply that will not outlast delivery is already late."),
+    # Waste boxes and chip collectors fill up rather than run down (RFC 3805
+    # receptacleThatIsFilled), so they need their own pair of numbers. Reusing
+    # the two above would mean "20% remaining" and "80% full" moved together,
+    # which is two different policies on one slider.
+    Spec("reorder.receptacle_full_pct", "float", "Supplies (reorder)",
+         "Recommend a waste container at or above full (%)", 80.0,
+         "Waste toner boxes and chip collectors report how FULL they are, not "
+         "how much is left, so they are ordered when nearly full. Set to 0 to "
+         "switch the receptacle trigger off. The forecast triggers above never "
+         "apply here — a rising level yields no days- or pages-to-empty."),
+    Spec("reorder.urgent_receptacle_full_pct", "float", "Supplies (reorder)",
+         "Treat a waste container as 'order now' at or above full (%)", 95.0,
+         "A container this full is about to halt the printer, so it is promoted "
+         "out of 'order soon'."),
     Spec("reorder.include_in_reports", "bool", "Supplies (reorder)",
          "Include the reorder list in the weekly fleet email", True,
          "Aggregated per client and per cartridge, so an MSP orders once rather "

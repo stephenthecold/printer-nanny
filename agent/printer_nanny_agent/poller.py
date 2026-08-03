@@ -14,6 +14,7 @@ from printer_nanny_agent.snmp_parse import (
     classify_supply,
     decode_supply_text,
     parse_supply_level,
+    supply_class_from_code,
     supply_type_from_code,
 )
 from printer_nanny_agent.snmp import SnmpBackend, SnmpError, SnmpParams
@@ -120,13 +121,17 @@ def build_supplies(walks: Dict[str, Dict[str, str]]) -> List[dict]:
         return {_oid_suffix(o, base): v for o, v in walks.get(base, {}).items()}
 
     desc_by_suffix = _match(oids.PRT_MARKER_SUPPLIES_DESCRIPTION)
+    class_by_suffix = _match(oids.PRT_MARKER_SUPPLIES_CLASS)
     type_by_suffix = _match(oids.PRT_MARKER_SUPPLIES_TYPE)
     max_by_suffix = _match(oids.PRT_MARKER_SUPPLIES_MAX_CAPACITY)
     level_by_suffix = _match(oids.PRT_MARKER_SUPPLIES_LEVEL)
 
     # Union of every index seen in any table -- some devices report a level row
     # without a matching description (don't silently drop those supplies).
-    suffixes = set(desc_by_suffix) | set(type_by_suffix) | set(max_by_suffix) | set(level_by_suffix)
+    suffixes = (
+        set(desc_by_suffix) | set(class_by_suffix) | set(type_by_suffix)
+        | set(max_by_suffix) | set(level_by_suffix)
+    )
 
     supplies: List[dict] = []
     for suffix in sorted(suffixes):
@@ -142,6 +147,11 @@ def build_supplies(walks: Dict[str, Dict[str, str]]) -> List[dict]:
         # Classify on the *decoded* text: hex never matches a keyword, so this
         # is what rescues "Black Drum"/"Fuser" out of a generic 'other' code.
         supply_type, color = classify_supply(desc, type_code)
+        # prtMarkerSuppliesClass decides whether ``level_pct`` means REMAINING
+        # or HOW FULL. Reported verbatim (None when the device omits the
+        # column) -- central owns the fallback, because inferring it here would
+        # bake this agent build's guess into the stored row.
+        supply_class = supply_class_from_code(_to_int(class_by_suffix.get(suffix)))
         parsed = parse_supply_level(raw_level, max_cap)
         # When the device reports a sentinel instead of a number (e.g. Brother
         # toner = "some remaining"), surface that coarse state as a note.
@@ -149,6 +159,7 @@ def build_supplies(walks: Dict[str, Dict[str, str]]) -> List[dict]:
         supplies.append(
             {
                 "type": supply_type,
+                "supply_class": supply_class,
                 "color": color,
                 "description": desc,
                 "level_pct": parsed.level_pct,
@@ -287,6 +298,7 @@ _SCALAR_OIDS = [
 
 _SUPPLY_BASES = [
     oids.PRT_MARKER_SUPPLIES_DESCRIPTION,
+    oids.PRT_MARKER_SUPPLIES_CLASS,
     oids.PRT_MARKER_SUPPLIES_TYPE,
     oids.PRT_MARKER_SUPPLIES_MAX_CAPACITY,
     oids.PRT_MARKER_SUPPLIES_LEVEL,

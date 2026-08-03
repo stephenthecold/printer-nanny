@@ -103,7 +103,7 @@
     {% set label = sup.description or (sup.type.value ~ (' (' ~ sup.color ~ ')' if sup.color else '')) %}
     <div class="flex justify-between items-center py-1 gap-2">
       <span class="text-sm truncate" title="{{ label }}">{{ label }}</span>
-      {% if sup.level_pct is not none %}{{ level_bar(sup.level_pct) }}
+      {% if sup.level_pct is not none %}{{ level_bar(sup.level_pct, sup.is_receptacle) }}
       {% elif sup.status_note %}<span class="text-xs text-slate-500 italic whitespace-nowrap">{{ sup.status_note }}</span>
       {% else %}<span class="text-xs text-slate-400">unknown</span>{% endif %}
     </div>

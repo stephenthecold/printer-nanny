@@ -101,7 +101,7 @@
           <div class="text-xs text-slate-400">{{ sup.printer.model or sup.printer.hostname or 'printer' }} @ {{ sup.printer.ip }}</div>
           {% endif %}
         </td>
-        <td class="py-1.5 text-right">{{ level_bar(sup.level_pct) }}</td>
+        <td class="py-1.5 text-right">{{ level_bar(sup.level_pct, sup.is_receptacle) }}</td>
       </tr>
       {% else %}<tr><td class="py-2 text-slate-400">All supplies healthy.</td></tr>{% endfor %}
       </tbody>

@@ -379,14 +379,99 @@ def delete_client_branding_logo(
     return _redirect(f"/manage/clients/{client_id}")
 
 
+def _printer_delete_blockers(db: Session, *, client_id=None, site_id=None):
+    """Why a client or site cannot be deleted yet, or ``None`` when it can.
+
+    Counts printers in **every** discovery state, not just approved ones. A
+    pending or ignored row is still a NOT NULL ``client_id`` that the delete
+    would try to blank, so filtering to approved would make the check pass and
+    the delete fail exactly as before -- a guard that reports safety it does not
+    have is worse than no guard.
+
+    The counts are the message: "3 printers" sends an operator looking, "3
+    printers (1 awaiting approval)" tells them where the third one is hiding,
+    which is precisely the row they would not have thought to look for.
+    """
+    stmt = select(m.Printer.discovery_state, func.count()).group_by(
+        m.Printer.discovery_state
+    )
+    if client_id is not None:
+        stmt = stmt.where(m.Printer.client_id == client_id)
+    if site_id is not None:
+        stmt = stmt.where(m.Printer.site_id == site_id)
+    by_state = {state: count for state, count in db.execute(stmt)}
+    total = sum(by_state.values())
+    if not total:
+        return None
+    parts = [
+        f"{count} {state.value}"
+        for state, count in sorted(by_state.items(), key=lambda kv: kv[0].value)
+    ]
+    return {"total": total, "breakdown": ", ".join(parts)}
+
+
+def _client_delete_blockers(db: Session, client_id: int):
+    """Flash message + audit detail for a refused client delete, or ``None``."""
+    blocked = _printer_delete_blockers(db, client_id=client_id)
+    if blocked is None:
+        return None
+    noun = "printer" if blocked["total"] == 1 else "printers"
+    return {
+        "message": (
+            f"Can't delete this client: it still has {blocked['total']} {noun} "
+            f"({blocked['breakdown']}). Deleting them also deletes their entire "
+            "reading history and page meters, which past invoices are derived "
+            "from — so remove the printers first, deliberately."
+        ),
+        "detail": f"printers={blocked['total']} ({blocked['breakdown']})",
+    }
+
+
 @router.post("/clients/{client_id}/delete")
 def delete_client(client_id: int, request: Request, db: Session = Depends(get_db)):
+    """Delete a client, REFUSING while it still owns printers.
+
+    WHY IT REFUSES RATHER THAN CASCADING. It used to do neither: ``printers``
+    carries a plain ``ForeignKey`` to ``clients`` with no ``ondelete`` and the
+    relationship declares no cascade, so SQLAlchemy issued
+    ``UPDATE printers SET client_id=NULL`` against a NOT NULL column and the
+    operator got a bare 500 (verified on both SQLite and Postgres). The fix is
+    one of two behaviours, and the choice matters:
+
+    * Cascading destroys the tenant's entire measurement history -- readings,
+      rollups and page meters. Invoices in this product are **derived on demand,
+      never stored** (see central.billing), so those rows are the only evidence
+      any past invoice ever existed. There is no undo and no backup-shaped
+      recovery that is not a whole-database restore.
+    * It also cannot be delegated to the database here. This project runs SQLite
+      for dev and the whole test suite and installs **no** ``PRAGMA
+      foreign_keys`` listener, so ``ondelete="CASCADE"`` is inert there: adding
+      it would cascade correctly on Postgres and silently orphan every reading
+      on SQLite. A correct cascade would therefore have to be re-implemented in
+      application code across a dozen tables, and every ``client_id`` column
+      added afterwards becomes a silent orphan-leak the day somebody forgets it.
+
+    Refusing has none of that surface, and it costs the operator a deliberate,
+    per-printer, individually audited act instead of one irreversible click. The
+    message names the blocker so the refusal is an instruction rather than a
+    wall -- which is the whole difference from the 500 it replaces.
+    """
     user = _manager(request, db)
     if user is None or user.role != m.UserRole.admin:
         _flash(request, "Only admins can delete clients.")
         return _redirect(f"/manage/clients/{client_id}")
     client = db.get(m.Client, client_id)
     if client:
+        blocked = _client_delete_blockers(db, client_id)
+        if blocked:
+            # Audited as a refusal, not silently dropped: an admin pressing
+            # Delete on a live tenant is worth a row either way.
+            record(db, request, user, "client.delete_refused",
+                   target=f"client:{client.id} {client.name}",
+                   detail=blocked["detail"])
+            db.commit()
+            _flash(request, blocked["message"])
+            return _redirect(f"/manage/clients/{client_id}")
         record(db, request, user, "client.delete",
                target=f"client:{client.id} {client.name}")
         # The branding columns go with the row, but the logo BYTES live in
@@ -426,6 +511,15 @@ def create_site(
 
 @router.post("/sites/{site_id}/delete")
 def delete_site(site_id: int, request: Request, db: Session = Depends(get_db)):
+    """Delete a site, REFUSING while it still holds printers.
+
+    The same defect as ``delete_client``, one level down and reachable from the
+    adjacent button: ``printers.site_id`` is NOT NULL with no ``ondelete`` and
+    ``Site.printers`` declares no cascade, so this raised the identical
+    IntegrityError. Fixing only the client route would have left a 500 two
+    clicks away -- and this one is worse, because deleting a client cascades to
+    its sites, so the client path reaches this failure through BOTH foreign keys.
+    """
     user = _manager(request, db)
     site = db.get(m.Site, site_id)
     if user is None or site is None:
@@ -433,12 +527,26 @@ def delete_site(site_id: int, request: Request, db: Session = Depends(get_db)):
     client_id = site.client_id
     if user.role != m.UserRole.admin:
         _flash(request, "Only admins can delete sites.")
-    else:
-        record(db, request, user, "site.delete",
-               target=f"site:{site.id} {site.name}")
-        db.delete(site)
+        return _redirect(f"/manage/clients/{client_id}")
+    blocked = _printer_delete_blockers(db, site_id=site_id)
+    if blocked:
+        noun = "printer" if blocked["total"] == 1 else "printers"
+        record(db, request, user, "site.delete_refused",
+               target=f"site:{site.id} {site.name}",
+               detail=f"printers={blocked['total']} ({blocked['breakdown']})")
         db.commit()
-        _flash(request, "Site deleted.")
+        _flash(
+            request,
+            f"Can't delete this site: it still has {blocked['total']} {noun} "
+            f"({blocked['breakdown']}). Move them to another site or delete "
+            "them first — deleting a printer also deletes its reading history."
+        )
+        return _redirect(f"/manage/clients/{client_id}")
+    record(db, request, user, "site.delete",
+           target=f"site:{site.id} {site.name}")
+    db.delete(site)
+    db.commit()
+    _flash(request, "Site deleted.")
     return _redirect(f"/manage/clients/{client_id}")
 
 

@@ -7,7 +7,7 @@ from collections import namedtuple
 from datetime import datetime, timedelta, timezone
 from typing import Iterable, Optional
 
-from sqlalchemy import case, func, or_, select
+from sqlalchemy import and_, case, func, not_, or_, select
 from sqlalchemy.orm import Session, contains_eager
 
 from central import models as m
@@ -86,7 +86,33 @@ SNMP_GRADE_META = {
 
 
 def fleet_summary(db: Session, client_id: Optional[int] = None) -> dict:
-    """Counts of printers by status, plus agent and alert tallies."""
+    """Counts of printers by status, plus agent and alert tallies.
+
+    ``client_id`` scopes ALL FIVE numbers. It used to scope only the printer
+    counts: ``pending_discovery``, ``open_alerts`` and ``agents_offline`` stayed
+    fleet-wide, so an operator asking ``/api/v1/reports/fleet?client_id=3`` was
+    handed that client's 7 printers beside the whole MSP's 40 open alerts, with
+    nothing in the response saying the numbers came from different populations.
+    Not a tenant leak -- the route is staff-only and the filter is an operator
+    convenience -- but a wrong answer, and the harder kind: every figure is
+    individually correct, so nothing looks broken.
+
+    Labelling the three instead was the alternative and is worse here. This is a
+    JSON endpoint whose consumers we do not control, and a label only helps a
+    reader who notices it; the summary is one object describing one thing, and
+    the only self-consistent reading of "summarise client 3" is five numbers
+    about client 3.
+
+    HOW EACH IS SCOPED, since the three tables reach a client differently:
+
+    * printers -- directly, by ``printers.client_id``.
+    * alerts   -- through the printer, matching ``per_client_rollup`` and the
+      client drill-down. ``Alert.printer_id`` is nullable, so an agent-scope
+      alert (an offline collector) has none; those are counted by
+      ``agents_offline`` and would otherwise be counted twice.
+    * agents   -- through ``agents.site_id -> sites.client_id``. An agent has no
+      client column: it belongs to a site, and a site belongs to a client.
+    """
     stmt = select(m.Printer.status, func.count()).where(
         m.Printer.discovery_state == m.DiscoveryState.approved
     )
@@ -99,23 +125,32 @@ def fleet_summary(db: Session, client_id: Optional[int] = None) -> dict:
         by_status[status.value] = count
         total += count
 
-    pending = db.scalar(
+    pending_stmt = (
         select(func.count())
         .select_from(m.Printer)
         .where(m.Printer.discovery_state == m.DiscoveryState.pending)
     )
-    open_alerts = db.scalar(
+    alerts_stmt = (
         select(func.count()).select_from(m.Alert).where(m.Alert.state == m.AlertState.open)
     )
-    agents_offline = db.scalar(
+    agents_stmt = (
         select(func.count()).select_from(m.Agent).where(m.Agent.status == m.AgentStatus.offline)
     )
+    if client_id is not None:
+        pending_stmt = pending_stmt.where(m.Printer.client_id == client_id)
+        alerts_stmt = alerts_stmt.join(
+            m.Printer, m.Printer.id == m.Alert.printer_id
+        ).where(m.Printer.client_id == client_id)
+        agents_stmt = agents_stmt.join(m.Site, m.Site.id == m.Agent.site_id).where(
+            m.Site.client_id == client_id
+        )
+
     return {
         "total_printers": total,
         "by_status": by_status,
-        "pending_discovery": pending or 0,
-        "open_alerts": open_alerts or 0,
-        "agents_offline": agents_offline or 0,
+        "pending_discovery": db.scalar(pending_stmt) or 0,
+        "open_alerts": db.scalar(alerts_stmt) or 0,
+        "agents_offline": db.scalar(agents_stmt) or 0,
     }
 
 
@@ -134,6 +169,39 @@ def low_supply_threshold(db: Session) -> float:
         return float(load_settings(db).get("alerts.low_supply_pct", DEFAULT_LOW_SUPPLY_PCT))
     except (TypeError, ValueError):
         return DEFAULT_LOW_SUPPLY_PCT
+
+
+def receptacle_supply_clause():
+    """SQL for "this supply's level means how FULL it is".
+
+    The SQL twin of ``central.supplies.is_receptacle`` and deliberately the same
+    rule, read the same way round: the device's own class wins, and a class that
+    is absent or ``other`` falls back to the supply type.
+
+    It is SQL rather than a Python filter because both callers count rows --
+    ``low_supplies`` applies its cap IN SQL, and ``per_client_rollup`` never
+    materialises a Supply at all -- so filtering after the fact would either
+    spend the cap on receptacles or not run.
+
+    ``coalesce`` is what makes the NULL case behave: in SQL ``NULL <> 'consumed'``
+    is NULL, not true, so a bare inequality would quietly exclude every row
+    written before the class was stored -- which is all of them.
+    """
+    from central.supplies import (
+        SUPPLY_CLASS_CONSUMED,
+        SUPPLY_CLASS_RECEPTACLE,
+        receptacle_supply_types,
+    )
+
+    cls = func.lower(func.coalesce(m.Supply.supply_class, ""))
+    return or_(
+        cls == SUPPLY_CLASS_RECEPTACLE,
+        and_(
+            cls != SUPPLY_CLASS_RECEPTACLE,
+            cls != SUPPLY_CLASS_CONSUMED,
+            m.Supply.type.in_(receptacle_supply_types()),
+        ),
+    )
 
 
 def low_supplies(
@@ -158,6 +226,15 @@ def low_supplies(
     The printer is eager-loaded via the join we already make, because every
     caller's template renders ``supply.printer`` -- without it each row costs
     its own SELECT.
+
+    RECEPTACLES ARE EXCLUDED, and that is a correctness rule rather than a
+    filter. A waste container's level is how FULL it is (RFC 3805
+    ``receptacleThatIsFilled``), so a freshly serviced box reporting 5 was the
+    top hit on every "Low supplies" panel in the product -- an operator sent to
+    replace a part that had just been replaced. "Low" is only meaningful for a
+    supply that is consumed; a full receptacle is a different fact and is
+    surfaced by ``central.reorder``. See ``central.supplies`` for why the type
+    fallback makes this correct for rows written before the class was stored.
     """
     if threshold is None:
         threshold = low_supply_threshold(db)
@@ -168,6 +245,7 @@ def low_supplies(
         .where(
             m.Supply.level_pct.is_not(None),
             m.Supply.level_pct <= threshold,
+            not_(receptacle_supply_clause()),
             m.Printer.discovery_state == m.DiscoveryState.approved,
         )
     )
@@ -437,6 +515,11 @@ def per_client_rollup(db: Session) -> list[dict]:
             approved,
             m.Supply.level_pct.is_not(None),
             m.Supply.level_pct <= low_pct,
+            # Same rule as low_supplies: a waste box reports how FULL it is, so
+            # 5% is nearly empty, not nearly exhausted. Ported here from the
+            # per-client loop this aggregate replaced -- dropping it would have
+            # made the N+1 fix silently reintroduce the false positive.
+            not_(receptacle_supply_clause()),
         )
         .group_by(m.Printer.client_id)
     ).all())

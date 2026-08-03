@@ -199,21 +199,34 @@
 <span class="px-2 py-0.5 rounded text-xs font-medium {{ colors.get(status.value, 'bg-slate-100') }}">{{ status.value }}</span>
 {%- endmacro %}
 
-{% macro level_bar(pct) -%}
+{#
+  level_bar(pct, receptacle=False)
+
+  ``pct`` is always what the DEVICE reported, and ``receptacle`` says which way
+  to read it: remaining for a cartridge, how-full for a waste box. Colour is
+  chosen from the headroom left, so "red means go and do something" holds for
+  both -- without the flag, an emptied waste box reading 5 drew a red bar and a
+  full one drew green, which is exactly backwards. Pass
+  ``supplies.is_receptacle(sup)``; callers that cannot (a bare percentage with
+  no Supply row behind it) get the cartridge reading, which is what every
+  existing call site already meant.
+-#}
+{% macro level_bar(pct, receptacle=False) -%}
 {%- if pct is none -%}
 <span class="text-xs text-slate-400">unknown</span>
 {%- else -%}
-{%- set color = 'bg-red-500' if pct <= 10 else ('bg-amber-500' if pct <= 25 else 'bg-green-500') -%}
+{%- set headroom = (100 - pct) if receptacle else pct -%}
+{%- set color = 'bg-red-500' if headroom <= 10 else ('bg-amber-500' if headroom <= 25 else 'bg-green-500') -%}
 <div class="flex items-center gap-2">
   {# `| float` is a security guard, not formatting. `pct` is a supply level off
      a device on a customer LAN and it lands in a CSS declaration, where
      escaping stops an attribute breakout but not `1%; background-image:
      url(https://attacker/)`. It is a Float column today, so a non-numeric value
-     already 500s on the comparison above — but that is incidental, and a caller
+     already 500s on the comparison above -- but that is incidental, and a caller
      handing this macro a preformatted string would make it a live sink with
      nothing in between. Coercing here makes the safety structural. #}
   <div class="w-24 h-2 bg-slate-200 rounded"><div class="h-2 rounded {{ color }}" style="width: {{ pct | float }}%"></div></div>
-  <span class="text-xs tabular-nums w-9">{{ '%.0f'|format(pct) }}%</span>
+  <span class="text-xs tabular-nums {{ 'w-16' if receptacle else 'w-9' }}">{{ '%.0f'|format(pct) }}%{% if receptacle %} full{% endif %}</span>
 </div>
 {%- endif -%}
 {%- endmacro %}

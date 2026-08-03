@@ -128,6 +128,12 @@ def upsert_supply(db: Session, printer: m.Printer, supply: s.SupplyIn) -> m.Supp
         existing = m.Supply(printer_id=printer.id, type=supply.type, color=supply.color)
         db.add(existing)
     existing.description = supply.description
+    # Written on every poll, including back to NULL. A device that stops
+    # reporting its class (firmware downgrade, a provider that supersedes the
+    # standard walk) must not leave a stale "receptacle" behind deciding how the
+    # new levels are read -- NULL falls back to the type, which is a rule, not a
+    # leftover.
+    existing.supply_class = supply.supply_class
     existing.level_pct = supply.level_pct
     existing.status_note = supply.status_note
     existing.current = supply.current
