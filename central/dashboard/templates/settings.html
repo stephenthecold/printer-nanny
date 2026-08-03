@@ -39,6 +39,7 @@
     </div>
     <div class="space-y-3">
       <form method="post" action="/settings/branding/logo" enctype="multipart/form-data" class="space-y-2">
+        {{ csrf_field() }}
         <label class="block">
           <span class="text-xs text-slate-500">Logo image</span>
           <input type="file" name="logo" accept="image/png,image/jpeg,image/webp,image/gif" required
@@ -53,6 +54,7 @@
       {% if has_uploaded_logo %}
       <form method="post" action="/settings/branding/logo/delete"
             onsubmit="return confirm('Remove the uploaded logo?')">
+        {{ csrf_field() }}
         <button class="text-xs text-red-600 hover:underline">Remove uploaded logo</button>
       </form>
       {% endif %}
@@ -65,6 +67,7 @@
 {% endif %}
 
 <form method="post" action="/settings" class="space-y-6 max-w-3xl">
+  {{ csrf_field() }}
   <input type="hidden" name="_group" value="{{ active_group }}" />
   {% for section, fields in sections.items() %}
   <section class="{{ card_cls('none') }}">
@@ -101,6 +104,7 @@
 
 {% if active_group == 'notifications' %}
 <form method="post" action="/settings/test-notification" class="max-w-3xl mt-4">
+  {{ csrf_field() }}
   <button class="{{ btn('neutral') }}">Send test notification</button>
   <span class="text-xs text-slate-400 ml-2">Fires a test alert through every enabled channel (save first).</span>
 </form>

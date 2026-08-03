@@ -21,6 +21,7 @@ from sqlalchemy.orm import Session
 
 from central import models as m
 from central import runtime
+from central.csrf import rotate_token
 from central.db import get_db
 
 router = APIRouter(tags=["auth"])
@@ -123,6 +124,9 @@ async def sso_callback(
     if user is None:
         return _err("not_provisioned")
     request.session["user_id"] = user.id
+    # Same rule as the local login: a CSRF token issued before authentication is
+    # not this user's secret, so it does not survive becoming their session.
+    rotate_token(request.session)
     return RedirectResponse("/", status_code=303)
 
 

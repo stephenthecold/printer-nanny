@@ -93,7 +93,7 @@ def test_sqlite_backup_download_streams_file(db, monkeypatch, tmp_path):
     monkeypatch.setattr(br, "_is_sqlite", lambda: True)
     monkeypatch.setattr(br, "_sqlite_path", lambda: src)
     cli = _admin(db)
-    resp = cli.get("/admin/backup/download")
+    resp = cli.post("/admin/backup/download")
     assert resp.status_code == 200
     assert resp.content == b"SQLITE-FAKE-CONTENTS"
     assert "attachment" in resp.headers["content-disposition"]
@@ -129,7 +129,7 @@ def test_postgres_download_handles_pg_dump_failure(db, monkeypatch):
 
     monkeypatch.setattr(br, "_pg_dump_to_file", boom)
     cli = _admin(db)
-    resp = cli.get("/admin/backup/download", follow_redirects=False)
+    resp = cli.post("/admin/backup/download", follow_redirects=False)
     assert resp.status_code == 303  # bounced back with an error
     assert resp.headers["location"] == "/admin/backup"
 

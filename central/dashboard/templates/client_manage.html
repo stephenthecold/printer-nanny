@@ -34,6 +34,7 @@
               #}
               <form method="post" action="/manage/sites/{{ s.id }}/delete" data-name="{{ s.name }}"
                     onsubmit="return confirm('Delete site ' + this.dataset.name + '?')" class="inline">
+                {{ csrf_field() }}
                 <button class="text-xs text-red-600 hover:underline">Delete</button>
               </form>
             </td>
@@ -46,6 +47,7 @@
       {# Labelled with the `field` macro rather than placeholders: a placeholder
          is not an accessible name and it vanishes on the first keystroke. #}
       <form method="post" action="/manage/sites" class="border-t p-4 grid grid-cols-2 gap-2">
+        {{ csrf_field() }}
         <input type="hidden" name="client_id" value="{{ client.id }}" />
         {{ field('name', 'Site name', required=True) }}
         {{ field('address', 'Address', placeholder='Optional') }}
@@ -73,6 +75,7 @@
               {# Same rule, and here the value came off a device. #}
               <form method="post" action="/manage/printers/{{ p.id }}/delete" data-name="{{ p.ip }}"
                     onsubmit="return confirm('Delete printer ' + this.dataset.name + '?')" class="inline ml-2">
+                {{ csrf_field() }}
                 <button class="text-xs text-red-600 hover:underline">Delete</button>
               </form>
             </td>
@@ -90,6 +93,7 @@
     <section class="{{ card_cls() }}">
       <h2 class="font-semibold mb-3">Edit client</h2>
       <form method="post" action="/manage/clients/{{ client.id }}" class="space-y-2">
+        {{ csrf_field() }}
         {{ field('name', 'Client name', value=client.name, required=True) }}
         {{ textarea_field('notes', 'Notes', value=client.notes or '', rows=3) }}
         {# Hand-rolled rather than the `field` macro only because of list=:
@@ -126,6 +130,7 @@
         Alert emails and tickets always use the global branding.
       </p>
       <form method="post" action="/manage/clients/{{ client.id }}/branding" class="space-y-3">
+        {{ csrf_field() }}
         {{ field('brand_name', 'Brand name', value=client.brand_name or '',
                  placeholder=app.name or 'Printer Nanny',
                  help='Blank inherits ' ~ (app.name or 'Printer Nanny') ~ '.') }}
@@ -153,6 +158,7 @@
         {% endif %}
         <form method="post" action="/manage/clients/{{ client.id }}/branding/logo"
               enctype="multipart/form-data" class="space-y-2">
+          {{ csrf_field() }}
           <label class="block">
             <span class="text-xs text-slate-500">Portal logo image</span>
             <input type="file" name="logo" accept="image/png,image/jpeg,image/webp,image/gif" required
@@ -165,6 +171,7 @@
         <form method="post" action="/manage/clients/{{ client.id }}/branding/logo/delete"
               data-name="{{ client.name }}"
               onsubmit="return confirm('Remove the portal logo for ' + this.dataset.name + '?')">
+          {{ csrf_field() }}
           <button class="text-xs text-red-600 hover:underline">Remove uploaded logo</button>
         </form>
         {% endif %}
@@ -176,6 +183,7 @@
       <h2 class="font-semibold mb-2 text-red-700">Danger zone</h2>
       <form method="post" action="/manage/clients/{{ client.id }}/delete" data-name="{{ client.name }}"
             onsubmit="return confirm('Delete ' + this.dataset.name + ' and ALL its sites/printers?')">
+        {{ csrf_field() }}
         <button class="w-full border border-red-300 text-red-700 rounded py-2 text-sm">Delete client</button>
       </form>
     </section>

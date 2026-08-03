@@ -8,6 +8,7 @@
 {% endcall %}
 
 <form method="post" action="/manage/users/{{ target.id }}" class="{{ card_cls('lg', 'max-w-lg space-y-3') }}">
+  {{ csrf_field() }}
   {{ field('email', 'Email', type='email', value=target.email or '') }}
   {% call select_field('role', 'Role') %}
     {% for r in roles %}
@@ -30,6 +31,7 @@
   {{ section_title('Reset password') }}
   <p class="text-xs text-slate-500 mb-2">Forces a new local password — the user can change it later from <code>/account</code>.</p>
   <form method="post" action="/manage/users/{{ target.id }}/reset-password" class="space-y-3">
+    {{ csrf_field() }}
     {{ field('new_password', 'New password', type='password', required=True,
              autocomplete='new-password', help='Minimum 8 characters.') }}
     <button class="{{ btn('warning') }}">Reset password</button>

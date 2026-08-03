@@ -5,8 +5,8 @@ from __future__ import annotations
 import logging
 from pathlib import Path
 
-from fastapi import Depends, FastAPI
-from fastapi.responses import JSONResponse
+from fastapi import Depends, FastAPI, Request
+from fastapi.responses import JSONResponse, PlainTextResponse
 from fastapi.staticfiles import StaticFiles
 from sqlalchemy.orm import Session
 from starlette.middleware.sessions import SessionMiddleware
@@ -23,6 +23,7 @@ from central.api import (
     workstations,
 )
 from central.config import settings
+from central.csrf import CSRFError, csrf_protect
 from central.dashboard import (
     events_routes,
     backup_routes,
@@ -35,6 +36,7 @@ from central.dashboard import (
     routes as dashboard,
     settings_routes,
 )
+from central.dashboard.templating import render_csrf_error
 from central.db import create_all, get_db
 from central.health import database_ok, worker_health
 from central.logging_config import configure_logging
@@ -51,8 +53,17 @@ configure_logging()
 
 log = logging.getLogger("central.main")
 
-app = FastAPI(title="Printer Nanny", version="0.30.0")
-app = FastAPI(title="Printer Nanny", version="0.30.0")
+# ``dependencies`` here is the CSRF gate, and it is declared on the app rather
+# than on each router on purpose: APIRouter.include_router prepends the app
+# router's dependencies to every route it takes in, so a router added later
+# inherits the check instead of quietly shipping without it. See central/csrf.py
+# for what it does and does not cover -- in particular why "carries a session
+# cookie" is the trigger rather than a path allowlist.
+app = FastAPI(
+    title="Printer Nanny",
+    version="0.31.0",
+    dependencies=[Depends(csrf_protect)],
+)
 # Honor X-Forwarded-Proto/For from the reverse proxy so request.base_url returns
 # https:// when Caddy/Nginx terminates TLS in front of us. Without this, the
 # agent install command on /manage/agents leaks http://… to operators behind
@@ -64,7 +75,12 @@ app.add_middleware(
     secret_key=settings.secret_key,
     max_age=60 * 60 * 12,
     https_only=settings.secure_cookies,  # Secure flag in production (TLS at the proxy)
-    same_site="lax",  # mitigates cross-site POST/CSRF on the dashboard
+    # Defence in depth, NOT the CSRF defence -- that is central/csrf.py. "lax"
+    # compares registrable domains, so a sibling host on the same domain is
+    # same-site and gets this cookie attached to its forged requests; and it
+    # permits top-level GET navigation, which is why a disclosure behind a GET
+    # (the old /admin/backup/download) was reachable despite it.
+    same_site="lax",
 )
 
 # JSON API
@@ -92,6 +108,48 @@ app.include_router(backup_routes.router)
 app.include_router(auth_oidc.router)
 app.include_router(auth_oauth_smtp.router)
 app.include_router(installer.router)
+
+
+@app.exception_handler(CSRFError)
+async def _csrf_rejected(request: Request, exc: CSRFError):
+    """Turn a refused request into something the operator can act on.
+
+    A bare 403 on a form submit is the failure mode this whole change had to
+    avoid: to an operator it is indistinguishable from the app being broken, and
+    to an htmx-driven control it is *invisible* -- htmx does not swap a non-2xx
+    response, so the button simply does nothing. So both shapes get a stated
+    reason: a rendered page for a form post, and for htmx a plain-text body that
+    base.html's ``htmx:responseError`` listener puts on screen.
+
+    Audited as ``csrf.rejected``. It is the only signal that someone is aiming
+    cross-site requests at an operator's browser, and it is written on its own
+    session because the request's DB dependency is already torn down by the time
+    an exception handler runs. Never the tokens -- only the path and which of
+    the three ways it failed.
+    """
+    try:
+        from central.audit import record_anonymous
+        from central.db import SessionLocal
+
+        with SessionLocal() as audit_db:
+            record_anonymous(
+                audit_db, request, "", "csrf.rejected",
+                target=f"{request.method} {request.url.path}"[:300],
+                detail=exc.reason,
+            )
+            audit_db.commit()
+    except Exception:  # noqa: BLE001 - a refusal must not depend on the audit landing
+        log.exception("failed to audit csrf rejection")
+
+    if request.headers.get("HX-Request", "").lower() == "true":
+        return PlainTextResponse(
+            exc.message,
+            status_code=403,
+            # htmx would not swap a 403 anyway; saying so keeps a future
+            # hx-swap-oob or global error-swap config from pasting this in.
+            headers={"HX-Reswap": "none"},
+        )
+    return render_csrf_error(request, exc.message)
 
 
 class _RevalidatingStatic(StaticFiles):

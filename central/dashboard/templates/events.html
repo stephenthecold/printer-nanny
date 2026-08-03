@@ -95,9 +95,11 @@
             <td class="{{ td_cls('right') }}">
               <div class="flex flex-wrap gap-1 justify-end">
                 <form method="post" action="/manage/events/{{ s.id }}/test" class="inline">
+                  {{ csrf_field() }}
                   <button class="{{ btn('neutral', 'sm') }}">Send test</button>
                 </form>
                 <form method="post" action="/manage/events/{{ s.id }}/toggle" class="inline">
+                  {{ csrf_field() }}
                   <button class="{{ btn('subtle', 'sm') }}">{{ 'Disable' if s.enabled else 'Enable' }}</button>
                 </form>
                 {#- The name goes through |tojson, not straight interpolation.
@@ -108,10 +110,12 @@
                     both parsers. -#}
                 <form method="post" action="/manage/events/{{ s.id }}/rotate" class="inline"
                       onsubmit="return confirm('Rotate the signing secret for ' + {{ s.name|tojson }} + '? The current one stops working immediately.');">
+                  {{ csrf_field() }}
                   <button class="{{ btn('warning', 'sm') }}">Rotate secret</button>
                 </form>
                 <form method="post" action="/manage/events/{{ s.id }}/delete" class="inline"
                       onsubmit="return confirm('Delete subscription ' + {{ s.name|tojson }} + '? Queued deliveries go with it.');">
+                  {{ csrf_field() }}
                   <button class="{{ btn('danger', 'sm') }}">Delete</button>
                 </form>
               </div>
@@ -124,6 +128,7 @@
                                 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-offset-1 focus-visible:ring-sky-500">Edit “{{ s.name }}”</summary>
                 <form method="post" action="/manage/events/{{ s.id }}/update"
                       class="mt-2 grid md:grid-cols-2 gap-3">
+                  {{ csrf_field() }}
                   {{ field('name', 'Name for ' ~ s.name, value=s.name, required=True, size='sm') }}
                   {{ field('url', 'Destination URL for ' ~ s.name, value=s.url, required=True, size='sm') }}
                   {%- call select_field('client_id', 'Scope for ' ~ s.name, size='sm',
@@ -162,6 +167,7 @@
   <section class="{{ card_cls() }}">
     {{ section_title('Add a subscription') }}
     <form method="post" action="/manage/events" class="space-y-3 text-sm">
+      {{ csrf_field() }}
       {{ field('name', 'Name', required=True, placeholder='Acme procurement',
                help='Just for you — it is not sent.') }}
       {{ field('url', 'Destination URL', type='url', required=True,

@@ -21,26 +21,31 @@
   {% if can_manage %}
   <div class="ml-auto flex items-center gap-2">
     <form method="post" action="/manage/printers/{{ printer.id }}/poll" class="inline">
+      {{ csrf_field() }}
       <button class="{{ btn('accent', 'sm') }}">Poll now</button>
     </form>
     <a href="/manage/printers/{{ printer.id }}/edit" class="{{ btn('primary', 'sm') }}">Edit</a>
     {% if is_pending %}
     <form method="post" action="/manage/printers/{{ printer.id }}/approve" class="inline">
+      {{ csrf_field() }}
       <button class="{{ btn('success', 'sm') }}">Approve</button>
     </form>
     {% elif not is_ignored %}
     <form method="post" action="/manage/printers/{{ printer.id }}/ignore" class="inline"
           onsubmit="return confirm('Stop monitoring {{ printer.ip }}? Agents will no longer poll it.')">
+      {{ csrf_field() }}
       <button class="{{ btn('warning', 'sm') }}">Stop monitoring</button>
     </form>
     {% else %}
     <form method="post" action="/manage/printers/{{ printer.id }}/approve" class="inline">
+      {{ csrf_field() }}
       <button class="{{ btn('success', 'sm') }}">Resume monitoring</button>
     </form>
     {% endif %}
     {% if user.role.value == 'admin' %}
     <form method="post" action="/manage/printers/{{ printer.id }}/delete" class="inline"
           onsubmit="return confirm('Delete printer {{ printer.ip }} and all its history? This cannot be undone.')">
+      {{ csrf_field() }}
       <button class="{{ btn('danger', 'sm') }}">Delete</button>
     </form>
     {% endif %}
@@ -153,6 +158,7 @@
     {% if can_manage %}
     <form method="post" action="/manage/printers/{{ printer.id }}/driver-tier"
           class="flex items-end gap-2 shrink-0">
+      {{ csrf_field() }}
       {% call select_field('driver_tier_override', 'Pin tier', size='sm') %}
         <option value="">— use probe result —</option>
         <option value="driverless" {% if printer.driver_tier_override and printer.driver_tier_override.value == 'driverless' %}selected{% endif %}>driverless</option>

@@ -40,6 +40,7 @@
     <section class="{{ card_cls('md', 'h-fit') }}">
       {{ section_title('Add client') }}
       <form method="post" action="/manage/clients" class="space-y-3">
+        {{ csrf_field() }}
         {{ field('name', 'Client name', required=True) }}
         {{ textarea_field('notes', 'Notes', rows=2) }}
         <button class="{{ btn('primary', 'md', 'w-full') }}">Add client</button>
@@ -50,6 +51,7 @@
       {{ section_title('Add site') }}
       {% if clients %}
       <form method="post" action="/manage/sites" class="space-y-3">
+        {{ csrf_field() }}
         {% call select_field('client_id', 'Client', required=True) %}
           <option value="">— Pick a client —</option>
           {% for c in clients %}<option value="{{ c.id }}">{{ c.name }}</option>{% endfor %}

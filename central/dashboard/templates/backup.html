@@ -19,7 +19,12 @@
     {{ section_title('Download backup') }}
     {% if backend == 'sqlite' %}
     <p class="text-sm text-slate-500 mb-3">Streams the SQLite database file as-is. Suitable as a complete recovery image.</p>
-    <a href="/admin/backup/download" class="{{ btn('primary') }}">Download .sqlite</a>
+    {# A button, not a link: this discloses the entire database, so it must not
+       be reachable by a cross-site navigation. See backup_routes.py. #}
+    <form method="post" action="/admin/backup/download">
+      {{ csrf_field() }}
+      <button class="{{ btn('primary') }}">Download .sqlite</button>
+    </form>
     {% else %}
     <p class="text-sm text-slate-500 mb-3">
       Runs <code>pg_dump --format=custom</code> against the configured database
@@ -29,8 +34,10 @@
     {% if not pg_dump_available %}
     <p class="text-sm text-amber-700 mb-3"><strong>Heads up:</strong> <code>pg_dump</code> is not on PATH in the api container. Add the <code>postgresql-client</code> package to the image, or run <code>pg_dump</code> from your host.</p>
     {% endif %}
-    <a href="/admin/backup/download"
-       class="{{ btn('primary', 'md', 'opacity-50 pointer-events-none' if not pg_dump_available else '') }}">Download .dump</a>
+    <form method="post" action="/admin/backup/download">
+      {{ csrf_field() }}
+      <button class="{{ btn('primary') }}" {{ 'disabled' if not pg_dump_available }}>Download .dump</button>
+    </form>
     {% endif %}
   </section>
 
@@ -45,6 +52,7 @@
     {% endif %}
     <form method="post" action="/admin/backup/restore" enctype="multipart/form-data" class="space-y-3"
           onsubmit="return confirm('Replace the live database with the uploaded backup? This cannot be undone.')">
+      {{ csrf_field() }}
       <label class="block">
         <span class="text-xs text-slate-500">Backup file</span>
         <input type="file" name="backup_file" required accept=".sqlite,.db,.dump,.sql,application/octet-stream"

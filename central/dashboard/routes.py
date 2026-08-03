@@ -3,24 +3,26 @@
 from __future__ import annotations
 
 from datetime import datetime, timezone
-from pathlib import Path
 from typing import Optional
 
 from fastapi import APIRouter, Depends, Form, Request
 from fastapi.responses import HTMLResponse, RedirectResponse
-from fastapi.templating import Jinja2Templates
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
 from central import models as m
 from central import queries
 from central.branding import branding_for
+from central.csrf import rotate_token
+from central.dashboard.templating import templates
 from central.db import get_db
 from central.health import worker_banner
 from central.security import hash_password, verify_password
 
 router = APIRouter(tags=["dashboard"])
-_templates = Jinja2Templates(directory=str(Path(__file__).parent / "templates"))
+# One shared Jinja environment (central/dashboard/templating.py): it carries
+# the csrf_field()/csrf_token() globals every form depends on.
+_templates = templates
 
 
 def _user(request: Request, db: Session):
@@ -115,6 +117,12 @@ def login(
         db.commit()
         return _render(request, "login.html", db=db, error="Invalid credentials")
     request.session["user_id"] = user.id
+    # A token seen before authentication must not still be valid after it: the
+    # login page is reachable by anyone, so the pre-login token is not a secret
+    # of this user's. Rotating costs nothing -- the next page render carries the
+    # new one -- and the session cookie changes with it, which is also what tells
+    # a second tab it is stale rather than letting it post silently.
+    rotate_token(request.session)
     record(db, request, user, "login")
     db.commit()
     return RedirectResponse("/", status_code=303)
