@@ -13,7 +13,16 @@ from central.db import Base
 import central.models  # noqa: F401  (register models on Base.metadata)
 
 config = context.config
-config.set_main_option("sqlalchemy.url", settings.database_url)
+# Deliberately NOT `config.set_main_option("sqlalchemy.url", settings.database_url)`.
+# That writes through ConfigParser, whose BasicInterpolation treats `%` as a
+# directive -- so any percent-encoded character in a password (`p%40ss`, entirely
+# normal in a Postgres URL) makes `alembic upgrade head` die at import time with
+# `ValueError: invalid interpolation syntax`, before a single migration runs. The
+# option is also never read: alembic core never consults `sqlalchemy.url` itself,
+# `fileConfig` below is handed a *filename* and re-parses alembic.ini from disk so
+# it cannot see an in-memory option, and both paths here carry the URL themselves
+# -- offline passes it to `context.configure(url=...)`, online assigns it onto the
+# plain dict `get_section()` returns. Keep the URL out of ConfigParser.
 if config.config_file_name:
     fileConfig(config.config_file_name)
 
