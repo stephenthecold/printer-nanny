@@ -395,8 +395,73 @@ Once the harness was fixed (see below), the picture is consistent and repeatable
 So the fault is **determined by what the device advertises** -- not the network,
 not the device's job handling, nothing stateful -- and a probe could in principle
 predict it. It is a **combination**: neither half of those 78 is sufficient on its
-own. The responsible attribute(s) are **not identified**, and the bisect is
-unfinished.
+own. The responsible attribute(s) are **not identified**.
+
+### Finishing it: `scripts/ipp_bisect.py`, and why it is not a bisect
+
+**"Neither half is sufficient" is not a partial result, it is a halt condition.**
+Binary search works by recursing into whichever half still reproduces the effect;
+when *both* halves come back negative it has nowhere to go. That is not bad luck,
+it is the definition of an **interaction** -- two or more attributes that only
+work together, neither visible alone. So the search was not merely unfinished, it
+was being run with an algorithm that cannot converge on the thing the evidence
+says is there.
+
+The algorithm that can is **delta debugging** (`ddmin`). When no subset passes it
+tests the *complements*; when those fail too it refines the partition and tries
+again, instead of stopping. It returns a **1-minimal** set: one where removing any
+single attribute loses the effect.
+
+`scripts/ipp_bisect.py` drives that search. It decides nothing itself -- it cannot
+render a print job -- so each trial's verdict comes from an **oracle** you supply
+that runs against the real rig. Everything above that seam is unit-tested in
+`tests/test_ipp_bisect.py`, including the claim above: a bisect provably halts on
+the input shape recorded here, and ddmin finds the pair.
+
+**Cost, measured.** Over 40 random placements in 78 attributes:
+
+| cause size | distinct trials (median) | p90 | max |
+|---|---|---|---|
+| 1 attribute | 10 | 11 | 12 |
+| **2 attributes** | **38** | **44** | **47** |
+| 3 attributes | 70 | 83 | 88 |
+| 4 attributes | 100 | 117 | 123 |
+
+A trial is a physical print job, so at a couple of minutes each the two-attribute
+case is **about an afternoon**. Results are memoised and journalled -- that roughly
+halves the jobs (90 oracle calls collapse to 45 prints) and lets an interrupted
+run resume without reprinting anything.
+
+**Before it starts, it checks the premise**: importing everything must PASS and
+importing nothing must FAIL. That is not ceremony. If some donor attribute
+*breaks* the effect rather than fixing it, the full set does not print and the
+whole search is measuring something other than what was recorded -- better to
+learn that in one trial than after three hours.
+
+    python3 scripts/ipp_bisect.py brother.ipp good.ipp \
+        --oracle ./run-trial.sh --journal bisect.json
+    python3 scripts/ipp_bisect.py --contract   # what run-trial.sh must do
+
+**The oracle is yours to write, and has not been run.** It spans two machines --
+the replay server here, the spooler there -- and how you reach the Windows box
+(WinRM, SSH, a shared folder) is site-specific, so no version of it in this repo
+could be honestly claimed to work. The contract is small: read the attribute names
+from stdin, serve them with `ipp_replay.py serve ... --from good.ipp <names>` and
+`printer-uuid=$PN_TRIAL_UUID`, provision the queue, print, poll, and emit
+
+    VERDICT: PASS | FAIL | INDETERMINATE
+    QUERIES: <Get-Printer-Attributes seen by the replay server>
+    IDENTITY: <printer-make-and-model actually served>
+
+Each trial must **tear the queue down and mint a fresh UUID** -- Windows keys IPP
+devices on `printer-uuid`, and a reused one is answered from cache.
+
+**The third outcome is the point.** `INDETERMINATE` exists so that "the job had
+not finished yet", "the replay server died and the old config kept serving" and
+"Windows never asked us anything" cannot be recorded as FAIL. The driver retries
+such a trial and then **stops the whole run**; it never guesses. Coercing that
+case into a verdict is precisely what invalidated the earlier attempt, and
+`QUERIES: 0` is forced to INDETERMINATE however the oracle voted.
 
 ### The harness lied three times before it told the truth
 
