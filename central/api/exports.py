@@ -13,14 +13,17 @@ Tenant scoping:
 * client_readonly users only ever see their pinned client's printers
   (their session is forced through the same filter).
 
-CSV is streamed (csv.writer over a StringIO that we yield chunks from) so
+CSV is streamed (a writer over a StringIO that we yield chunks from) so
 a multi-thousand-row fleet doesn't blow up memory. Content-Disposition
 forces a download with a sensible default filename.
+
+Every cell goes through ``central.csv_safe.safe_writer``: half of these columns
+are SNMP strings off a device on a client LAN, and RFC 4180 quoting does nothing
+about a cell that starts with ``=``. See that module for the rule.
 """
 
 from __future__ import annotations
 
-import csv
 import io
 from datetime import datetime
 from typing import Iterable, Optional
@@ -31,6 +34,7 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from central import models as m
+from central.csv_safe import safe_writer
 from central.db import get_db
 from central.deps import require_user
 
@@ -62,12 +66,20 @@ def _resolve_client_filter(user: m.User, client_id: Optional[int]) -> Optional[i
 
 
 def _csv_response(filename: str, header: list[str], rows: Iterable[list]) -> StreamingResponse:
-    """Stream a CSV file. Header + rows go through csv.writer so quoting/escaping
-    is RFC 4180-correct on values that contain commas, quotes, or newlines."""
+    """Stream a CSV file.
+
+    Header + rows go through ``safe_writer``, which is ``csv.writer`` plus
+    formula-injection neutralisation. The quoting/escaping stays RFC
+    4180-correct on values containing commas, quotes or newlines -- that was
+    never in question, and was never the whole job: a cell beginning ``=``,
+    ``+``, ``-`` or ``@`` is quoted correctly *and* executed by Excel. Doing it
+    in the writer means a column added to any of the three views below is
+    covered without its author having to know this exists.
+    """
 
     def iter_rows():
         buf = io.StringIO()
-        writer = csv.writer(buf)
+        writer = safe_writer(buf)
         writer.writerow(header)
         yield buf.getvalue()
         buf.seek(0)
