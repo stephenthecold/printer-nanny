@@ -1,0 +1,95 @@
+{#
+  "Data as of ..." -- the freshness strip.
+
+  Rendered by base.html on every fleet-state surface, and re-rendered on its own
+  by GET /fragments/freshness so an open tab keeps telling the truth. Both paths
+  render THIS file, so the polled version can never drift from the initial one.
+
+  WHAT IT SAYS, AND WHY IT SAYS IT THAT WAY
+  -----------------------------------------
+  Every value here comes from central.freshness, which measures the age of the
+  DATA (printers.last_seen / agents.last_heartbeat / the worker's success
+  stamps). Nothing on this strip is derived from the time of the render -- a
+  page built this second over four-hour-old readings says four hours.
+
+  The absolute instant is authoritative and the relative age is a convenience,
+  so both are shown: the absolute one cannot rot, and static/dashboard.js
+  re-derives the relative one from the <time datetime> every few seconds. If
+  polling stops -- tab backgrounded, network gone, server down -- the age keeps
+  climbing instead of freezing on a comforting number.
+
+  ACCESSIBILITY: THIS IS DELIBERATELY NOT A LIVE REGION
+  ----------------------------------------------------
+  It re-renders on a timer, and a timer-driven aria-live region is a screen
+  reader reading "data as of ... four hours ago" out loud every minute forever.
+  The transition is the only part worth announcing, so it is announced once,
+  from a separate stable live region in base.html that dashboard.js writes to
+  only when data-pn-state actually changes. The strip itself carries the detail
+  as ordinary text, reachable on demand like any other content.
+
+  Composing with the stalled-worker banner above: that banner owns worker
+  health and names the wedged jobs; this strip owns data age and never repeats
+  it. The single exception is `warn_worker`, which central.freshness sets only
+  for client_readonly viewers -- they are never shown the banner, and a stalled
+  worker makes their portal lie exactly as much as it makes ours.
+#}
+{% from "_components.html" import btn, note %}
+<div id="pn-freshness"
+     class="{{ note(freshness.tone, 'mb-4 flex items-start gap-x-2 gap-y-1 flex-wrap') }}"
+     data-pn-state="{{ freshness.state }}"
+     data-pn-announce="{{ freshness.announcement }}"
+     {#- The server's own clock, so the browser can correct for a skewed
+         workstation clock rather than reporting every reading as fresher than
+         it is -- the one direction of error this whole feature exists to
+         eliminate. -#}
+     data-pn-now="{{ freshness.now.isoformat() }}"
+     {%- if poll_seconds %}
+     {#- Filtered on visibility so nineteen backgrounded laptop tabs stop asking
+         while the one on the NOC wall keeps going. htmx evaluates the filter
+         each time the timer fires and simply skips the request when it is
+         false; the timer itself keeps running, so the strip resumes the moment
+         the tab is looked at again. -#}
+     hx-get="{{ fresh_endpoint }}"
+     hx-trigger="every {{ poll_seconds }}s [document.visibilityState === 'visible']"
+     hx-swap="outerHTML"
+     {%- endif %}>
+  <span aria-hidden="true">
+    {%- if freshness.state == 'stale' %}⚠️{% elif freshness.state == 'lagging' %}⏳{% else %}🕒{% endif -%}
+  </span>
+  <div class="min-w-0">
+    <span class="sr-only">{{ freshness.scope_label }} data freshness. </span>
+    {%- if freshness.newest_reading_at %}
+    <span>{{ freshness.headline }}</span>
+    <span class="text-slate-500" aria-hidden="true">·</span>
+    {#- The browser rewrites this span's text from the datetime attribute. The
+        <time> element is what makes the absolute instant machine-readable, and
+        data-pn-age is the hook dashboard.js looks for. -#}
+    <time datetime="{{ freshness.iso }}" data-pn-age="{{ freshness.iso }}"
+          title="Most recent reading received from any printer in this view">{{ freshness.age_text }} ago</time>
+    {%- else %}
+    <span>{{ freshness.headline }}</span>
+    {%- endif %}
+    {%- if freshness.warning %}
+    <span class="block font-medium mt-0.5">{{ freshness.warning }}</span>
+    {%- endif %}
+    {%- if freshness.coverage %}
+    <span class="block text-xs opacity-90 mt-0.5">{{ freshness.coverage }}.</span>
+    {%- endif %}
+    {%- if freshness.warn_worker %}
+    {#- Tenant-facing wording only: no job names, no /readyz, nothing internal. -#}
+    <span class="block text-xs opacity-90 mt-0.5">Background checks are not running, so a device shown as healthy may not be.</span>
+    {%- endif %}
+  </div>
+  <div class="ml-auto flex items-center gap-2">
+    {%- if not poll_seconds %}
+    <span class="text-xs opacity-70">auto-refresh off</span>
+    {%- endif %}
+    {#- Always present, because "is it back yet?" should not cost a full page
+        load of the fleet queries -- and with auto-refresh off it is the only
+        way to re-check without one. -#}
+    <button type="button" class="{{ btn('neutral', 'sm') }}"
+            hx-get="{{ fresh_endpoint }}" hx-target="#pn-freshness" hx-swap="outerHTML">
+      Check now
+    </button>
+  </div>
+</div>

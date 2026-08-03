@@ -12,6 +12,10 @@
      simply absent. #}
   <link rel="stylesheet" href="/static/tailwind.css">
   <script src="/static/htmx.min.js"></script>
+  {# First-party, not vendored: keeps the freshness strip's relative age honest
+     once the page is open, and announces a freshness transition exactly once.
+     `defer` so it runs after the document is parsed but before DOMContentLoaded. #}
+  <script src="/static/dashboard.js" defer></script>
 </head>
 <body class="h-full text-slate-800 flex flex-col">
 {% if user %}
@@ -154,6 +158,19 @@
     </div>
   </div>
   {% endif %}
+  {# "Data as of ...". Rendered on every fleet-state surface (the routes that
+     pass `freshness`); pages that show no device state deliberately don't.
+     Sits directly under the worker banner because the two compose: the banner
+     says WHY nothing is arriving, this says HOW LONG it has not been arriving.
+     See central/freshness.py and templates/_freshness.html. #}
+  {% if freshness is defined and freshness %}
+  {% include "_freshness.html" %}
+  {% endif %}
+  {# The only live region on this page, and deliberately outside the strip: the
+     strip re-renders on a timer, and announcing a timer is how a screen reader
+     is made unusable. dashboard.js writes here only when the freshness STATE
+     changes, so a transition is announced once and a steady state is silent. #}
+  <span id="pn-freshness-live" role="status" aria-live="polite" class="sr-only"></span>
   {% if flash %}
   <div class="mb-4 rounded bg-emerald-50 border border-emerald-200 text-emerald-800 text-sm px-3 py-2">{{ flash }}</div>
   {% endif %}

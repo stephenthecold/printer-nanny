@@ -51,21 +51,82 @@ configure_logging()
 
 log = logging.getLogger("central.main")
 
-app = FastAPI(title="Printer Nanny", version="0.30.0")
-app = FastAPI(title="Printer Nanny", version="0.30.0")
+app = FastAPI(title="Printer Nanny", version="0.31.0")
 # Honor X-Forwarded-Proto/For from the reverse proxy so request.base_url returns
 # https:// when Caddy/Nginx terminates TLS in front of us. Without this, the
 # agent install command on /manage/agents leaks http://… to operators behind
 # their own TLS proxy. Trusts headers from any source — we already require the
 # proxy to be a trusted hop (it's the same docker network or LAN).
 app.add_middleware(ProxyHeadersMiddleware, trusted_hosts="*")
+
+#: Named explicitly rather than left to Starlette's default so
+#: _NoSessionRefreshOnPoll below can match on it. The two must agree; a drift
+#: would make that middleware silently stop doing anything.
+SESSION_COOKIE = "session"
+
 app.add_middleware(
     SessionMiddleware,
     secret_key=settings.secret_key,
+    session_cookie=SESSION_COOKIE,
     max_age=60 * 60 * 12,
     https_only=settings.secure_cookies,  # Secure flag in production (TLS at the proxy)
     same_site="lax",  # mitigates cross-site POST/CSRF on the dashboard
 )
+
+
+class _NoSessionRefreshOnPoll:
+    """Stop the dashboard's auto-refresh poll from renewing the session cookie.
+
+    SessionMiddleware re-signs and re-sends the cookie on EVERY response with a
+    non-empty session, and the signature carries a fresh timestamp, so the 12h
+    expiry is a rolling one measured from the last request. That is the right
+    behaviour for a human clicking around. It is the wrong behaviour for a
+    timer: without this, one dashboard tab left open on an unattended NOC
+    workstation would hold its session open indefinitely, because the page
+    would keep renewing its own credential with nobody present. The 12h cap
+    would become no cap at all -- a security property quietly removed as a side
+    effect of a convenience feature.
+
+    So for the poll path only, the Set-Cookie the session middleware appended is
+    dropped on the way out. The request still authenticates (the browser's
+    existing cookie is untouched and stays valid until its own Max-Age), it just
+    does not extend anything: the operator's clock keeps running from their last
+    real interaction, and when it lapses the poll gets a 286 and stops.
+
+    Written as raw ASGI rather than @app.middleware("http") on purpose --
+    BaseHTTPMiddleware wraps the whole response cycle and interferes with
+    streaming responses, and /admin/backup streams a database dump through it.
+    This only inspects one header on one path and never touches the body.
+    """
+
+    def __init__(self, app, paths) -> None:
+        self.app = app
+        self.paths = frozenset(paths)
+        self._prefix = f"{SESSION_COOKIE}=".encode("latin-1")
+
+    async def __call__(self, scope, receive, send):
+        if scope.get("type") != "http" or scope.get("path") not in self.paths:
+            await self.app(scope, receive, send)
+            return
+
+        async def send_no_session_cookie(message):
+            if message.get("type") == "http.response.start":
+                # Only OUR session cookie is dropped; anything else a response
+                # legitimately sets is passed through untouched.
+                message = dict(message)
+                message["headers"] = [
+                    (key, value)
+                    for key, value in message.get("headers", [])
+                    if not (key.lower() == b"set-cookie" and value.startswith(self._prefix))
+                ]
+            await send(message)
+
+        await self.app(scope, receive, send_no_session_cookie)
+
+
+# Added last, so it is the OUTERMOST middleware and therefore sees (and can
+# remove) the header SessionMiddleware appended further in.
+app.add_middleware(_NoSessionRefreshOnPoll, paths=[dashboard.FRESHNESS_PATH])
 
 # JSON API
 # Registered before `ingest` so /api/v1/agents/register is matched by its own
