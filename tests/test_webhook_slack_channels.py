@@ -6,6 +6,7 @@ import httpx
 
 from central.channels import Notification, active_channels, dispatch
 from central.channels.slack import SlackChannel
+from central.channels.teams import TeamsChannel
 from central.channels.webhook import WebhookChannel
 from central.runtime import default_settings
 
@@ -239,6 +240,63 @@ def test_teams_active_channel_now_returned_when_enabled():
     rt["teams.enabled"] = True
     types = {c.type for c in active_channels(rt)}
     assert "teams" in types
+
+
+def test_teams_posts_to_the_webhook_the_settings_page_saved(monkeypatch):
+    """The setting the UI writes must be the setting the channel reads.
+
+    ``active_channels`` builds TeamsChannel with ``config={}`` and passes the
+    operator's settings in ``runtime``. ``_webhook`` read ``self.config`` and
+    then went straight to the env var, so ``teams.webhook_url`` -- the only
+    field the Settings page writes -- was never consulted: enabling Teams and
+    pasting a webhook produced a permanent silent dry-run. Built through
+    ``active_channels`` rather than by direct construction, because direct
+    construction is the one path that never had the bug.
+    """
+    rt = default_settings()
+    rt["teams.enabled"] = True
+    rt["teams.webhook_url"] = "https://outlook.office.com/webhook/T/IncomingWebhook/x"
+    (ch,) = [c for c in active_channels(rt) if c.type == "teams"]
+
+    posted = []
+
+    def fake_post(url, **kwargs):
+        posted.append((url, kwargs.get("json")))
+        return httpx.Response(200, content=b"1", request=httpx.Request("POST", url))
+
+    monkeypatch.setattr(httpx, "post", fake_post)
+    res = ch.send(NOTE_WARN)
+
+    assert posted, "Teams reported success without transmitting anything"
+    assert posted[0][0] == rt["teams.webhook_url"]
+    assert res.ok is True
+    assert res.sent is True
+
+
+def test_teams_dry_run_is_not_reported_as_delivery():
+    """No webhook anywhere: ok (nothing failed) but sent=False (nobody told)."""
+    rt = default_settings()
+    rt["teams.enabled"] = True
+    (ch,) = [c for c in active_channels(rt) if c.type == "teams"]
+    res = ch.send(NOTE_WARN)
+    assert res.ok is True
+    assert res.sent is False
+    assert "dry-run" in res.detail
+
+
+def test_teams_channel_row_config_outranks_the_global_setting(monkeypatch):
+    """Per-row config wins, matching every other channel's precedence."""
+    rt = default_settings()
+    rt["teams.webhook_url"] = "https://outlook.office.com/webhook/global"
+    ch = TeamsChannel("teams", {"webhook_url": "https://outlook.office.com/webhook/row"}, rt)
+
+    posted = []
+    monkeypatch.setattr(httpx, "post", lambda url, **kw: (
+        posted.append(url),
+        httpx.Response(200, content=b"1", request=httpx.Request("POST", url)),
+    )[1])
+    ch.send(NOTE_WARN)
+    assert posted == ["https://outlook.office.com/webhook/row"]
 
 
 def test_dispatch_reports_each_new_channel():

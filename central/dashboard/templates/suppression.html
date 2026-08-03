@@ -96,7 +96,8 @@
               </button>
             </form>
             <form method="post" action="/manage/suppression/{{ w.id }}/delete" class="inline"
-                  onsubmit="return confirm('Delete window {{ w.name }}? Alerts will notify immediately again.');">
+                  data-name="{{ w.name }}"
+                  onsubmit="return confirm('Delete window ' + this.dataset.name + '? Alerts will notify immediately again.');">
               <button class="{{ btn('danger', 'sm') }}">Delete</button>
             </form>
           </td>

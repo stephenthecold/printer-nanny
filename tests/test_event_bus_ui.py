@@ -17,6 +17,7 @@ thing an operator or the worker actually touches behave":
 from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
+from html.parser import HTMLParser
 
 import pytest
 from fastapi.testclient import TestClient
@@ -84,28 +85,54 @@ def test_an_admin_sees_the_page_and_the_catalogue(db):
 
 
 def test_a_quote_in_a_name_cannot_break_the_confirm_handler(db, public_dns):
-    """Inside an inline handler the HTML parser decodes entities before JS runs.
+    """A hostile subscription name must not become markup on this page.
 
-    Autoescaping ``'`` to ``&#39;`` therefore still hands JavaScript a bare
-    quote, which terminates the string literal early -- so the name goes through
-    ``|tojson``, which emits ``\\u0027`` and survives both parsers.
+    This test previously asserted the name was rendered through ``|tojson``,
+    and that was the wrong invariant: ``tojson`` escapes ``'`` but **not**
+    ``"``, and it emits the JSON string's own surrounding double quotes, so
+    inside a double-quoted attribute its first character ends the attribute and
+    everything after it is parsed as more attributes on the tag. A name of
+    ``a" onmouseover="alert(1)`` produced a real ``onmouseover`` handler on the
+    form. The old assertion could not see it -- it checked only that the single
+    quote had been encoded, which was true the whole time it was vulnerable.
+
+    So the name now travels in a ``data-`` attribute and is read via
+    ``dataset``, and the invariant is asserted against the parsed DOM: the only
+    event handlers on the page are the ones the template itself wrote.
     """
     from central.events.catalogue import EVENT_TYPE_NAMES
 
+    hostile = 'a" onmouseover="alert(1)'
     http = _login(db)
     http.post(
         "/manage/events",
         data={
-            "name": "Bob's <hooks> \"x\"", "url": "https://hooks.example.com/pn",
+            "name": hostile, "url": "https://hooks.example.com/pn",
             "event_types": list(EVENT_TYPE_NAMES),
         },
         follow_redirects=False,
     )
     html = http.get("/manage/events").text
-    assert "\\u0027" in html, "the name was not JSON-encoded for the handler"
-    # And no raw quote or angle bracket from the name escaped into the markup.
-    assert "confirm('Delete subscription Bob's" not in html
-    assert "<hooks>" not in html
+
+    injected = []
+    handlers = []
+
+    class _P(HTMLParser):
+        def handle_starttag(self, tag, attrs):
+            for key, value in attrs:
+                if key.startswith("on"):
+                    handlers.append((key, value))
+                    if value and "alert(1)" in value:
+                        injected.append((tag, key, value))
+
+    _P().feed(html)
+    assert not injected, f"attacker-controlled handler rendered: {injected}"
+    assert handlers, "page rendered no inline handlers; the selector needs updating"
+    # The name is still shown to the operator -- as data, read through the DOM.
+    assert 'data-name="a&#34; onmouseover=&#34;alert(1)"' in html
+    # And nothing raw from the name reached the handler text itself.
+    for _key, value in handlers:
+        assert "alert(1)" not in (value or "")
 
 
 def test_the_nav_marks_the_events_page(db):

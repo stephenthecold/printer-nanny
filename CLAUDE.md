@@ -438,6 +438,20 @@ enforced; none of them is optional.
   severity skip or unconfigured dry-run terminates as `DeliveryStatus.skipped`
   rather than `delivered`. When adding a channel or an early-return, anything
   that reports success without transmitting **must** set `sent=False`.
+- **A channel must read its credential through `setting()`, not from env.**
+  `active_channels` builds every Settings-page channel with `config={}` and
+  passes the operator's values in `runtime`, so a channel that reads
+  `self.config` and then falls through to `central.config.settings` skips the
+  only layer the UI ever writes. `TeamsChannel._webhook` did exactly that: an
+  operator who enabled Teams and pasted a webhook URL got a **permanent silent
+  dry-run** — `ok=True`, nothing transmitted, and the setting page apparently
+  working. `setting()` is the shared helper that spells the precedence once
+  (row config → runtime → default); Slack and the generic webhook always used
+  it. The `sent=False` rule above is what kept this honest rather than
+  fraudulent — the dry-run was recorded as `skipped`, not `delivered` — but it
+  is a rule about *reporting*, and it cannot make a misconfigured read deliver
+  anything. Test the wiring through `active_channels`, never by constructing the
+  channel directly: direct construction is the one path that never had the bug.
 - **Occurrence-rate alerting asks a different question from every other rule,
   and that changes what damping means.** `AlertConditionType.occurrence_rate`
   counts matching `printer_events` in a rolling window (`alert_rules.
@@ -548,7 +562,8 @@ enforced; none of them is optional.
   no FK, so deleting a client deletes it explicitly — SQLite reuses row ids and
   the next client would otherwise inherit the logo. Serving is tenant-scoped
   (404, never 403, so ids can't be probed).
-- **HTML escaping is not JS escaping.** A value interpolated into
+- **HTML escaping is not JS escaping**, and an inline event handler is a script
+  context wearing an attribute's clothes. A value interpolated into
   `onsubmit="return confirm('Delete {{ name }}?')"` is autoescaped to `&#39;`
   — and the HTML parser decodes that back to a quote *before* the attribute is
   compiled as script, so the string literal closes and the rest executes. Pass
@@ -617,6 +632,51 @@ enforced; none of them is optional.
   spreadsheet the export exists to feed; and `None` exports as a **blank cell,
   never the string "None"**, because the billing CSV relies on blank-not-zero to
   avoid billing a meter the device never reported as zero.
+  compiled as script, so the string literal closes and the rest executes.
+  Escaping ran and did nothing. Pass such values in a `data-` attribute and read
+  them through `dataset`; then they are only ever data. **All 16 sites are now
+  fixed** (agents ×6, printer ×2, events ×2, maintenance, manage_users,
+  suppression, alert_rules, billing, definitions), and
+  `tests/test_template_js_injection.py` scans every template so a new one cannot
+  reintroduce the shape — the scan is the guard, the individual fixes are not.
+  Two things worth not re-learning:
+  - **`|tojson` is NOT the fix, and shipping it as one opened a second hole.**
+    It escapes `<`, `>`, `&` and `'` but **not** `"`, and it emits the JSON
+    string's own surrounding double quotes — so inside a *double-quoted*
+    attribute its first character **terminates the attribute** and everything
+    after it parses as more attributes on the tag. An event subscription named
+    `a" onmouseover="alert(1)` rendered a genuine `onmouseover` handler on the
+    form (verified against a real HTML parser). `tojson` is safe in a `<script>`
+    block or a single-quoted attribute, and nowhere else. The rule is therefore
+    a bright line — **no Jinja expression of any kind inside an `on*` handler** —
+    because "escape it correctly for the nested context" is a rule that gets got
+    wrong, and got wrong twice here.
+  - **Most of these were remotely triggerable, not self-XSS**, which was checked
+    rather than assumed and came out worse than it looked. `printer.ip` and
+    `subnet.cidr` are bare `str` on both the ingest schemas and the operator
+    forms — `ipaddress` is called only at *read* time, never as an input gate —
+    so an IP is arbitrary text an agent can push. `agents.name` embeds the
+    agent's **self-reported hostname** from claim-code redemption (`services.py`
+    calls it "machine-reported and therefore untrusted", length-caps it, and
+    does not character-restrict it). `users.username` is written straight from
+    the IdP payload when SCIM is on. Only the rate-card, schedule, window, rule
+    and definition names are purely operator-typed.
+  - The same class was swept for beyond `confirm()`: no `|safe`, no `Markup(`,
+    no `javascript:` URLs, no interpolation in any `<script>` block, and no
+    `hx-vals`/`hx-on*` anywhere. Two adjacent gaps were closed at the same time
+    — `app_branding` now re-checks `logo_url` through `safe_logo_url` (the
+    per-client path always did; the global one did not, and it renders on the
+    **pre-auth** login page), and `level_bar` coerces its percentage with
+    `| float` so the CSS sink is structurally safe rather than accidentally so.
+  - **Still open, and deliberately not decided here: there is no CSP on
+    dashboard HTML.** `main.py` sets no `Content-Security-Policy`,
+    `X-Frame-Options` or `X-Content-Type-Options`; the only CSP in the tree is
+    scoped to branding image assets. A CSP would have made every instance of
+    this bug class a no-op. The catch that makes it a real decision rather than
+    a missing header: this app's confirm dialogs *are* inline handlers, so
+    `script-src 'self'` breaks them and `'unsafe-inline'` would defeat the
+    point — adopting one means moving those handlers to a listener in a served
+    JS file first.
 - **Printer friendly names** (`printers.display_name`) are used everywhere a
   printer is named — dashboards, alert titles, recent activity, the weekly
   report. Operators set them in the printer edit form.

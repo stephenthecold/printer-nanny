@@ -53,12 +53,12 @@ configure_logging()
 log = logging.getLogger("central.main")
 
 app = FastAPI(title="Printer Nanny", version="0.31.0")
-app = FastAPI(title="Printer Nanny", version="0.31.0")
 
 # MIDDLEWARE ORDER IS LOAD-BEARING. add_middleware inserts at index 0 and the
 # stack is wrapped in reverse, so the LAST one added is the OUTERMOST. Reading
 # the four below from the bottom up gives the order a request meets them.
 #
+app = FastAPI(title="Printer Nanny", version="0.31.0")
 # Honor X-Forwarded-Proto/For from the reverse proxy so request.base_url returns
 # https:// when Caddy/Nginx terminates TLS in front of us. Without this, the
 # agent install command on /manage/agents leaks http://… to operators behind

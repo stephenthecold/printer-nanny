@@ -65,7 +65,8 @@
             <a href="/manage/definitions?edit={{ d.id }}" class="{{ c.btn('neutral', 'sm') }}"
                aria-label="Edit definition {{ d.key }}">Edit</a>
             <form method="post" action="/manage/definitions/{{ d.id }}/delete" class="inline"
-                  onsubmit="return confirm('Remove {{ d.key }}? Agents drop it on their next poll.');">
+                  data-key="{{ d.key }}"
+                  onsubmit="return confirm('Remove ' + this.dataset.key + '? Agents drop it on their next poll.');">
               <button type="submit" class="{{ c.btn('danger', 'sm') }}"
                       aria-label="Delete definition {{ d.key }}">Delete</button>
             </form>

@@ -141,7 +141,8 @@
           </form>
           {% endif %}
           <form method="post" action="/manage/billing/rate-cards/{{ card.id }}/delete"
-                onsubmit="return confirm('Delete rate card {{ card.name }}? Past invoices cannot be rebuilt without it.')">
+                data-name="{{ card.name }}"
+                onsubmit="return confirm('Delete rate card ' + this.dataset.name + '? Past invoices cannot be rebuilt without it.')">
             <input type="hidden" name="client_id" value="{{ client.id }}" />
             <button class="{{ btn('danger', 'sm') }}">Delete</button>
           </form>

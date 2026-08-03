@@ -100,18 +100,23 @@
                 <form method="post" action="/manage/events/{{ s.id }}/toggle" class="inline">
                   <button class="{{ btn('subtle', 'sm') }}">{{ 'Disable' if s.enabled else 'Enable' }}</button>
                 </form>
-                {#- The name goes through |tojson, not straight interpolation.
-                    Inside an inline handler the HTML parser decodes entities
-                    BEFORE JavaScript sees the text, so autoescaping a quote to
-                    &#39; still hands JS a bare ' and terminates the string
-                    literal early. tojson emits ' instead, which survives
-                    both parsers. -#}
+                {#- The name travels in a data- attribute and is read through
+                    `dataset`, never interpolated into the confirm() string.
+                    This previously used |tojson, which is WRONG here and was a
+                    live hole rather than a fix: tojson escapes ' but NOT ", and
+                    it emits the JSON string's own surrounding quotes, so inside
+                    a double-quoted attribute the first " ENDS the attribute. A
+                    subscription named `a" onmouseover="alert(1)` rendered a real
+                    onmouseover attribute on this form. tojson is only safe in a
+                    <script> block or a single-quoted attribute. See CLAUDE.md. -#}
                 <form method="post" action="/manage/events/{{ s.id }}/rotate" class="inline"
-                      onsubmit="return confirm('Rotate the signing secret for ' + {{ s.name|tojson }} + '? The current one stops working immediately.');">
+                      data-name="{{ s.name }}"
+                      onsubmit="return confirm('Rotate the signing secret for ' + this.dataset.name + '? The current one stops working immediately.');">
                   <button class="{{ btn('warning', 'sm') }}">Rotate secret</button>
                 </form>
                 <form method="post" action="/manage/events/{{ s.id }}/delete" class="inline"
-                      onsubmit="return confirm('Delete subscription ' + {{ s.name|tojson }} + '? Queued deliveries go with it.');">
+                      data-name="{{ s.name }}"
+                      onsubmit="return confirm('Delete subscription ' + this.dataset.name + '? Queued deliveries go with it.');">
                   <button class="{{ btn('danger', 'sm') }}">Delete</button>
                 </form>
               </div>

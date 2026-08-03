@@ -178,15 +178,20 @@
             <form method="post" action="/manage/agents/{{ a.id }}/rescan" title="Queue a discovery sweep across all assigned subnets.">
               <button class="text-sky-700 hover:underline">Rescan</button>
             </form>
-            <form method="post" action="/manage/agents/{{ a.id }}/rotate-key" onsubmit="return confirm('Issue a new key for {{ a.name }}? The old key stops working.')">
+            {# Names travel in data- attributes and are read through `dataset`,
+               never interpolated into the confirm() string. HTML escaping is
+               not JS escaping -- see the convention in CLAUDE.md. #}
+            <form method="post" action="/manage/agents/{{ a.id }}/rotate-key" data-name="{{ a.name }}"
+                  onsubmit="return confirm('Issue a new key for ' + this.dataset.name + '? The old key stops working.')">
               <button class="text-sky-700 hover:underline">Rotate key</button>
             </form>
-            <form method="post" action="/manage/agents/{{ a.id }}/update"
-                  onsubmit="return confirm('Push the latest agent build to {{ a.name }}? Agent pip-installs the new package and restarts. Takes ~60s.')">
+            <form method="post" action="/manage/agents/{{ a.id }}/update" data-name="{{ a.name }}"
+                  onsubmit="return confirm('Push the latest agent build to ' + this.dataset.name + '? Agent pip-installs the new package and restarts. Takes ~60s.')">
               <button class="text-emerald-700 hover:underline" title="After the next heartbeat the version timestamp changes -- that's the rollout confirmation.">Update</button>
             </form>
             {% if user.role.value == 'admin' %}
-            <form method="post" action="/manage/agents/{{ a.id }}/delete" onsubmit="return confirm('Delete agent {{ a.name }}?')">
+            <form method="post" action="/manage/agents/{{ a.id }}/delete" data-name="{{ a.name }}"
+                  onsubmit="return confirm('Delete agent ' + this.dataset.name + '?')">
               <button class="text-red-600 hover:underline">Delete</button>
             </form>
             {% endif %}
@@ -339,10 +344,12 @@
                 {% if s.collector_agent_id and s.agent_id and s.collector_agent_id != s.agent_id %}
                 <button form="subnet-handback-{{ s.id }}" class="block w-full text-amber-700 hover:underline mt-0.5 text-center"
                         title="Release {{ s.cidr }} from its standby. The primary picks it up once the current lease elapses — that gap is deliberate."
-                        onclick="return confirm('Return {{ s.cidr }} to its primary collector? There is a short gap while the current lease elapses — that is what stops both agents collecting at once.')">return to primary</button>
+                        data-cidr="{{ s.cidr }}"
+                        onclick="return confirm('Return ' + this.dataset.cidr + ' to its primary collector? There is a short gap while the current lease elapses — that is what stops both agents collecting at once.')">return to primary</button>
                 {% endif %}
                 <button form="subnet-del-{{ s.id }}" class="block w-full text-red-600 hover:underline mt-0.5 text-center"
-                        onclick="return confirm('Remove subnet {{ s.cidr }}?')">remove</button>
+                        data-cidr="{{ s.cidr }}"
+                        onclick="return confirm('Remove subnet ' + this.dataset.cidr + '?')">remove</button>
               </td>
             </tr>
             <tr class="border-none">
@@ -577,7 +584,8 @@
       </p>
       {% if outdated_count %}
       <form method="post" action="/manage/agents/update-outdated"
-            onsubmit="return confirm('Push agent v{{ target_agent_version }} to the {{ outdated_count }} OUTDATED agent(s)? Each restarts independently within ~60s.')">
+            data-version="{{ target_agent_version }}" data-count="{{ outdated_count }}"
+            onsubmit="return confirm('Push agent v' + this.dataset.version + ' to the ' + this.dataset.count + ' OUTDATED agent(s)? Each restarts independently within ~60s.')">
         <button class="w-full bg-emerald-700 text-white rounded py-2 text-sm font-medium">Update all outdated ({{ outdated_count }})</button>
       </form>
       {% else %}

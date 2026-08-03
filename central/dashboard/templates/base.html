@@ -205,7 +205,14 @@
 {%- else -%}
 {%- set color = 'bg-red-500' if pct <= 10 else ('bg-amber-500' if pct <= 25 else 'bg-green-500') -%}
 <div class="flex items-center gap-2">
-  <div class="w-24 h-2 bg-slate-200 rounded"><div class="h-2 rounded {{ color }}" style="width: {{ pct }}%"></div></div>
+  {# `| float` is a security guard, not formatting. `pct` is a supply level off
+     a device on a customer LAN and it lands in a CSS declaration, where
+     escaping stops an attribute breakout but not `1%; background-image:
+     url(https://attacker/)`. It is a Float column today, so a non-numeric value
+     already 500s on the comparison above — but that is incidental, and a caller
+     handing this macro a preformatted string would make it a live sink with
+     nothing in between. Coercing here makes the safety structural. #}
+  <div class="w-24 h-2 bg-slate-200 rounded"><div class="h-2 rounded {{ color }}" style="width: {{ pct | float }}%"></div></div>
   <span class="text-xs tabular-nums w-9">{{ '%.0f'|format(pct) }}%</span>
 </div>
 {%- endif -%}

@@ -54,7 +54,27 @@ class TeamsChannel(NotificationChannel):
     type = "teams"
 
     def _webhook(self) -> str:
-        return self.config.get("webhook_url") or settings.teams_webhook_url
+        """Channel-row config, then the operator's Settings value, then env.
+
+        The middle term is the one that was missing, and its absence made the
+        Settings page a no-op. ``active_channels`` builds this channel with
+        ``config={}`` and hands the operator's ``teams.webhook_url`` in
+        ``runtime``, so reading ``self.config`` and falling straight through to
+        env skipped the only layer the UI ever writes: an operator who enabled
+        Teams and pasted a webhook got a permanent silent dry-run. ``setting()``
+        is the shared helper for exactly this precedence and is what the Slack
+        and generic-webhook channels already use.
+
+        The env var stays as a last resort so an install configured that way
+        before these settings existed keeps working, but a value typed in the UI
+        now wins over it.
+        """
+        return str(
+            self.config.get("webhook_url")
+            or self.setting("teams.webhook_url")
+            or settings.teams_webhook_url
+            or ""
+        )
 
     def build_payload(self, note: Notification) -> dict:
         # The "**", "[…]" and "_…_" here are ours, added around escaped values
