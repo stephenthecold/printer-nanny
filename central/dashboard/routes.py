@@ -403,16 +403,40 @@ def printer_detail(printer_id: int, request: Request, db: Session = Depends(get_
 # --- Device security posture ------------------------------------------------ #
 @router.get("/security/posture", response_class=HTMLResponse)
 def security_posture(request: Request, db: Session = Depends(get_db)):
-    """Operator-facing "treat printers like endpoints" report: per-device
-    security posture flags (insecure SNMP, firmware visibility) plus a fleet
-    summary. Admin/tech only; client_readonly users are bounced to their
-    portal."""
+    """Operator-facing "treat printers like endpoints" report: per-device SNMP
+    transport grade and firmware visibility, plus a fleet summary.
+
+    STAFF ONLY, and that is a product decision rather than an oversight. This
+    report is an MSP remediation worklist, not a customer deliverable: every
+    finding on it is about *our* monitoring configuration (the SNMP version and
+    community string on a subnet row we own), and every fix for it lives on
+    /manage/agents, which a client_readonly user cannot open. Publishing it to
+    the portal would hand customers a red list they can neither act on nor
+    verify, generating tickets whose only true answer is "yes, we know, and it
+    is ours to change". Exposing it per-tenant is a deliberate later decision
+    with wording written for that audience -- not a flag flip. The matching CSV
+    export refuses client_readonly for the same reason.
+
+    ``?client_id=N`` narrows to one client for staff, which is how the report
+    is actually used (remediate one customer at a time). An unknown id is
+    ignored rather than 404'd -- it is a filter, and the honest answer to a
+    stale bookmark is the whole fleet, not an error page.
+    """
     user = _user(request, db)
     if user is None:
         return _login_redirect()
     if user.role == m.UserRole.client_readonly:
         return RedirectResponse("/portal", status_code=303)
-    posture = queries.security_posture_rollup(db)
+
+    clients = list(db.scalars(select(m.Client).order_by(m.Client.name)))
+    try:
+        selected_client_id = int(request.query_params.get("client_id") or 0) or None
+    except ValueError:
+        selected_client_id = None
+    if selected_client_id is not None and not any(c.id == selected_client_id for c in clients):
+        selected_client_id = None
+
+    posture = queries.security_posture_rollup(db, client_id=selected_client_id)
     return _render(
         request,
         "security_posture.html",
@@ -420,6 +444,12 @@ def security_posture(request: Request, db: Session = Depends(get_db)):
         user=user,
         rows=posture["rows"],
         summary=posture["summary"],
+        clients=clients,
+        selected_client_id=selected_client_id,
+        # Labels/tones for the flags and grades live with the logic that
+        # decides them -- see queries.POSTURE_FLAG_META.
+        flag_meta=queries.POSTURE_FLAG_META,
+        grade_meta=queries.SNMP_GRADE_META,
         printer_label=_printer_label,
     )
 
