@@ -167,7 +167,7 @@ enforced; none of them is optional.
   defects it found) and `MACOS-CLIENT-TESTING.md` (real-CUPS verification, the
   `.pkg` procedure, and the 2026-07-30 real-Mac run — done items marked and dated,
   the rest still open).
-- `tests/` — pytest suite (~1740 tests, serial, on Postgres-less SQLite).
+- `tests/` — pytest suite (~1770 tests, serial, on Postgres-less SQLite).
   **Quote the machine with the number**: ~2.5min on a GitHub `ubuntu-latest`
   runner, ~6-7min on a 4-vCPU container. A bare figure is unfalsifiable, which
   is how a run on a *busy* box (9min) gets reported as a regression against a
@@ -624,6 +624,31 @@ package or skip — for no benefit whatsoever. And before trusting any result fr
 that harness, read its guards: three separate harness bugs each produced a
 confident wrong answer first, and one of them invalidated a whole bisect.
 
+**"Neither half suffices" is a halt condition, not a partial result**, which is
+why that search stalled and what `scripts/ipp_bisect.py` exists to fix. Binary
+search recurses into whichever half still shows the effect; when *both* halves
+come back negative it has nowhere to go — and both halves coming back negative is
+the definition of an **interaction**, which is exactly what the evidence says is
+there. So the search was not merely unfinished, it was being run with an algorithm
+that cannot converge on it. The one that can is **delta debugging** (`ddmin`):
+when no subset passes it tests the complements, and when those fail it refines the
+partition rather than stopping, returning a **1-minimal** set. The driver decides
+nothing itself — it cannot render a page — so every verdict comes from an
+**oracle** the operator supplies against the real rig; everything above that seam
+is unit-tested, including a test that a bisect halts on this input shape and ddmin
+does not. Measured cost: **~38 physical print jobs** for a two-attribute cause
+(p90 44), ~70 for three, memoised and journalled so an interrupted run resumes.
+Two design points that are load-bearing rather than tidy: it **checks the premise
+first** (importing everything must print, importing nothing must not — if some
+donor attribute *breaks* the effect, the whole search is measuring something else,
+and one trial says so instead of three hours), and `INDETERMINATE` is a **third
+outcome that stops the run**, never a FAIL — coercing "the job hadn't finished
+yet" into evidence of absence is precisely what invalidated the earlier attempt,
+so a trial the client never queried (`QUERIES: 0`) is forced inconclusive however
+it voted. The oracle itself is deliberately **not** in the repo: it spans two
+machines and the Windows access path is site-specific, so any version here would
+be a claim that had never run.
+
 **Print management** (the Printix-shaped half, feature-complete): end users,
 groups, and per-user / per-group printer assignment with a deterministic
 resolver, at `/manage/people`; **directory sync** from Entra ID, Google
@@ -915,6 +940,10 @@ transports, **not** against real tenants.
     never freed so the previous config kept serving, and a verdict from a run
     where the client never queried us) -- the guards are documented in the
     script, and a result obtained without them is worthless.
+    `scripts/ipp_bisect.py` drives the remaining search with those guards
+    enforced in code rather than by memory, using **delta debugging** rather
+    than a bisect, because "neither half suffices" is the input on which a
+    bisect halts. See the Status section and `deploy/WINDOWS-MSI-TESTING.md`.
   The general lesson, for the fourth time: a queue that exists, lists and
   converges is not a queue that prints, and every proxy for "it works" that does
   not involve paper has now failed at least once. **The only sufficient check is
