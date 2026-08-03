@@ -110,7 +110,7 @@ def test_rendered_claim_config_parses_and_enrolls(db, tmp_path, monkeypatch):
     assert (cfg.agent_id, cfg.api_key) == (42, "pn_issued")
     assert calls["n"] == 1
     # And the spent code is gone from disk.
-    assert "claim_code" not in path.read_text()
+    assert "claim_code" not in path.read_text(encoding="utf-8")
 
 
 def test_rendered_key_config_still_parses(db, tmp_path):

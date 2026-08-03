@@ -17,10 +17,21 @@ from __future__ import annotations
 
 import importlib.util
 import json
+import os
 import pathlib
 import struct
 
 import pytest
+
+# The CLI tests below write /bin/sh oracles and let the driver invoke them
+# through subprocess.run(shell=True). On Windows that shell is cmd.exe, which
+# hands the .sh path to whatever the extension is associated with -- Git Bash
+# opens an interactive window and the test waits on it forever. A hang is worse
+# than a failure: it wedges the whole suite rather than reporting one result.
+needs_posix_shell = pytest.mark.skipif(
+    os.name == "nt",
+    reason="writes /bin/sh oracles; shell=True on Windows is cmd.exe",
+)
 
 _SCRIPT = pathlib.Path(__file__).resolve().parents[1] / "scripts" / "ipp_bisect.py"
 
@@ -252,7 +263,7 @@ def test_a_cached_trial_does_not_rerun(tmp_path):
     # An oracle that would raise if consulted.
     test = ib.make_test("exit 1", journal, retries=0, log=lambda *a: None)
     assert test(["a"]) == ib.FAIL
-    assert json.loads(path.read_text())["results"]
+    assert json.loads(path.read_text(encoding="utf-8"))["results"]
 
 
 def test_repeated_subsets_are_asked_once():
@@ -326,6 +337,7 @@ def _rig(tmp_path, oracle_body):
     return [str(tmp_path / "brother.ipp"), str(tmp_path / "good.ipp"), "--oracle", str(oracle)]
 
 
+@needs_posix_shell
 def test_cli_finds_an_interacting_pair(tmp_path, capsys):
     argv = _rig(tmp_path, """#!/bin/sh
 s=$(cat)
@@ -343,6 +355,7 @@ fi
     assert "20 candidate attributes" in out, "identity attributes must not be candidates"
 
 
+@needs_posix_shell
 def test_cli_resumes_without_reprinting(tmp_path, capsys):
     body = """#!/bin/sh
 s=$(cat)
@@ -367,6 +380,7 @@ fi
     assert "trial " not in out, "a resumed run reprinted something"
 
 
+@needs_posix_shell
 def test_cli_aborts_when_the_premise_does_not_hold(tmp_path):
     """Importing everything must print, or the rig is not what was recorded."""
     argv = _rig(tmp_path, '#!/bin/sh\ncat >/dev/null\necho "QUERIES: 8"\necho "VERDICT: FAIL"\n')
@@ -376,6 +390,7 @@ def test_cli_aborts_when_the_premise_does_not_hold(tmp_path):
     assert ib.main(argv) == 2
 
 
+@needs_posix_shell
 def test_cli_refuses_rather_than_tracebacks_on_an_inconclusive_premise(tmp_path):
     """A misconfigured rig is the likeliest way to start a multi-hour run.
 

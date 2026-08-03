@@ -219,7 +219,7 @@ def test_patch_pth_enables_site_packages(tmp_path):
         "python312.zip\n.\n\n# Uncomment to run site.main() automatically\n#import site\n"
     )
     M._patch_pth(py)
-    out = (py / "python312._pth").read_text()
+    out = (py / "python312._pth").read_text(encoding="utf-8")
     assert "Lib\\site-packages" in out
     # Exactly one enabled `import site`, and the disabled form is gone.
     assert "\nimport site\n" in ("\n" + out)

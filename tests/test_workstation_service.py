@@ -24,6 +24,15 @@ from printer_nanny_agent import workstation as ws
 from printer_nanny_agent import workstation_service as svc
 from printer_nanny_agent.platforms import windows as windows_backend
 
+# Windows has no POSIX mode bits -- os.chmod there only toggles the read-only
+# attribute, so a file written 0600 reads back 0666 and the assertion fails for
+# a reason that has nothing to do with how the credential is handled. Windows
+# restricts this file by ACL instead (LockPermissions, SYSTEM +
+# Administrators), which tests/test_workstation_msi.py asserts.
+posix_modes_only = pytest.mark.skipif(
+    os.name == "nt", reason="POSIX mode bits; Windows restricts this by ACL instead"
+)
+
 
 @pytest.fixture(autouse=True)
 def _windows_backend(monkeypatch):
@@ -127,6 +136,7 @@ def test_a_re_image_is_a_new_machine(tmp_path):
     assert first != second
 
 
+@posix_modes_only
 def test_state_holding_a_credential_is_owner_only(tmp_path):
     svc.save_state({"api_key": "pnm_secret"}, str(tmp_path))
     mode = os.stat(tmp_path / "machine.json").st_mode
@@ -167,7 +177,7 @@ def test_credentials_are_persisted_before_they_are_used(tmp_path):
     svc.ensure_enrolled(
         central, enroll_key="pnw_k", computer_name="PC1", state_dir=str(tmp_path)
     )
-    state = json.loads((tmp_path / "machine.json").read_text())
+    state = json.loads((tmp_path / "machine.json").read_text(encoding="utf-8"))
     assert state["machine_id"] == 7
     assert state["api_key"] == "pnm_secret"
     assert central.machine_id == 7
@@ -617,6 +627,11 @@ def test_no_desired_default_means_nothing_is_touched(monkeypatch):
     assert report.default_applied is None and report.default_reason is None
 
 
+@pytest.mark.skipif(
+    os.name == "nt",
+    reason="asserts the non-Windows backend; on Windows this dispatches to the "
+           "real ctypes setter, which impersonates and calls the live spooler",
+)
 def test_setting_a_default_off_windows_reports_rather_than_raising():
     """The real setter on a non-Windows host: a stated reason, not a traceback."""
     with pytest.raises(svc.DefaultPrinterError, match="Windows"):

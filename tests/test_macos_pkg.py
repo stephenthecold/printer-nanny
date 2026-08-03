@@ -24,6 +24,8 @@ until it was on somebody's fleet:
 
 from __future__ import annotations
 
+import os
+import shutil
 import tarfile
 from pathlib import Path
 
@@ -366,6 +368,9 @@ def test_an_unknown_client_does_not_mint_a_key(db):
 # --------------------------------------------------------------------------- #
 
 
+@pytest.mark.skipif(
+    shutil.which("bash") is None, reason="no bash on PATH to syntax-check with"
+)
 @pytest.mark.parametrize("script", [PREINSTALL, POSTINSTALL, BUILD_SH])
 def test_scripts_parse(script):
     import subprocess
@@ -375,14 +380,21 @@ def test_scripts_parse(script):
 
 
 @pytest.mark.parametrize("script", [PREINSTALL, POSTINSTALL, BUILD_SH])
-def test_scripts_are_executable(script):
-    assert script.stat().st_mode & 0o111, script.name
+def test_scripts_are_executable(script, git_file_mode):
+    """pkgbuild takes these modes from the checkout, so git's is the one that
+    ships. Asserted there rather than via stat() -- see the fixture."""
+    mode = git_file_mode(script)
+    if mode is None:
+        pytest.skip("not a git checkout; the exec bit is a repository property")
+    assert mode == "100755", f"{script.name} is {mode} in git, not 100755"
+    if os.name != "nt":
+        assert script.stat().st_mode & 0o111, script.name
 
 
 def test_postinstall_installs_offline():
     """--no-index is the whole reason the wheelhouse is in the payload. Without
     it an MDM push onto a Mac behind a captive portal fails."""
-    body = POSTINSTALL.read_text()
+    body = POSTINSTALL.read_text(encoding="utf-8")
     assert "--no-index" in body
     assert "--find-links" in body
 
@@ -398,13 +410,13 @@ def test_postinstall_fails_loudly():
     """A postinstall that half-completes leaves a service that cannot start, and
     macOS Installer reporting success for that is the exact failure this codebase
     is organised against."""
-    body = POSTINSTALL.read_text()
+    body = POSTINSTALL.read_text(encoding="utf-8")
     assert "launchctl print" in body  # verifies the daemon actually loaded
     assert "die " in body
 
 
 def test_postinstall_reasserts_the_key_mode():
-    body = POSTINSTALL.read_text()
+    body = POSTINSTALL.read_text(encoding="utf-8")
     assert "chmod 600" in body
     assert "chmod 700" in body
 
@@ -417,7 +429,7 @@ def _effective_lines(path: Path) -> list:
     matched the prose explaining why the option is absent.
     """
     out = []
-    for raw in path.read_text().splitlines():
+    for raw in path.read_text(encoding="utf-8").splitlines():
         line = raw.strip()
         if line and not line.startswith("#"):
             out.append(line)
@@ -433,7 +445,7 @@ def test_preinstall_does_not_abort_the_install():
 
 
 def test_the_build_script_refuses_to_run_off_a_mac():
-    body = BUILD_SH.read_text()
+    body = BUILD_SH.read_text(encoding="utf-8")
     assert 'uname -s' in body
     assert "Darwin" in body
 
@@ -441,7 +453,7 @@ def test_the_build_script_refuses_to_run_off_a_mac():
 def test_the_build_script_takes_credentials_from_the_environment():
     """A process's command line is readable by every user on the machine, and one
     of these is an App Store Connect key."""
-    body = BUILD_SH.read_text()
+    body = BUILD_SH.read_text(encoding="utf-8")
     for var in ("PN_SIGN_IDENTITY", "PN_TEAM_ID", "PN_ASC_KEY_ID", "PN_APPLE_PASSWORD"):
         assert var in body
     # No --password/--sign taken as a script argument.
@@ -460,26 +472,26 @@ def test_no_script_enables_xtrace(script):
 def test_the_build_script_staples():
     """Without stapling, a Mac with no route to Apple refuses a perfectly
     notarized package -- which describes a segmented client VLAN."""
-    body = BUILD_SH.read_text()
+    body = BUILD_SH.read_text(encoding="utf-8")
     assert "stapler staple" in body
     assert "stapler validate" in body
 
 
 def test_the_build_script_asks_gatekeeper_rather_than_assuming():
-    assert "spctl --assess" in BUILD_SH.read_text()
+    assert "spctl --assess" in BUILD_SH.read_text(encoding="utf-8")
 
 
 def test_the_build_script_asserts_the_key_mode():
     """A bundle that travelled through a tool which normalised modes would
     otherwise produce an installer whose key is world-readable everywhere."""
-    body = BUILD_SH.read_text()
+    body = BUILD_SH.read_text(encoding="utf-8")
     assert "stat -f" in body
     assert "chmod 600" in body
 
 
 def test_the_unsigned_build_says_it_is_unsigned():
     """An operator must not think an unsigned package is double-clickable."""
-    body = BUILD_SH.read_text()
+    body = BUILD_SH.read_text(encoding="utf-8")
     assert "NOT signed" in body
     assert "Gatekeeper will refuse it" in body
 
@@ -487,7 +499,7 @@ def test_the_unsigned_build_says_it_is_unsigned():
 def test_the_workflow_runs_on_macos_and_is_path_filtered():
     import yaml
 
-    wf = yaml.safe_load(WORKFLOW.read_text())
+    wf = yaml.safe_load(WORKFLOW.read_text(encoding="utf-8"))
     assert wf["jobs"]["build"]["runs-on"] == "macos-latest"
     # macOS runner minutes bill at 10x on private repos.
     assert "paths" in wf[True]["pull_request"]
@@ -498,7 +510,7 @@ def test_the_signing_gate_can_actually_evaluate():
     is always false and signing silently never runs."""
     import yaml
 
-    wf = yaml.safe_load(WORKFLOW.read_text())
+    wf = yaml.safe_load(WORKFLOW.read_text(encoding="utf-8"))
     job = wf["jobs"]["build"]
     sign = [s for s in job["steps"] if str(s.get("name", "")).startswith("Sign")][0]
     assert "PN_SIGN_IDENTITY" in job.get("env", {})
@@ -506,13 +518,13 @@ def test_the_signing_gate_can_actually_evaluate():
 
 
 def test_the_workflow_checks_the_key_mode_survived_the_round_trip():
-    body = WORKFLOW.read_text()
+    body = WORKFLOW.read_text(encoding="utf-8")
     assert "expected 600" in body
 
 
 def test_the_workflow_deletes_the_signing_keychain():
     """A Developer ID certificate must not be left on a shared runner."""
-    body = WORKFLOW.read_text()
+    body = WORKFLOW.read_text(encoding="utf-8")
     assert "create-keychain" in body
     assert "delete-keychain" in body
 
@@ -522,12 +534,12 @@ def test_the_component_package_is_kept_out_of_the_output_directory():
     product identity -- which means an operator who picks it by mistake installs
     onto an OS the real installer would have refused. Two .pkg files side by side
     under one name is how that mistake gets made."""
-    body = BUILD_SH.read_text()
+    body = BUILD_SH.read_text(encoding="utf-8")
     assert 'BUILD_DIR="$OUT_DIR/.build"' in body
     assert 'COMPONENT="$BUILD_DIR/' in body
     assert '--package-path "$BUILD_DIR"' in body
 
 
 def test_the_workflow_refuses_more_than_one_shippable_package():
-    body = WORKFLOW.read_text()
+    body = WORKFLOW.read_text(encoding="utf-8")
     assert "holds more than one .pkg" in body
