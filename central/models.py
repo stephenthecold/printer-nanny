@@ -1689,3 +1689,159 @@ class DirectoryConnection(Base):
         UniqueConstraint("client_id", "provider", name="uq_directory_conn_client_provider"),
         CheckConstraint("provider <> 'manual'", name="ck_directory_conn_not_manual"),
     )
+
+
+# --------------------------------------------------------------------------- #
+# Outbound event bus
+#
+# The integration surface that replaces the dropped PSA work: typed, versioned,
+# HMAC-signed events an MSP's own systems consume. Three tables, because the
+# three things have genuinely different lifetimes -- a subscription is
+# configuration, an event is a fact that happened once, and a delivery is one
+# attempt to tell one subscriber about it.
+# --------------------------------------------------------------------------- #
+class EventSubscription(Base):
+    """One outbound destination for typed events, scoped to a tenant or global.
+
+    **Scope is the security property, not a filter.** ``client_id`` NULL means
+    global (the MSP's own systems); a non-NULL ``client_id`` means this
+    destination belongs to that customer and must never be handed another
+    customer's events. Like ``PrinterAssignment`` the rule spans tables -- an
+    event's tenancy lives on ``outbound_events.client_id`` -- so no CHECK can
+    state it; it is owned by ``events.emit.scope_allows`` and re-checked at send
+    time, because an operator may re-scope a subscription while deliveries for
+    other tenants are still queued against it.
+
+    ``secret`` is the HMAC signing key, Fernet-encrypted at rest exactly as
+    ``directory_connections.secret`` is, and for the same reason: it is never
+    rendered in the UI, never echoed in audit detail and never dumped in
+    diagnostics. It is generated server-side and shown once, never typed by an
+    operator and never read back -- an operator who loses it rotates it.
+
+    ``event_types`` NULL/empty means "every type in the catalogue". Naming types
+    explicitly is the normal case for a partner who only cares about supplies.
+    """
+
+    __tablename__ = "event_subscriptions"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    name: Mapped[str] = mapped_column(String(120))
+    #: NULL == global. Non-NULL scopes every delivery to that one tenant.
+    client_id: Mapped[Optional[int]] = mapped_column(
+        ForeignKey("clients.id", ondelete="CASCADE"), default=None, index=True
+    )
+    url: Mapped[str] = mapped_column(String(500))
+    #: Fernet ciphertext (enc:v1:...). Never plaintext, never rendered.
+    secret: Mapped[str] = mapped_column(Text)
+    #: Subset of the catalogue this destination wants; NULL/empty == all.
+    event_types: Mapped[Optional[list]] = mapped_column(JSON, default=None)
+    enabled: Mapped[bool] = mapped_column(Boolean, default=True)
+
+    # Operational bookkeeping, rendered on the subscriptions page. `last_error`
+    # is deliberately short and sanitised: transport errors quote URLs and
+    # occasionally echo credentials, and this column is displayed.
+    last_attempt_at: Mapped[Optional[datetime]] = mapped_column(
+        DateTime(timezone=True), default=None
+    )
+    last_ok: Mapped[Optional[bool]] = mapped_column(Boolean, default=None)
+    last_error: Mapped[Optional[str]] = mapped_column(String(500), default=None)
+
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=utcnow, onupdate=utcnow
+    )
+
+    client: Mapped[Optional[Client]] = relationship()
+
+
+class OutboundEvent(Base):
+    """One thing that happened, frozen for delivery to every interested subscriber.
+
+    Separate from the deliveries so a single occurrence fans out to N
+    destinations without N copies of the payload drifting apart, and so a replay
+    to a newly-added subscriber sends byte-identical data.
+
+    ``idempotency_key`` is the de-duplication contract on BOTH sides. It is
+    stable for one logical occurrence (``alert.opened:alert:412``), UNIQUE here
+    so a re-run of a worker cycle cannot emit the same fact twice, and shipped in
+    the payload and a header so a consumer can detect a replay without keeping
+    state about our retries.
+
+    ``uid`` is per-event and travels as the event id; a retry re-sends the *same*
+    uid, which is what makes "have I seen this before?" answerable downstream.
+    """
+
+    __tablename__ = "outbound_events"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    #: Public event id ("evt_<hex>"), stable across retries.
+    uid: Mapped[str] = mapped_column(String(64), unique=True, index=True)
+    type: Mapped[str] = mapped_column(String(64), index=True)
+    #: Schema version of ``data`` for this type. Bumped only on a breaking change.
+    version: Mapped[int] = mapped_column(Integer, default=1)
+    idempotency_key: Mapped[str] = mapped_column(String(200), unique=True, index=True)
+    #: NULL means the event has no single tenant (fleet-wide). Client-scoped
+    #: subscriptions receive NOTHING with a NULL client_id -- an event of unknown
+    #: tenancy is not "yours".
+    client_id: Mapped[Optional[int]] = mapped_column(
+        ForeignKey("clients.id", ondelete="CASCADE"), default=None, index=True
+    )
+    #: The per-type ``data`` block, already normalised (device strings bounded
+    #: and stripped of control characters). JSON, so quoting is json.dumps's job.
+    data: Mapped[Optional[dict]] = mapped_column(JSON, default=None)
+    occurred_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+
+    __table_args__ = (
+        # The prune sweep and the subscriptions page both read newest-first.
+        Index("ix_outbound_events_created_at", "created_at"),
+    )
+
+
+class EventDelivery(Base):
+    """One (event, subscription) send attempt -- the retry/dead-letter log.
+
+    Deliberately shaped like ``NotificationDelivery``: same ``DeliveryStatus``
+    vocabulary, same ``attempts`` / ``last_error`` / ``next_attempt_at`` triple,
+    so ``channels.delivery._apply_result`` and ``backoff_delay`` fold an outcome
+    into it unchanged. There is exactly one backoff policy and one dead-letter
+    rule in this codebase, and a second implementation is the one that would
+    drift.
+    """
+
+    __tablename__ = "event_deliveries"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    event_id: Mapped[int] = mapped_column(
+        ForeignKey("outbound_events.id", ondelete="CASCADE"), index=True
+    )
+    subscription_id: Mapped[int] = mapped_column(
+        ForeignKey("event_subscriptions.id", ondelete="CASCADE"), index=True
+    )
+    status: Mapped[DeliveryStatus] = mapped_column(
+        _enum(DeliveryStatus), default=DeliveryStatus.pending, index=True
+    )
+    attempts: Mapped[int] = mapped_column(Integer, default=0)
+    last_error: Mapped[Optional[str]] = mapped_column(Text, default=None)
+    #: NULL == due now, matching NotificationDelivery.
+    next_attempt_at: Mapped[Optional[datetime]] = mapped_column(
+        DateTime(timezone=True), default=None, index=True
+    )
+    #: HTTP status of the last attempt, when there was one.
+    response_status: Mapped[Optional[int]] = mapped_column(Integer, default=None)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=utcnow, onupdate=utcnow
+    )
+
+    event: Mapped[OutboundEvent] = relationship()
+    subscription: Mapped[EventSubscription] = relationship()
+
+    __table_args__ = (
+        # One row per destination per event. Without it a re-emit (or a manual
+        # replay) would double-deliver, which is precisely what the idempotency
+        # key exists to make unnecessary.
+        UniqueConstraint(
+            "event_id", "subscription_id", name="uq_event_delivery_event_subscription"
+        ),
+    )

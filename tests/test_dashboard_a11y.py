@@ -45,6 +45,7 @@ PAGES = [
     "/manage/users",
     "/manage/maintenance",
     "/manage/audit",
+    "/manage/events",
     "/manage/onboard",
     "/manage/suppression",
     "/security/posture",

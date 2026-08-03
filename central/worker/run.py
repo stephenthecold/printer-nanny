@@ -34,6 +34,11 @@ JOBS = (
     # After retry_deliveries so a digest built this cycle isn't also swept by the
     # retry path in the same pass.
     jobs.flush_quiet_hours,
+    # POST queued outbound events to their subscribers. After the alert jobs so
+    # events they emitted this cycle go out in the same pass, and after the
+    # notification paths because a human being paged is more urgent than an
+    # integration being told.
+    jobs.deliver_events,
     jobs.forecast_supplies,
     # Interval-gated internally (directory.sync_interval_min); a no-op on most
     # cycles. After the alert path so a slow directory never delays alerting.

@@ -452,6 +452,66 @@ enforced; none of them is optional.
   rename silently clear the flag. `trusted` pairs with a hidden `trusted_present`;
   `runtime.save_settings` solves the same problem with its `sections` argument.
   Same failure class as the `save_settings(sections=None)` wipe.
+- **The outbound event bus is the integration surface, and it replaces PSA
+  integration rather than deferring it** (`central/events/`, `/manage/events`).
+  Typed events with a per-type schema `version`, HMAC-signed, POSTed to
+  operator-configured subscriptions. Six rules carry it:
+  - **The catalogue is the contract.** `events/catalogue.py` lists every type
+    that may ever be sent; `emit` of an uncatalogued type **raises**. `version`
+    is per type and bumps only on a *breaking* change — adding a field is not
+    breaking, and consumers are told to ignore keys they do not know, which is
+    what lets new data ship without a flag day across every MSP.
+  - **Stripe's signature scheme, deliberately.** `t=<unix>,v1=<hex>` over
+    `"<t>." + raw_body`. GitHub's `X-Hub-Signature-256` signs the body alone, so
+    a captured request stays valid forever and a timestamp in a *separate* header
+    is rewritten freely. Putting `t` inside the MAC binds the body to a moment;
+    `v1=` is an in-band version so a future scheme ships alongside rather than
+    instead; and it is the scheme an MSP most likely already has verification
+    code for, which matters because the property is only real if they verify.
+    Sign the bytes you send — `serialize()` runs once and its output is both
+    signed and posted, because re-encoding between the two yields a
+    valid-looking delivery every subscriber rejects.
+  - **Scope is tenancy, and it is checked twice.** `client_id` NULL is global;
+    non-NULL means that customer's events *only*, and an event whose own
+    `client_id` is NULL reaches **no** client-scoped subscription (absence of
+    tenancy is not a match). Same invariant and the same `services.TenancyError`
+    as `assign_printer`. The second check, immediately before each send, is not
+    belt-and-braces: a subscription's scope is **editable**, so re-scoping a
+    global one to a customer would otherwise ship every other customer's queued
+    events to it. Those rows dead-letter with a stated reason and an
+    `event_delivery.refused` audit row.
+  - **One retry policy in this codebase.** `events/delivery.py` imports
+    `channels.delivery._apply_result` and `backoff_delay` and folds its outcomes
+    through them, against `EventDelivery` rows shaped to match. `sent` stays
+    separate from `ok`: a disabled subscription, a de-subscribed type and a
+    refused destination all terminate as `skipped`, never `delivered`. A test
+    asserts the two modules share the *same function object*, so a copy cannot
+    quietly appear.
+  - **The SSRF decision, stated.** Scheme is http/https only and URL credentials
+    are refused. Link-local (incl. `169.254.169.254`), unspecified, multicast and
+    reserved are refused with **no override**. Loopback and private ranges are
+    refused **by default** and allowed by one setting
+    (`events.allow_private_destinations`), because the likeliest subscriber is
+    the MSP's own box on the same LAN and a blanket refusal would be safer in
+    the abstract and worked around in practice. Names are resolved and *every*
+    address checked; redirects are **never followed** (a 302 to the metadata
+    address defeats any pre-flight check). Residual risk recorded in the module:
+    the resolve-then-connect gap is a DNS-rebinding window, unclosed because it
+    only defends against an attacker who is already an admin here.
+  - **JSON is the safe case — do not double-escape.** `json.dumps` quotes device
+    strings fully, and HTML-escaping on top would deliver `Sales &amp; Marketing`
+    into somebody's database. What device strings *do* get is bounding and
+    control-character stripping (`catalogue._text`) — a transport and storage
+    concern, not a quoting one. The per-channel escaping added for FreeScout and
+    Slack is needed *because* those render; this does not.
+  - The trap worth not rediscovering: **flap damping re-opens the same alert
+    row**, so keying idempotency on the alert id alone made a re-opened fault
+    emit nothing — leaving every subscriber holding "resolved" for a live
+    condition, and unable to hear the next resolve either. The key carries the
+    flap generation (`alert.opened:alert:5:flap:1`). Note the deliberate split
+    from notification damping: a flap re-open is **not** notified and **is**
+    emitted, because a person wants to be told once and a system wants its state
+    to match ours.
 
 ## Dev
 - `pip install -e ".[dev]"` (add `postgres` / `agent` / `agent-mdns` extras as needed).

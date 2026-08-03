@@ -306,6 +306,31 @@ SPECS: List[Spec] = [
     Spec("directory.sync_interval_min", "int", "Directory sync", "Sync every (minutes)", 60,
          "How often the worker refreshes each enabled connection. Directories change "
          "slowly; a short interval mostly buys API throttling."),
+    # Outbound event bus. The destinations and their signing secrets live on
+    # event_subscriptions, not here -- a global setting cannot hold one signing
+    # key per partner, and a secret in this table is rendered on the Settings
+    # page. These are the knobs that genuinely are install-wide.
+    Spec("events.enabled", "bool", "Event bus", "Send outbound events", True,
+         "Master switch. Off queues events without sending them; switching it "
+         "back on delivers the backlog."),
+    Spec("events.max_attempts", "int", "Event bus", "Max delivery attempts", 8,
+         "A delivery that fails this many times is dead-lettered instead of "
+         "retried forever. Backoff doubles each attempt, capped at an hour."),
+    Spec("events.retry_base_seconds", "int", "Event bus", "Retry base (seconds)", 60,
+         "First retry waits this long; each subsequent one doubles."),
+    Spec("events.timeout_seconds", "int", "Event bus", "Request timeout (seconds)", 15,
+         "A subscriber that does not answer in this long counts as a failed "
+         "attempt and is retried."),
+    Spec("events.retention_days", "int", "Event bus", "Keep delivered events for (days)", 30,
+         "Fully-delivered events older than this are pruned. Events with a "
+         "delivery still queued are always kept. 0 disables pruning."),
+    Spec("events.allow_private_destinations", "bool", "Event bus",
+         "Allow private / loopback destinations", False,
+         "Off by default: a subscription URL makes this server issue requests, "
+         "so an internal address is a way to probe your own network. Turn it on "
+         "only if the subscriber really is on this LAN (e.g. "
+         "http://helpdesk.lan:8080/hooks). Link-local and cloud-metadata "
+         "addresses stay refused either way."),
 ]
 
 SPEC_BY_KEY: Dict[str, Spec] = {s.key: s for s in SPECS}
@@ -318,7 +343,8 @@ SETTINGS_GROUPS: "Dict[str, tuple]" = {
     "branding": ("Branding", ["Branding"]),
     "notifications": (
         "Notifications",
-        ["Email (SMTP)", "Microsoft Teams", "Slack", "Webhook (generic)", "FreeScout"],
+        ["Email (SMTP)", "Microsoft Teams", "Slack", "Webhook (generic)", "FreeScout",
+         "Event bus"],
     ),
     "alerts": ("Alerts & Reports", ["Alerts", "Reports", "ESG / Sustainability"]),
     "polling": ("Polling & SNMP", ["Polling", "SNMP defaults"]),

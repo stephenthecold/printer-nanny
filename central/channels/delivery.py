@@ -34,7 +34,7 @@ moment one comes back.
 from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
-from typing import Dict, Iterable, List, Optional, Set, Tuple
+from typing import Dict, Iterable, List, Optional, Set, Tuple, Union
 
 from sqlalchemy import or_, select
 from sqlalchemy.orm import Session
@@ -135,7 +135,7 @@ def backoff_delay(attempts: int, base_seconds: int) -> timedelta:
 
 
 def _apply_result(
-    delivery: m.NotificationDelivery,
+    delivery: "Union[m.NotificationDelivery, m.EventDelivery]",
     result: ChannelResult,
     now: datetime,
     *,
@@ -149,6 +149,15 @@ def _apply_result(
     delivered made the durable log (and the alerts page) claim a send that never
     happened. ``skipped`` is terminal -- ``_due_deliveries`` only looks at
     pending/failed -- so it is never retried and never double-counted.
+
+    Deliberately structural rather than typed to one model: the outbound event
+    bus (``central.events.delivery``) folds ITS outcomes through this same
+    function, against ``EventDelivery`` rows shaped to match
+    (``status``/``attempts``/``last_error``/``next_attempt_at``, same
+    ``DeliveryStatus`` vocabulary). There is one backoff policy and one
+    dead-letter rule in this codebase; a second copy is the one that would drift,
+    and the rule most likely to drift is the ``sent``-vs-``ok`` distinction
+    above, which took a shipped defect to arrive at.
     """
     delivery.attempts += 1
     if result.ok:
