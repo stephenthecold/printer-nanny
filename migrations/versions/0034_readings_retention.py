@@ -28,7 +28,7 @@ from alembic import op
 import sqlalchemy as sa
 
 revision = "0034_readings_retention"
-down_revision = "0033_macos_drivers"
+down_revision = "0038_client_branding"
 branch_labels = None
 depends_on = None
 
