@@ -51,8 +51,7 @@ configure_logging()
 
 log = logging.getLogger("central.main")
 
-app = FastAPI(title="Printer Nanny", version="0.30.0")
-app = FastAPI(title="Printer Nanny", version="0.30.0")
+app = FastAPI(title="Printer Nanny", version="0.30.1")
 # Honor X-Forwarded-Proto/For from the reverse proxy so request.base_url returns
 # https:// when Caddy/Nginx terminates TLS in front of us. Without this, the
 # agent install command on /manage/agents leaks http://… to operators behind
