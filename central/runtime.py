@@ -272,6 +272,35 @@ SPECS: List[Spec] = [
          "printer-day rollup+delete transaction. The worker runs under a single-leader "
          "lock, so this is what stops a large backlog from stalling alerting — it "
          "drains over many cycles instead of one long statement."),
+    # Login protection (central/ratelimit.py). Two independent scopes because
+    # each is the other's bypass: a per-username budget is defeated by spraying
+    # many usernames, and a per-source budget is defeated by spraying from many
+    # sources. Both are leaky buckets over the same window -- there is no
+    # "locked_until", so a lock always drains on its own and can never become a
+    # permanent denial of service against a real operator.
+    Spec("auth.lockout_enabled", "bool", "Login protection",
+         "Throttle failed sign-ins", True,
+         "Off means unlimited password guesses against every account. Leave it on."),
+    Spec("auth.lockout_user_threshold", "int", "Login protection",
+         "Failed sign-ins per username", 10,
+         "Failures within the window before that username stops being checked. "
+         "Applies to unknown usernames too, so it cannot be used to discover "
+         "which accounts exist."),
+    Spec("auth.lockout_ip_threshold", "int", "Login protection",
+         "Failed sign-ins per source address", 50,
+         "The username-rotation catch. Deliberately much higher than the "
+         "per-username budget: behind a reverse proxy with no trusted-proxy "
+         "list every operator shares one source address."),
+    Spec("auth.lockout_window_min", "int", "Login protection",
+         "Window (minutes)", 15,
+         "Failures older than this stop counting, so a throttle lifts by itself."),
+    Spec("auth.trusted_proxies", "str", "Login protection",
+         "Trusted proxy addresses", "",
+         "Comma-separated IPs/CIDRs of your reverse proxy (e.g. 172.16.0.0/12 for "
+         "the Docker bridge). SET THIS if you run behind one: without it every "
+         "request looks like it came from the proxy, so the per-source budget is "
+         "shared by everybody. X-Forwarded-For is honoured ONLY from these "
+         "addresses -- anywhere else it is attacker-supplied and ignored."),
     # Single sign-on (OIDC)
     Spec("oidc.enabled", "bool", "Single sign-on (OIDC)", "Enable SSO login", False),
     Spec("oidc.issuer", "str", "Single sign-on (OIDC)", "Issuer / discovery URL", "",
@@ -457,7 +486,8 @@ SETTINGS_GROUPS: "Dict[str, tuple]" = {
     # ask, and how long we keep what comes back.
     "polling": ("Polling & SNMP", ["Polling", "SNMP defaults", "Data retention"]),
     "auth": ("Authentication",
-             ["Single sign-on (OIDC)", "SCIM provisioning", "Directory sync"]),
+             ["Login protection", "Single sign-on (OIDC)", "SCIM provisioning",
+              "Directory sync"]),
     "agents": ("Agents", ["Agent install", "Collector redundancy", "Workstations",
                           "Onboarding defaults"]),
 }
@@ -574,21 +604,34 @@ def save_settings(
 
 
 def encrypt_existing_settings(db: Session) -> int:
-    """One-shot startup migration: encrypt every plaintext secret row.
+    """One-shot startup migration: bring every secret row up to the live key.
 
-    Idempotent (encrypted rows are skipped) and safe to race with the worker
-    (load_settings handles both forms). Returns the number of rows updated
-    so the caller can log it.
+    Two shapes are swept, both left over from an older install:
+
+    * plaintext, from before encryption-at-rest shipped;
+    * ciphertext sealed under a SECRET_KEY published in this repository, from
+      before ``config.resolve_secret_key`` generated a real one for this install.
+
+    Idempotent (rows already sealed under the live key are skipped) and safe to
+    race with the worker (``load_settings`` handles every form). Returns the
+    number of rows updated so the caller can log it.
     """
-    from central.secrets import encrypt_value, is_encrypted
+    from central.secrets import encrypt_value, is_encrypted, rewrap_if_legacy
 
     updated = 0
     for row in db.scalars(select(m.AppSetting)):
         spec = SPEC_BY_KEY.get(row.key)
         if spec is None or spec.type != "secret":
             continue
-        if isinstance(row.value, str) and row.value and not is_encrypted(row.value):
+        if not isinstance(row.value, str) or not row.value:
+            continue
+        if not is_encrypted(row.value):
             row.value = encrypt_value(row.value)
+            updated += 1
+            continue
+        rewrapped = rewrap_if_legacy(row.value)
+        if rewrapped is not None:
+            row.value = rewrapped
             updated += 1
     if updated:
         db.commit()

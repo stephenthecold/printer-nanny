@@ -99,24 +99,75 @@ def login(
     password: str = Form(...),
     db: Session = Depends(get_db),
 ):
+    from central import ratelimit
     from central.audit import record, record_anonymous
+    from central.middleware import FORCE_PASSWORD_CHANGE_KEY
+    from central.net import throttle_ip
+    from central.runtime import load_settings
+
+    values = load_settings(db)
+    policy = ratelimit.Policy.from_settings(values)
+    # NOT request.client.host: that is rewritten from X-Forwarded-For by a
+    # middleware that trusts any sender, so keying a throttle on it would hand an
+    # attacker a fresh bucket per request. See central/net.py.
+    source = throttle_ip(request, str(values.get("auth.trusted_proxies", "")))
+
+    throttled = ratelimit.check(db, username=username, ip=source, policy=policy)
+    if throttled is not None:
+        # Refused BEFORE the password is checked -- a throttle that verifies the
+        # password in order to decide whether to apply has already granted the
+        # guess it was supposed to ration. Deliberately not audited per attempt:
+        # the transition into this state was audited once (below), and an
+        # attacker who can write one audit row per request can push everything
+        # else out of the operator's fixed-size audit view.
+        response = _render(
+            request, "login.html", db=db, error=throttled.message()
+        )
+        # 429 so a reverse proxy / fail2ban can see it, and so an automated
+        # client is told to back off rather than reading a 200 as "keep going".
+        response.status_code = 429
+        return response
 
     user = db.scalar(select(m.User).where(m.User.username == username))
-    if user is None or not verify_password(password, user.password_hash):
-        record_anonymous(db, request, username, "login.failed")
+    # ``password_hash`` is None for SSO-only accounts; passlib will not verify
+    # against None, so the guard is what keeps their username from 500ing the
+    # login form rather than being rejected like any other bad credential.
+    password_ok = (
+        user is not None
+        and bool(user.password_hash)
+        and verify_password(password, user.password_hash)
+    )
+    if not password_ok or not user.active:
+        # Deactivated (deprovisioned) accounts cannot log in even with a valid
+        # password -- the same generic message so we don't leak that the account
+        # exists-but-is-disabled. This is the SCIM off-boarding gate at the login
+        # boundary (current_user enforces it for already-live sessions).
+        record_anonymous(
+            db, request, username,
+            "login.failed" if not password_ok else "login.deactivated",
+        )
+        filled = ratelimit.record_failure(
+            db, username=username, ip=source, policy=policy
+        )
+        if filled is not None:
+            record_anonymous(
+                db, request, username, "login.throttled",
+                target=f"{filled}:{username if filled == 'user' else source}",
+                detail=(f"{policy.user_threshold if filled == 'user' else policy.ip_threshold}"
+                        f" failed sign-ins within {policy.window_minutes}m"),
+            )
         db.commit()
         return _render(request, "login.html", db=db, error="Invalid credentials")
-    # Deactivated (deprovisioned) accounts cannot log in even with a valid
-    # password -- the same generic message so we don't leak that the account
-    # exists-but-is-disabled. This is the SCIM off-boarding gate at the login
-    # boundary (current_user enforces it for already-live sessions).
-    if not user.active:
-        record_anonymous(db, request, username, "login.deactivated")
-        db.commit()
-        return _render(request, "login.html", db=db, error="Invalid credentials")
+    # A proven password empties both buckets: the username's, and the source's
+    # (see ratelimit.clear for why the second one is safe).
+    ratelimit.clear(db, username=username, ip=source)
     request.session["user_id"] = user.id
+    if user.must_change_password:
+        request.session[FORCE_PASSWORD_CHANGE_KEY] = True
     record(db, request, user, "login")
     db.commit()
+    if user.must_change_password:
+        return RedirectResponse("/account", status_code=303)
     return RedirectResponse("/", status_code=303)
 
 
@@ -757,6 +808,7 @@ def account_view(request: Request, db: Session = Depends(get_db)):
         request, "account.html", db=db, user=user,
         flash=request.session.pop("account_flash", None),
         error=request.session.pop("account_error", None),
+        must_change_password=bool(user.must_change_password),
     )
 
 
@@ -786,10 +838,21 @@ def account_change_password(
     if new_password != confirm_password:
         request.session["account_error"] = "New password and confirmation don't match."
         return RedirectResponse("/account", status_code=303)
-    user.password_hash = hash_password(new_password)
+    # Refusing to re-set the same password is what makes a forced rotation
+    # actually rotate: otherwise the generated password printed in the container
+    # log can be "changed" to itself and stays live.
+    if verify_password(new_password, user.password_hash):
+        request.session["account_error"] = "New password must differ from the current one."
+        return RedirectResponse("/account", status_code=303)
     from central.audit import record
+    from central.middleware import FORCE_PASSWORD_CHANGE_KEY
 
-    record(db, request, user, "account.password_change")
+    user.password_hash = hash_password(new_password)
+    was_forced = bool(user.must_change_password)
+    user.must_change_password = False
+    request.session.pop(FORCE_PASSWORD_CHANGE_KEY, None)
+    record(db, request, user, "account.password_change",
+           detail="forced rotation of a generated password" if was_forced else "")
     db.commit()
     request.session["account_flash"] = "Password changed."
     return RedirectResponse("/account", status_code=303)

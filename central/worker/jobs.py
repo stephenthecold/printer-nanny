@@ -1751,3 +1751,25 @@ def publish_reorder_recommendations(
             last_raw.value = now.isoformat()
         db.commit()
     return {"reorder_events": result.as_dict()}
+
+
+def prune_login_attempts(db: Session, now: Optional[datetime] = None) -> dict:
+    """Drop failed-sign-in rows that can no longer affect a throttle decision.
+
+    ``central.ratelimit`` already prunes the two buckets each failure touches, so
+    an install with no worker at all (a bare ``uvicorn`` dev box) stays bounded.
+    This exists for the keys nobody comes back to: a spray of ten thousand
+    invented usernames leaves ten thousand buckets that will never be read again,
+    and nothing else would ever delete them.
+
+    Deliberately not a substitute for the audit log -- the ``login.failed`` rows
+    are the forensic record and are untouched by this.
+    """
+    from central import ratelimit
+
+    now = _aware(now) or _now()
+    policy = ratelimit.Policy.from_settings(load_settings(db))
+    removed = ratelimit.prune(db, policy=policy, now=now)
+    if removed:
+        db.commit()
+    return {"login_attempts_pruned": removed}

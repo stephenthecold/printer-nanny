@@ -55,6 +55,10 @@ JOBS = (
     # Interval-gated internally (directory.sync_interval_min); a no-op on most
     # cycles. After the alert path so a slow directory never delays alerting.
     jobs.sync_directories,
+    # One indexed DELETE over failed-sign-in rows old enough to be unreadable by
+    # the throttle. Cheap, and the only thing that reclaims buckets belonging to
+    # usernames an attacker invented once and never returned to.
+    jobs.prune_login_attempts,
     # Cheap no-op unless a weekly/monthly report is due (marker-gated).
     run_scheduled_reports,
     # LAST, deliberately. Retention is the only job here that can delete, and it
@@ -173,6 +177,11 @@ def main(argv: Optional[list] = None) -> int:
     # worker logs and the api does not"; this one also gains the logger name the
     # old format omitted, and the LOG_LEVEL knob.
     configure_logging()
+    # Same refusal as the api container. The worker writes and reads the same
+    # encrypted credentials (SMTP password, webhook URLs) through the same
+    # SECRET_KEY-derived key, so "the api refuses but the worker runs" would
+    # leave half the deployment operating on a published key.
+    settings.assert_secure()
     # SQLite dev convenience only. On Postgres, schema is owned by Alembic — if
     # we create_all() here, we race the api container's `alembic upgrade head`
     # at startup and the next additive migration crashes with a duplicate-table

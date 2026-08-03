@@ -38,6 +38,7 @@ from central.dashboard import (
 from central.db import create_all, get_db
 from central.health import database_ok, worker_health
 from central.logging_config import configure_logging
+from central.middleware import ForcePasswordChangeMiddleware, PeerAddressMiddleware
 
 # `uvicorn central.main:app` gives the api container no entrypoint of ours, so
 # importing this module is the only moment we get before it serves. Until this
@@ -51,14 +52,23 @@ configure_logging()
 
 log = logging.getLogger("central.main")
 
-app = FastAPI(title="Printer Nanny", version="0.30.0")
-app = FastAPI(title="Printer Nanny", version="0.30.0")
+app = FastAPI(title="Printer Nanny", version="0.31.0")
+
+# MIDDLEWARE ORDER IS LOAD-BEARING. add_middleware inserts at index 0 and the
+# stack is wrapped in reverse, so the LAST one added is the OUTERMOST. Reading
+# the four below from the bottom up gives the order a request meets them.
+#
 # Honor X-Forwarded-Proto/For from the reverse proxy so request.base_url returns
 # https:// when Caddy/Nginx terminates TLS in front of us. Without this, the
 # agent install command on /manage/agents leaks http://… to operators behind
 # their own TLS proxy. Trusts headers from any source — we already require the
-# proxy to be a trusted hop (it's the same docker network or LAN).
+# proxy to be a trusted hop (it's the same docker network or LAN). That trust is
+# fine for display and for the audit trail and is NOT fine for a rate limiter,
+# which is why PeerAddressMiddleware below captures the peer before this runs;
+# see central/net.py.
 app.add_middleware(ProxyHeadersMiddleware, trusted_hosts="*")
+# Inside SessionMiddleware (added next), which is what puts scope["session"] there.
+app.add_middleware(ForcePasswordChangeMiddleware)
 app.add_middleware(
     SessionMiddleware,
     secret_key=settings.secret_key,
@@ -66,6 +76,8 @@ app.add_middleware(
     https_only=settings.secure_cookies,  # Secure flag in production (TLS at the proxy)
     same_site="lax",  # mitigates cross-site POST/CSRF on the dashboard
 )
+# Outermost: must see scope["client"] before ProxyHeadersMiddleware rewrites it.
+app.add_middleware(PeerAddressMiddleware)
 
 # JSON API
 # Registered before `ingest` so /api/v1/agents/register is matched by its own
@@ -202,9 +214,13 @@ def readyz(worker: str = "check", db: Session = Depends(get_db)):
 
 @app.on_event("startup")
 def _startup() -> None:
-    # Refuse to boot a production deployment with a default/blank SECRET_KEY.
+    # Refuse to boot on a SECRET_KEY that is published in this repository —
+    # on ANY database backend. See central/config.py.
     settings.assert_secure()
-    log.info("printer nanny api %s starting", app.version)
+    log.info(
+        "printer nanny api %s starting (secret key: %s)",
+        app.version, settings.secret_key_source,
+    )
     # On SQLite (local dev) create tables automatically. On Postgres, migrations own
     # the schema, but create_all is a harmless no-op if they've already run.
     if settings.is_sqlite:
