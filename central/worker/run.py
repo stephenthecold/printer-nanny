@@ -36,6 +36,11 @@ JOBS = (
     # After retry_deliveries so a digest built this cycle isn't also swept by the
     # retry path in the same pass.
     jobs.flush_quiet_hours,
+    # POST queued outbound events to their subscribers. After the alert jobs so
+    # events they emitted this cycle go out in the same pass, and after the
+    # notification paths because a human being paged is more urgent than an
+    # integration being told.
+    jobs.deliver_events,
     jobs.forecast_supplies,
     # Publish supply-reorder recommendations to the outbound event bus. After
     # forecast_supplies so it reads this cycle's estimates rather than the last

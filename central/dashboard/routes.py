@@ -733,6 +733,14 @@ def alert_action(alert_id: int, action: str, request: Request, db: Session = Dep
         elif action == "resolve":
             alert.state = m.AlertState.resolved
             alert.resolved_at = datetime.now(timezone.utc)
+            # An operator closing an alert by hand is as real a resolution as
+            # the worker observing the condition clear, and a subscriber that
+            # only heard about the open is left holding a fault that no longer
+            # exists. Same emit, same idempotency key, so the worker resolving
+            # the same alert a moment later adds nothing.
+            from central.events.emit import emit_alert_resolved
+
+            emit_alert_resolved(db, alert)
         record(db, request, user, f"alert.{action}",
                target=f"alert:{alert.id}", detail=alert.title or "")
         db.commit()

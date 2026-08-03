@@ -28,6 +28,12 @@ from central.channels.delivery import (
 from central.channels.delivery import flush_deferred as _flush_deferred
 from central.channels.delivery import retry_due as _retry_due
 from central.channels.freescout import FreeScoutChannel
+from central.events.delivery import deliver_due as _deliver_events
+from central.events.emit import (
+    emit_alert_opened,
+    emit_alert_resolved,
+    emit_printer_offline,
+)
 from central.runtime import load_settings
 
 # Alert states that still represent an outstanding condition. An ACKNOWLEDGED
@@ -126,6 +132,12 @@ def mark_offline_printers(db: Session, now: Optional[datetime] = None) -> dict:
             continue
         if printer.status != m.PrinterStatus.offline:
             printer.status = m.PrinterStatus.offline
+            # Emitted on the transition, inside the same transaction as the
+            # status write -- so a rolled-back cycle tells nobody a printer went
+            # down, and a printer that flaps offline/online/offline produces two
+            # events rather than one (the key carries the last_seen it went
+            # stale from; see emit_printer_offline).
+            emit_printer_offline(db, printer, at=now)
             changed += 1
     db.commit()
     return {"printers_marked_offline": changed}
@@ -385,6 +397,11 @@ def _revive_flapping_alert(
     alert.resolved_at = None
     alert.flap_count = (alert.flap_count or 0) + 1
     alert.detail = _flap_suffix(detail, alert.flap_count, minutes)
+    # Damping suppresses the *notification*, not the fact. A subscriber told the
+    # condition resolved and never told it came back holds a state that is
+    # false, so the event goes out even though nobody is paged -- see
+    # events.emit.alert_key for why the key carries the flap generation.
+    emit_alert_opened(db, alert)
     return alert
 
 
@@ -585,6 +602,10 @@ def _open_alert(
     )
     db.add(alert)
     db.flush()  # assign alert.id
+    # Emitted before the notification dispatch, and independently of it: a
+    # suppression window silences a *person*, not an integration, and the event
+    # surface is how an MSP's own systems learn the fleet changed.
+    emit_alert_opened(db, alert, printer)
     _notify_alert(
         db,
         alert,
@@ -661,6 +682,7 @@ def _resolve_stale(
             alert.state = m.AlertState.resolved
             alert.resolved_at = now
             _close_ticket_for(alert, channels)
+            emit_alert_resolved(db, alert)
             resolved += 1
     return resolved
 
@@ -999,6 +1021,7 @@ def check_maintenance_due(db: Session, now: Optional[datetime] = None) -> dict:
         )
         db.add(alert)
         db.flush()
+        emit_alert_opened(db, alert, printer)
         _notify_alert(
             db, alert, rule=None, printer=printer,
             candidates=candidates, now=now, runtime=runtime,
@@ -1071,6 +1094,7 @@ def check_maintenance_due(db: Session, now: Optional[datetime] = None) -> dict:
             alert.state = m.AlertState.resolved
             alert.resolved_at = now
             _close_ticket_for(alert, close_channels)
+            emit_alert_resolved(db, alert, resolved_at=now)
             resolved += 1
 
     db.commit()
@@ -1378,6 +1402,17 @@ def retry_deliveries(db: Session, now: Optional[datetime] = None) -> dict:
     return _retry_due(db, load_settings(db), now or _now())
 
 
+def deliver_events(db: Session, now: Optional[datetime] = None) -> dict:
+    """POST every due outbound event to its subscribers, with backoff.
+
+    Shares the notification path's backoff and dead-letter policy rather than
+    owning a second one (see central.events.delivery). Bounded per cycle, because
+    a backlog against one dead subscriber must not spend the cycle that also has
+    alerts to deliver. Also prunes fully-delivered events past their retention.
+    """
+    return _deliver_events(db, load_settings(db), now or _now())
+
+
 def flush_quiet_hours(db: Session, now: Optional[datetime] = None) -> dict:
     """Deliver notifications held by a quiet-hours window, batched into a digest.
 
@@ -1424,6 +1459,7 @@ def _open_forecast_alert(
     )
     db.add(alert)
     db.flush()  # assign alert.id
+    emit_alert_opened(db, alert, printer)
     _notify_alert(
         db, alert, rule=None, printer=printer,
         candidates=candidates or [], now=now, runtime=runtime,
@@ -1458,6 +1494,7 @@ def _resolve_stale_forecasts(
             _close_ticket_for(alert, channels)
             alert.state = m.AlertState.resolved
             alert.resolved_at = now
+            emit_alert_resolved(db, alert, resolved_at=now)
             resolved += 1
     return resolved
 
