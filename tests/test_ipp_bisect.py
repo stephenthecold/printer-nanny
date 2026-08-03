@@ -19,6 +19,7 @@ import importlib.util
 import json
 import pathlib
 import struct
+import types
 
 import pytest
 
@@ -201,6 +202,35 @@ def test_no_verdict_without_a_query():
     assert queries == 0
 
 
+def test_no_verdict_from_a_server_we_did_not_start():
+    """The stale-server trap: the old process kept the port and answered instead.
+
+    `pkill` + `sleep 1` leaves the previous configuration serving when its
+    replacement fails to bind, and that config prints or does not print for its
+    own reasons. The verdict is about attributes nobody selected.
+    """
+    verdict, _, identity = ib.parse_verdict(
+        "VERDICT: PASS\nQUERIES: 9\nIDENTITY: Bisect old-trial\n",
+        expect_identity="Bisect this-trial",
+    )
+    assert verdict == ib.INDETERMINATE
+    assert identity == "Bisect old-trial", "the observed identity survives, for diagnosis"
+
+
+def test_the_expected_identity_lets_a_verdict_stand():
+    assert ib.parse_verdict(
+        "VERDICT: PASS\nQUERIES: 9\nIDENTITY: Bisect this-trial\n",
+        expect_identity="Bisect this-trial",
+    )[0] == ib.PASS
+
+
+def test_a_silent_oracle_does_not_pass_the_identity_check():
+    """Omitting IDENTITY must not be cheaper than reporting a wrong one."""
+    assert ib.parse_verdict(
+        "VERDICT: PASS\nQUERIES: 9\n", expect_identity="Bisect this-trial",
+    )[0] == ib.INDETERMINATE
+
+
 def test_a_pass_with_queries_stands():
     verdict, queries, identity = ib.parse_verdict(
         "noise\nVERDICT: PASS\nQUERIES: 8\nIDENTITY: Bisect Device\n"
@@ -222,6 +252,57 @@ def test_indeterminate_aborts_rather_than_guessing():
     with pytest.raises(ib.Indeterminate):
         test(["a", "b"])
     assert journal.results == {}, "an inconclusive trial must not be recorded"
+
+
+def _oracle_env_spy(replies):
+    """Stand in for the oracle process, recording the env each trial was given.
+
+    Monkeypatched rather than written as a shell script because the trap being
+    tested is about *which server answered*, which has nothing to do with a
+    shell -- and the script-based tests below cannot run where /bin/sh is not.
+    """
+    seen = []
+
+    def fake_run(cmd, **kw):
+        env = kw["env"]
+        seen.append(env)
+        return types.SimpleNamespace(stdout=replies(env), stderr="")
+
+    fake_run.seen = seen
+    return fake_run
+
+
+def test_each_trial_is_issued_its_own_identity_to_serve(monkeypatch):
+    """Guard 2 needs something to compare against, and a constant cannot be it."""
+    spy = _oracle_env_spy(
+        lambda env: f"VERDICT: PASS\nQUERIES: 4\nIDENTITY: {env['PN_TRIAL_IDENTITY']}\n"
+    )
+    monkeypatch.setattr(ib.subprocess, "run", spy)
+    test = ib.make_test("unused", ib.Journal(None), log=lambda *a: None)
+
+    assert test(["a"]) == ib.PASS
+    assert test(["b"]) == ib.PASS
+
+    first, second = spy.seen
+    assert first["PN_TRIAL_UUID"] != second["PN_TRIAL_UUID"]
+    assert first["PN_TRIAL_IDENTITY"] != second["PN_TRIAL_IDENTITY"], (
+        "a reused identity cannot tell a stale server from the intended one"
+    )
+    assert first["PN_TRIAL_IDENTITY"].endswith(first["PN_TRIAL_UUID"].rsplit(":", 1)[-1])
+
+
+def test_a_stale_server_aborts_instead_of_voting(monkeypatch):
+    """An oracle answered by last trial's process reports last trial's identity."""
+    spy = _oracle_env_spy(
+        lambda env: "VERDICT: PASS\nQUERIES: 9\nIDENTITY: Bisect a-previous-trial\n"
+    )
+    monkeypatch.setattr(ib.subprocess, "run", spy)
+    journal = ib.Journal(None)
+    test = ib.make_test("unused", journal, retries=1, log=lambda *a: None)
+
+    with pytest.raises(ib.Indeterminate):
+        test(["a", "b"])
+    assert journal.results == {}, "a mismatched identity must not be recorded"
 
 
 def test_ddmin_propagates_the_abort():
@@ -330,7 +411,7 @@ def test_cli_finds_an_interacting_pair(tmp_path, capsys):
     argv = _rig(tmp_path, """#!/bin/sh
 s=$(cat)
 echo "QUERIES: 8"
-echo "IDENTITY: Bisect Device"
+echo "IDENTITY: $PN_TRIAL_IDENTITY"
 if echo "$s" | grep -qx 'cap-03' && echo "$s" | grep -qx 'cap-17'; then
   echo "VERDICT: PASS"
 else
@@ -347,6 +428,7 @@ def test_cli_resumes_without_reprinting(tmp_path, capsys):
     body = """#!/bin/sh
 s=$(cat)
 echo "QUERIES: 8"
+echo "IDENTITY: $PN_TRIAL_IDENTITY"
 if echo "$s" | grep -qx 'cap-03' && echo "$s" | grep -qx 'cap-17'; then
   echo "VERDICT: PASS"
 else
@@ -369,10 +451,11 @@ fi
 
 def test_cli_aborts_when_the_premise_does_not_hold(tmp_path):
     """Importing everything must print, or the rig is not what was recorded."""
-    argv = _rig(tmp_path, '#!/bin/sh\ncat >/dev/null\necho "QUERIES: 8"\necho "VERDICT: FAIL"\n')
+    ok = 'cat >/dev/null\necho "QUERIES: 8"\necho "IDENTITY: $PN_TRIAL_IDENTITY"\n'
+    argv = _rig(tmp_path, f'#!/bin/sh\n{ok}echo "VERDICT: FAIL"\n')
     assert ib.main(argv) == 2
 
-    argv = _rig(tmp_path, '#!/bin/sh\ncat >/dev/null\necho "QUERIES: 8"\necho "VERDICT: PASS"\n')
+    argv = _rig(tmp_path, f'#!/bin/sh\n{ok}echo "VERDICT: PASS"\n')
     assert ib.main(argv) == 2
 
 
@@ -385,7 +468,8 @@ def test_cli_refuses_rather_than_tracebacks_on_an_inconclusive_premise(tmp_path)
     rather than the thing it is -- the rig telling you Windows never asked it
     anything.
     """
-    argv = _rig(tmp_path, '#!/bin/sh\ncat >/dev/null\necho "QUERIES: 0"\necho "VERDICT: PASS"\n')
+    argv = _rig(tmp_path, '#!/bin/sh\ncat >/dev/null\necho "QUERIES: 0"\n'
+                          'echo "IDENTITY: $PN_TRIAL_IDENTITY"\necho "VERDICT: PASS"\n')
     assert ib.main(argv + ["--retries", "0"]) == 3
 
 

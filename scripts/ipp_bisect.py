@@ -42,9 +42,12 @@ guard that was a human's job to remember. They are enforced here instead:
    ``id=842`` is ``INDETERMINATE``, which is retried and then **aborts the
    search** -- it is never quietly folded into FAIL. That single coercion is what
    invalidated an entire earlier bisect.
-2. **The server you configured must be the one serving.** The oracle contract
-   requires the trial to report the identity it observed over IPP; a mismatch is
-   INDETERMINATE, not a result.
+2. **The server you configured must be the one serving.** Each trial is issued a
+   fresh identity to serve as ``printer-make-and-model`` and must report the one
+   it observed over IPP; a mismatch is INDETERMINATE, not a result. The identity
+   has to be *per trial* for this to detect anything: the failure mode is the
+   previous trial's server still holding the port, and a constant marker would
+   answer for it just as convincingly as for the one you meant to start.
 3. **The client must actually have queried.** A trial reporting zero
    ``Get-Printer-Attributes`` is a verdict about a device Windows had cached, so
    it is INDETERMINATE too. A fresh ``printer-uuid`` is minted per trial because
@@ -58,11 +61,15 @@ USAGE
     python3 scripts/ipp_bisect.py brother.ipp good.ipp \\
         --oracle ./run-trial.sh --journal bisect.json
 
-``run-trial.sh`` receives the subset on stdin (one attribute name per line) and
-the mint UUID in ``$PN_TRIAL_UUID``; it must start the replay server with those
-attributes imported, provision the queue, print, poll the event log, and print
-one ``VERDICT: PASS|FAIL|INDETERMINATE`` line to stdout along with
-``QUERIES: <n>`` and ``IDENTITY: <string>``. See ``ORACLE_CONTRACT``.
+``run-trial.sh`` receives the subset on stdin (one attribute name per line), a
+fresh UUID in ``$PN_TRIAL_UUID`` and the identity to serve in
+``$PN_TRIAL_IDENTITY``; it must start the replay server with those attributes
+imported, provision the queue, print, poll the event log, and print one
+``VERDICT: PASS|FAIL|INDETERMINATE`` line to stdout along with ``QUERIES: <n>``
+and ``IDENTITY: <string>``. See ``ORACLE_CONTRACT``.
+
+``deploy/WINDOWS-IPP-BISECT-PROMPT.md`` is the operator's brief for the run:
+the rig, the capture steps, and what the oracle has to do on the Windows side.
 """
 from __future__ import annotations
 
@@ -82,18 +89,31 @@ PRINTER_ATTRS, END_ATTRS = 0x04, 0x03
 ORACLE_CONTRACT = """\
 The oracle command is run once per trial.
 
-  stdin           the attribute names to import from the donor, one per line
-                  (may be empty, meaning "import nothing")
-  $PN_TRIAL_UUID  a fresh printer-uuid to serve, so Windows cannot answer from
-                  its device cache
-  stdout          must contain, on lines of their own:
-                      VERDICT: PASS | FAIL | INDETERMINATE
-                      QUERIES: <number of Get-Printer-Attributes seen>
-                      IDENTITY: <printer-make-and-model the server actually served>
-  exit code       ignored; the VERDICT line is what is read
+  stdin               the attribute names to import from the donor, one per line
+                      (may be empty, meaning "import nothing")
+  $PN_TRIAL_UUID      a fresh printer-uuid to serve, so Windows cannot answer
+                      from its device cache
+  $PN_TRIAL_IDENTITY  a fresh printer-make-and-model to serve, so a server left
+                      over from the previous trial can be told apart from the
+                      one you meant to start
+  stdout              must contain, on lines of their own:
+                          VERDICT: PASS | FAIL | INDETERMINATE
+                          QUERIES: <number of Get-Printer-Attributes seen>
+                          IDENTITY: <printer-make-and-model read back over IPP>
+  exit code           ignored; the VERDICT line is what is read
 
-A trial reporting QUERIES: 0 is forced to INDETERMINATE however it voted -- that
-is a verdict about a cached device, not about the attributes under test.
+Both markers have to survive the round trip or the trial does not get to vote:
+
+  QUERIES: 0                      -> INDETERMINATE however it voted; that is a
+                                     verdict about a device Windows had cached
+  IDENTITY != $PN_TRIAL_IDENTITY  -> INDETERMINATE however it voted; some other
+                                     server answered, so the verdict belongs to
+                                     a configuration you did not set
+
+Read IDENTITY back *from the server over IPP*, not from the value you passed on
+the command line. Echoing $PN_TRIAL_IDENTITY unconditionally satisfies the check
+and defeats it -- the point is to catch the case where the process you launched
+died on "Address already in use" and the old one kept the port.
 """
 
 # Never import these from the donor. Identity attributes make the fake claim to
@@ -260,13 +280,17 @@ def bisect_would_halt(candidates: "list[str]", test) -> bool:
 
 
 # --- the oracle seam ---------------------------------------------------------
-def parse_verdict(text: str) -> "tuple[str, int, str]":
+def parse_verdict(text: str, expect_identity: "str | None" = None) -> "tuple[str, int, str]":
     """-> (verdict, queries, identity) from an oracle's stdout.
 
     Three outcomes, never two. Anything unparseable is INDETERMINATE, because the
     alternative -- defaulting to FAIL -- is precisely the bug that invalidated the
     earlier bisect: a trial that merely took too long was recorded as evidence of
     absence.
+
+    `expect_identity` is the marker this trial told the oracle to serve. Passing
+    it turns guard 2 on; leaving it None parses without checking, which is only
+    useful for inspecting an oracle's output by hand.
     """
     verdict, queries, identity = INDETERMINATE, -1, ""
     for line in text.splitlines():
@@ -282,6 +306,13 @@ def parse_verdict(text: str) -> "tuple[str, int, str]":
     # Guard 3, structurally: a run the client never queried is about a cached
     # device. It does not get to vote, whatever it claims.
     if queries <= 0:
+        verdict = INDETERMINATE
+    # Guard 2, structurally: a trial that read back some other server's identity
+    # was answered by a configuration nobody chose -- classically the previous
+    # trial's process, still holding the port after its replacement failed to
+    # bind. A missing IDENTITY line fails this too; an oracle that does not
+    # report the marker cannot show the check was made.
+    if expect_identity is not None and identity != expect_identity:
         verdict = INDETERMINATE
     return verdict, queries, identity
 
@@ -318,14 +349,21 @@ def make_test(oracle: str, journal: Journal, *, retries: int = 2, log=print):
             return cached
         for attempt in range(1, retries + 2):
             trial_uuid = f"urn:uuid:{uuid.uuid4()}"
-            env = dict(os.environ, PN_TRIAL_UUID=trial_uuid)
+            # Derived from the same mint so a log line ties the served identity
+            # back to the UUID, and unique per trial so guard 2 can see a stale
+            # server rather than merely assert one is not there.
+            trial_identity = f"Bisect {trial_uuid.rsplit(':', 1)[-1]}"
+            env = dict(os.environ, PN_TRIAL_UUID=trial_uuid,
+                       PN_TRIAL_IDENTITY=trial_identity)
             proc = subprocess.run(
                 oracle, shell=True, env=env, input="\n".join(subset),
                 capture_output=True, text=True,
             )
-            verdict, queries, identity = parse_verdict(proc.stdout)
+            verdict, queries, identity = parse_verdict(
+                proc.stdout, expect_identity=trial_identity)
+            stale = "" if identity == trial_identity else f", wanted {trial_identity!r}"
             log(f"  trial   {len(subset):3d} attrs -> {verdict} "
-                f"(queries={queries}, identity={identity!r}, attempt {attempt})")
+                f"(queries={queries}, identity={identity!r}{stale}, attempt {attempt})")
             if verdict in (PASS, FAIL):
                 journal.put(subset, verdict)
                 return verdict
