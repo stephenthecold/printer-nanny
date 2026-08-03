@@ -192,6 +192,22 @@
             {% endif %}
           </div>
         </div>
+        {# Subnets this agent covers for SOMEONE ELSE. They hang off the other
+           agent's card (a.subnets is the primary assignment), so without this
+           an operator has no way to see what a standby is responsible for --
+           and the whole point of a standby is knowing it is there before you
+           need it. #}
+        {% set standing_by = standby_for.get(a.id, []) %}
+        {% if standing_by %}
+        <div class="mt-1 text-xs text-slate-500">
+          standing by for:
+          {% for s in standing_by %}
+          {% set holds = s.collector_agent_id == a.id %}
+          <span class="px-1.5 py-0.5 rounded text-[10px] tabular-nums {{ 'bg-amber-100 text-amber-800' if holds else 'bg-slate-100 text-slate-600' }}"
+                title="{% if holds %}This agent is collecting {{ s.cidr }} right now — its primary stopped reporting.{% else %}Ready to collect {{ s.cidr }} if its primary stops reporting.{% endif %}">{{ s.cidr }}{% if holds %} · collecting{% endif %}</span>
+          {% endfor %}
+        </div>
+        {% endif %}
         <details class="mt-1">
           <summary class="text-xs text-slate-400 cursor-pointer">
             agent #{{ a.id }} · last seen {{ a.last_heartbeat.strftime('%Y-%m-%d %H:%M UTC') if a.last_heartbeat else 'never' }} · diagnostics
@@ -225,6 +241,7 @@
               <th class="py-1 pr-2 w-14">Ver</th>
               <th class="py-1 pr-2 w-24">Bind IP</th>
               <th class="py-1 pr-2 w-20" title="Auto-approve devices discovered on this subnet instead of queueing them for review.">Trusted</th>
+              <th class="py-1 pr-2 w-40" title="A second agent that takes this subnet over if this one stops reporting. Only one agent ever collects it: whoever holds the lease.">Standby</th>
               <th class="py-1 pr-2 w-44">Last discovery</th>
               <th class="py-1 w-16"></th>
             </tr>
@@ -271,6 +288,41 @@
                   <span class="{{ 'text-emerald-700' if s.trusted else 'text-slate-400' }}">{{ 'auto' if s.trusted else 'review' }}</span>
                 </label>
               </td>
+              {# Standby collector. The hidden marker is load-bearing for the same
+                 reason ``trusted_present`` is, plus one more: "" is a REAL choice
+                 here (no standby), so without the marker an inline rename would
+                 read as "remove the redundancy" and quietly do it. #}
+              {% set cstate = collector_state.get(s.id, 'none') %}
+              <td class="py-1.5 pr-2">
+                <input form="subnet-{{ s.id }}" type="hidden" name="standby_present" value="1" />
+                <select form="subnet-{{ s.id }}" name="standby_agent_id"
+                        aria-label="Standby collector for {{ s.cidr }}"
+                        title="A second agent that takes over if the collector stops reporting. Only ever one collector at a time."
+                        class="{{ input_sm_cls('w-full') }}">
+                  <option value="">none</option>
+                  {% for cand in agents %}
+                  {% if cand.id != s.agent_id %}
+                  <option value="{{ cand.id }}" {% if s.standby_agent_id == cand.id %}selected{% endif %}>{{ cand.name }}</option>
+                  {% endif %}
+                  {% endfor %}
+                </select>
+                {% if cstate != 'none' %}
+                <div class="mt-0.5 text-[10px] leading-tight">
+                  {% if cstate == 'held' and s.collector_agent_id == s.agent_id %}
+                  <span class="text-emerald-700" title="The primary holds the collection lease. Normal.">collector: primary</span>
+                  {% elif cstate == 'held' %}
+                  <span class="text-amber-800" title="The standby took over and is collecting now. A primary that comes back does NOT reclaim it automatically — use Return to primary.">collector: {{ agent_names.get(s.collector_agent_id, 'agent ' ~ s.collector_agent_id) }}</span>
+                  {% elif cstate == 'lapsed' %}
+                  <span class="text-red-700" title="The lease ran out and nobody has taken over yet — its holder stopped renewing and no eligible agent is online.">lease lapsed</span>
+                  {% else %}
+                  <span class="text-slate-500" title="The lease was released. The primary picks it up once the released lease elapses — that gap is what stops two agents collecting at once.">handing back</span>
+                  {% endif %}
+                  {% if s.collector_since %}
+                  <span class="text-slate-400" title="When the current collector took over.">· since {{ s.collector_since.strftime('%m-%d %H:%M') }}</span>
+                  {% endif %}
+                </div>
+                {% endif %}
+              </td>
               <td class="py-1.5 pr-2 text-slate-500">
                 {% if s.last_discovery_at %}
                 {{ s.last_discovery_at.strftime('%m-%d %H:%M') }}
@@ -284,12 +336,17 @@
               </td>
               <td class="py-1.5 text-right align-top">
                 <button form="subnet-{{ s.id }}" class="{{ btn('primary', 'sm', 'w-full') }}">Save</button>
+                {% if s.collector_agent_id and s.agent_id and s.collector_agent_id != s.agent_id %}
+                <button form="subnet-handback-{{ s.id }}" class="block w-full text-amber-700 hover:underline mt-0.5 text-center"
+                        title="Release {{ s.cidr }} from its standby. The primary picks it up once the current lease elapses — that gap is deliberate."
+                        onclick="return confirm('Return {{ s.cidr }} to its primary collector? There is a short gap while the current lease elapses — that is what stops both agents collecting at once.')">return to primary</button>
+                {% endif %}
                 <button form="subnet-del-{{ s.id }}" class="block w-full text-red-600 hover:underline mt-0.5 text-center"
                         onclick="return confirm('Remove subnet {{ s.cidr }}?')">remove</button>
               </td>
             </tr>
             <tr class="border-none">
-              <td colspan="7" class="pb-1.5">
+              <td colspan="9" class="pb-1.5">
                 <details>
                   <summary class="text-[11px] text-slate-400 cursor-pointer">
                     {% if s.snmp_v3 %}SNMPv3: user <code class="bg-slate-100 px-1">{{ s.snmp_v3.get('user') }}</code> ({{ s.snmp_v3.get('security_level','noAuthNoPriv') }}){% else %}SNMPv3 credentials (used when version=3){% endif %}
@@ -353,7 +410,7 @@
               </td>
             </tr>
             {% else %}
-            <tr><td colspan="8" class="py-2 text-slate-400 text-sm">No subnets assigned.</td></tr>
+            <tr><td colspan="9" class="py-2 text-slate-400 text-sm">No subnets assigned.</td></tr>
             {% endfor %}
           </tbody>
         </table>
@@ -361,6 +418,7 @@
         {% for s in a.subnets %}
         <form id="subnet-{{ s.id }}" method="post" action="/manage/subnets/{{ s.id }}"></form>
         <form id="subnet-del-{{ s.id }}" method="post" action="/manage/subnets/{{ s.id }}/delete"></form>
+        <form id="subnet-handback-{{ s.id }}" method="post" action="/manage/subnets/{{ s.id }}/handback"></form>
         {% endfor %}
 
         <details class="mt-2 border-t pt-2">

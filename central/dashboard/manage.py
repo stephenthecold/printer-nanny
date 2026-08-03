@@ -562,12 +562,29 @@ def agents_home(request: Request, db: Session = Depends(get_db)):
             .group_by(m.Printer.site_id)
         ).all()
     }
+    # Collector redundancy. ``collector_state`` is per subnet and says which of
+    # held / lapsed / released it is in right now -- a lapsed lease is not the
+    # same as a live one and an operator reading "collector: Agent A" would
+    # otherwise be told a dead agent is collecting.
+    from central import collector as _collector
+
+    now = datetime.now(timezone.utc)
+    collector_state = {}
+    standby_for: dict[int, list] = {}
+    for subnet in db.scalars(select(m.Subnet)):
+        collector_state[subnet.id] = _collector.holder_state(subnet, now)
+        if subnet.standby_agent_id is not None:
+            standby_for.setdefault(subnet.standby_agent_id, []).append(subnet)
+    agent_names = {a.id: a.name for a in agents}
     return _tpl(
         request, "agents.html", db,
         user=user, agents=agents, sites=sites,
         clients=clients,
         sites_by_client=sites_by_client,
         pending_by_site=pending_by_site,
+        collector_state=collector_state,
+        standby_for=standby_for,
+        agent_names=agent_names,
         new_key=_keystore.pop(request.session.pop("new_agent_key_token", None)),
         new_claim=_keystore.pop(request.session.pop("new_claim_code_token", None)),
         central_url=public_url,
@@ -1252,6 +1269,8 @@ def subnet_update(
     snmp_v3_clear: str = Form(""),
     trusted: str = Form(""),
     trusted_present: str = Form(""),
+    standby_agent_id: str = Form(""),
+    standby_present: str = Form(""),
     db: Session = Depends(get_db),
 ):
     """Edit a subnet's friendly label, SNMP creds, source-bind address, and
@@ -1270,11 +1289,18 @@ def subnet_update(
     auto-approval off. ``trusted_present`` is the "this form carried the
     checkbox" marker, so absence means "not my field" and only an actual
     unchecked box clears the flag.
+
+    ``standby_agent_id`` needs the marker for the same reason and one more: an
+    empty value is a real instruction here ("no standby"), which is
+    indistinguishable from a form that never carried the field. Clearing a
+    standby by accident would silently take a subnet's redundancy away, which
+    nobody would notice until the day it was needed.
     """
     if _manager(request, db) is None:
         return _redirect("/login")
     subnet = db.get(m.Subnet, subnet_id)
     if subnet:
+        standby_note = _apply_standby(db, request, subnet, standby_agent_id, standby_present)
         subnet.label = label.strip() or None
         if snmp_community.strip():
             subnet.snmp_community = snmp_community.strip()
@@ -1323,9 +1349,129 @@ def subnet_update(
             subnet.trusted = new_trusted
         record(db, request, _manager(request, db), "subnet.update",
                target=f"subnet:{subnet.id} {subnet.cidr}",
-               detail=trust_note.strip())
+               detail=(trust_note + " " + standby_note).strip())
         db.commit()
-        _flash(request, f"Subnet {subnet.cidr} updated.")
+        _flash(request, f"Subnet {subnet.cidr} updated." + (
+            f" {standby_note.strip()}" if standby_note else ""
+        ))
+    return _redirect("/manage/agents")
+
+
+def _apply_standby(
+    db: Session, request: Request, subnet: m.Subnet, raw: str, present: str
+) -> str:
+    """Set or clear this subnet's standby collector. Returns a note for the audit.
+
+    Refusals rather than resolutions, because a standby that is wrong is worse
+    than none: it hands a second agent this subnet's SNMP credentials and this
+    site's fleet the moment it takes over.
+
+    * **A subnet with no primary cannot have a standby.** There would be nothing
+      to stand by for and nobody to seed the lease to, so ``admits()`` would
+      refuse every reading for a subnet that looks configured.
+    * **The standby cannot be the primary.** An agent standing by for itself is
+      redundancy that reads as configured and covers nothing.
+    * **An unknown agent id is ignored**, not treated as "clear" -- a typo must
+      not silently remove redundancy.
+
+    Turning redundancy ON seeds the lease to the agent that is already
+    collecting, so there is no window in which nobody holds it and the primary's
+    own readings are refused. Turning it OFF releases the lease rather than
+    deleting it outright: the barrier that release leaves behind is what
+    guarantees the (possibly still-sweeping) holder is finished before anything
+    else touches the subnet.
+    """
+    from central import collector
+
+    if not present.strip():
+        return ""
+    raw = (raw or "").strip()
+    new_id: Optional[int] = None
+    if raw:
+        try:
+            candidate = db.get(m.Agent, int(raw))
+        except ValueError:
+            candidate = None
+        if candidate is None:
+            return ""
+        if subnet.agent_id is None:
+            _flash(request, f"Assign a collector to {subnet.cidr} before adding a standby.")
+            return ""
+        if candidate.id == subnet.agent_id:
+            _flash(request, f"{candidate.name} already collects {subnet.cidr}.")
+            return ""
+        new_id = candidate.id
+    if new_id == subnet.standby_agent_id:
+        return ""
+
+    now = datetime.now(timezone.utc)
+    ttl, _after, _auto = collector.lease_settings(load_settings(db))
+    previous = subnet.standby_agent_id
+    subnet.standby_agent_id = new_id
+    if new_id is not None and previous is None:
+        collector.seed_lease(db, subnet, now=now, ttl_seconds=ttl)
+        return f"standby=agent:{new_id} (redundancy on; lease seeded to agent:{subnet.agent_id})"
+    if new_id is None:
+        holder = subnet.collector_agent_id
+        if holder is not None:
+            # Flush BEFORE expiring. The session is ``autoflush=False``, so the
+            # pending ``standby_agent_id = None`` above is still only in memory
+            # and ``expire`` would discard it -- the subnet would keep its
+            # standby, silently, having reported that it was cleared.
+            db.flush()
+            collector.release_lease(db, subnet.id, holder_id=holder, now=now)
+            db.expire(subnet)
+        return f"standby cleared (was agent:{previous}); lease released"
+    return f"standby=agent:{new_id} (was agent:{previous})"
+
+
+@router.post("/subnets/{subnet_id}/handback")
+def subnet_handback(subnet_id: int, request: Request, db: Session = Depends(get_db)):
+    """Return a subnet to its primary collector -- the only hand-back there is.
+
+    Failover is deliberately one-way: when a primary comes back it does NOT
+    reclaim its subnets, because the standby is collecting correctly and the
+    characteristic failure of a dying collector is flapping, which automatic
+    hand-back would turn into an oscillation. So the decision is a human's, made
+    once, when they can see that the primary is actually well.
+
+    It is a **release**, not a reassignment, and that distinction is the whole
+    safety of it. Pointing the lease straight at the primary would leave the
+    standby's own deadline live -- it would keep sweeping while its replacement
+    started, which is precisely the overlap this feature exists to prevent.
+    Releasing clears the holder but keeps the expiry as a barrier, so the
+    primary picks the subnet up on the first heartbeat after the standby must
+    already have stopped. That costs a gap of at most one lease, and a gap is
+    recoverable in a way that a double-counted meter is not.
+    """
+    from central import collector
+
+    user = _manager(request, db)
+    if user is None:
+        return _redirect("/login")
+    subnet = db.get(m.Subnet, subnet_id)
+    if subnet is None:
+        return _redirect("/manage/agents")
+    holder = subnet.collector_agent_id
+    if holder is None or holder == subnet.agent_id:
+        _flash(request, f"{subnet.cidr} is already collected by its primary.")
+        return _redirect("/manage/agents")
+    if subnet.agent_id is None:
+        _flash(request, f"{subnet.cidr} has no primary agent to hand back to.")
+        return _redirect("/manage/agents")
+    collector.release_lease(db, subnet.id, holder_id=holder, now=datetime.now(timezone.utc))
+    db.expire(subnet)
+    record(db, request, user, "subnet.collector_handback",
+           target=f"subnet:{subnet.id} {subnet.cidr}",
+           detail=f"released from agent:{holder}; returns to agent:{subnet.agent_id} "
+                  f"once the released lease elapses")
+    db.commit()
+    _flash(
+        request,
+        f"{subnet.cidr} released from its standby. Its primary picks it up once the "
+        f"current lease elapses — the gap is deliberate, it is what stops both "
+        f"agents collecting at once.",
+    )
     return _redirect("/manage/agents")
 
 

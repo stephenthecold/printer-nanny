@@ -422,4 +422,9 @@ async def test_run_once_summarizes_instead_of_crashing_when_central_is_down(
     assert summary == {
         "commands": 0, "spooled": 0, "polled": 0, "applied": 0,
         "unreachable": 0, "new_pending": 0,
+        # A collection lease this agent no longer holds withholds targets from
+        # the poll, and that has to be reported rather than merged into
+        # "polled 0" -- an agent that quietly stopped sweeping reads exactly
+        # like a site that went down.
+        "withheld": 0,
     }

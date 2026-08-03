@@ -340,7 +340,18 @@ class Agent(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
 
     site: Mapped[Site] = relationship(back_populates="agents")
-    subnets: Mapped[list[Subnet]] = relationship(back_populates="agent")
+    # ``Subnet`` now carries several FKs to ``agents`` (primary / standby /
+    # current lease holder), so this one has to say which it means. Without
+    # ``foreign_keys`` SQLAlchemy cannot choose and raises at mapper
+    # configuration time. It means the PRIMARY assignment, unchanged: a card on
+    # the Agents page still lists the subnets this agent owns, and the subnets
+    # it is merely standing by for are listed separately.
+    subnets: Mapped[list[Subnet]] = relationship(
+        back_populates="agent", foreign_keys="Subnet.agent_id"
+    )
+    standby_subnets: Mapped[list[Subnet]] = relationship(
+        foreign_keys="Subnet.standby_agent_id", viewonly=True
+    )
     commands: Mapped[list[Command]] = relationship(
         back_populates="agent", cascade="all, delete-orphan"
     )
@@ -451,6 +462,51 @@ class Subnet(Base):
     # created in a hurry is not silently more permissive than one created
     # carefully.
     trusted: Mapped[bool] = mapped_column(Boolean, default=False)
+    # ------------------------------------------------------------------ #
+    # Collector redundancy (see central/collector.py for the whole rule set)
+    # ------------------------------------------------------------------ #
+    # The second agent allowed to collect this subnet when the primary stops.
+    # NULL -- the overwhelmingly common case, and the shipped default -- means
+    # this subnet has no redundancy and is NOT leased at all: ``agent_id``
+    # collects it, exactly as before, with no lease check on any path. Every
+    # behaviour below switches on "is standby_agent_id set", so an upgrade
+    # changes nobody's collection.
+    #
+    # Exactly one standby, not a list: picking between two eligible standbys is
+    # a coin flip, and the whole takeover path exists to refuse coin flips
+    # (services.adopt_by_name, "exactly one candidate or none").
+    standby_agent_id: Mapped[Optional[int]] = mapped_column(
+        ForeignKey("agents.id", ondelete="SET NULL"), default=None, index=True
+    )
+    # Who is collecting RIGHT NOW, and until when. This is a lease, not a
+    # setting: it is granted by a conditional UPDATE (never read-then-write) and
+    # it expires. ``collector_lease_expires_at`` doubles as an acquisition
+    # BARRIER -- after a lease is revoked the holder is cleared but the expiry
+    # is left in place, so no successor may acquire before the instant the old
+    # holder must already have stopped collecting. That is what makes a
+    # revocation overlap-free without a second column.
+    collector_agent_id: Mapped[Optional[int]] = mapped_column(
+        ForeignKey("agents.id", ondelete="SET NULL"), default=None, index=True
+    )
+    collector_lease_expires_at: Mapped[Optional[datetime]] = mapped_column(
+        DateTime(timezone=True), default=None
+    )
+    # When the current holder took the lease -- "last takeover" in the UI.
+    collector_since: Mapped[Optional[datetime]] = mapped_column(
+        DateTime(timezone=True), default=None
+    )
+    # The predecessor and the instant its tenure ended. Readings are pushed in
+    # batches and spooled across a central outage, so a displaced collector will
+    # legitimately replay readings it took while it DID hold the lease. Those
+    # are history, not duplicates -- they are strictly older than the successor's
+    # first reading -- so ingest admits them from this one agent, bounded by
+    # this timestamp, and refuses everything else.
+    collector_prev_agent_id: Mapped[Optional[int]] = mapped_column(
+        ForeignKey("agents.id", ondelete="SET NULL"), default=None
+    )
+    collector_prev_until: Mapped[Optional[datetime]] = mapped_column(
+        DateTime(timezone=True), default=None
+    )
     # Discovery status (updated by the ingest endpoint on each /discovered batch).
     last_discovery_at: Mapped[Optional[datetime]] = mapped_column(
         DateTime(timezone=True), default=None
@@ -460,9 +516,20 @@ class Subnet(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
 
     site: Mapped[Site] = relationship(back_populates="subnets")
-    agent: Mapped[Optional[Agent]] = relationship(back_populates="subnets")
+    agent: Mapped[Optional[Agent]] = relationship(
+        back_populates="subnets", foreign_keys=[agent_id]
+    )
+    standby_agent: Mapped[Optional[Agent]] = relationship(foreign_keys=[standby_agent_id])
+    collector_agent: Mapped[Optional[Agent]] = relationship(foreign_keys=[collector_agent_id])
 
-    __table_args__ = (UniqueConstraint("site_id", "cidr", name="uq_subnet_site_cidr"),)
+    __table_args__ = (
+        UniqueConstraint("site_id", "cidr", name="uq_subnet_site_cidr"),
+        # The worker's takeover sweep looks for leased subnets whose lease has
+        # lapsed. Declared here as well as in migration 0040 because revision
+        # 0001 is ``create_all()`` -- an index declared only in a migration is
+        # silently absent on every fresh install.
+        Index("ix_subnet_collector_lease", "collector_lease_expires_at"),
+    )
 
 
 # --------------------------------------------------------------------------- #

@@ -144,6 +144,13 @@ class PollTargetOut(ORMModel):
 
 class AgentSubnetConfig(BaseModel):
     cidr: str
+    # True when this subnet has a standby collector, i.e. the agent's right to
+    # sweep it is a LEASE rather than a standing assignment. The agent must then
+    # stop collecting it when its lease runs out on its own monotonic clock,
+    # even (especially) while central is unreachable and it is running on the
+    # cached config that carried this flag. False -- the default, and every
+    # subnet with no standby -- means "collect it as you always have".
+    leased: bool = False
     snmp_community: str = "public"
     snmp_version: str = "2c"
     # Source IP / interface the agent should bind to when scanning this subnet.
@@ -227,6 +234,35 @@ class AgentOut(ORMModel):
 class AgentCreated(AgentOut):
     # The plaintext key is returned exactly once, at creation time.
     api_key: str
+
+
+class CollectorLeaseOut(BaseModel):
+    """The collection leases this heartbeat granted, and how long they last.
+
+    ``held`` is the complete set of leased subnets this agent may collect until
+    the lease elapses -- a leased subnet absent from it is one this agent does
+    NOT hold, whatever its cached config says. The agent anchors the deadline to
+    a monotonic reading taken BEFORE it sent this request, so its own deadline is
+    always earlier than the expiry central recorded (see central/collector.py):
+    the holder gives up before the grantor will reallocate, with no assumption
+    that the two clocks agree.
+    """
+
+    lease_seconds: int
+    held: list[str] = Field(default_factory=list)
+
+
+class HeartbeatOut(AgentOut):
+    """AgentOut plus the collection leases, so one round trip settles ownership.
+
+    A subclass rather than a changed shape: every field an existing agent reads
+    is still here in the same place, and an agent too old to know about leases
+    ignores the extra key -- which is safe because it also cannot be a standby
+    (an operator has to name one) and because ingest refuses readings from an
+    agent that does not hold the lease regardless of what it believes.
+    """
+
+    collector: Optional[CollectorLeaseOut] = None
 
 
 class AgentRegisterIn(BaseModel):

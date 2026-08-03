@@ -27,9 +27,23 @@ def sites_served_by_agent(db: Session, agent: m.Agent) -> set[int]:
     Always includes the agent's home site. Plus every site that has a Subnet
     row assigned to this agent (the multi-client pattern: one agent at HQ
     serving Beta, Gamma, ... over per-client tunnels).
+
+    Plus every site where this agent currently HOLDS a collection lease, which
+    is what lets a standby at one site cover a subnet belonging to another. Note
+    what that deliberately does not say: being *named* as a standby grants
+    nothing. A standby reaches another site's fleet only while it actually holds
+    the lease, so a configured-but-idle standby has exactly the access it had
+    before it was named -- least privilege, enforced by the same row that
+    prevents the split brain.
     """
+    from sqlalchemy import or_
+
     extra = db.scalars(
-        select(m.Subnet.site_id).where(m.Subnet.agent_id == agent.id).distinct()
+        select(m.Subnet.site_id)
+        .where(
+            or_(m.Subnet.agent_id == agent.id, m.Subnet.collector_agent_id == agent.id)
+        )
+        .distinct()
     )
     served = {agent.site_id}
     served.update(extra)

@@ -24,6 +24,11 @@ log = logging.getLogger("printer_nanny.worker")
 
 JOBS = (
     jobs.mark_offline_agents,
+    # Immediately after, because it reads the statuses that job just wrote: a
+    # standby may only take a subnet from a collector already marked offline.
+    # Before mark_offline_printers, so a site whose standby takes over this
+    # cycle counts as covered and its printers are not flagged as an outage.
+    jobs.reassign_collectors,
     # Must run before evaluate_alerts so a printer that just went stale is
     # already marked offline when the rules are evaluated in this same cycle.
     jobs.mark_offline_printers,
