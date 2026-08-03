@@ -124,6 +124,50 @@ def _release_report_run(db: Session, report_type: str, period_key: str) -> None:
 # --------------------------------------------------------------------------- #
 # Content builders (pure -- unit-testable without channels)
 # --------------------------------------------------------------------------- #
+def _reorder_section(db: Session) -> list:
+    """The "supplies to order" block of the weekly email, or nothing.
+
+    Aggregated per client, then per cartridge within a client, because the
+    reader's job is to raise one order per customer. A flat per-device list
+    makes them do that grouping by hand, which is where "we already ordered that
+    one" mistakes come from.
+
+    Returns an empty list when the operator has switched the section off or
+    there is nothing to order -- an empty heading in a weekly email is noise
+    that teaches people to skim past the section that matters.
+
+    Every printer/cartridge string reaching these lines has been through
+    ``reorder._one_line``: they originate from SNMP on a customer LAN and from
+    operator free-text, and this body is plain text, where an embedded newline
+    forges a report line.
+    """
+    from central.reorder import group_by_client, recommendations
+
+    rt = load_settings(db)
+    if not rt.get("reorder.include_in_reports", True):
+        return []
+    groups = group_by_client(recommendations(db))
+    if not groups:
+        return []
+
+    total = sum(g.total_units for g in groups)
+    urgent = sum(g.urgent_units for g in groups)
+    out = [
+        "",
+        f"Supplies to order ({total} cartridge(s), {urgent} needed now):",
+    ]
+    for group in groups:
+        out.append(f"  {group.client_name} — {group.total_units} to order")
+        for line in group.lines:
+            when = " [ORDER NOW]" if line.is_urgent else ""
+            model = f" ({line.model})" if line.model else ""
+            out.append(f"    {line.quantity} x {line.label}{model}{when}")
+            for printer in line.printers:
+                out.append(f"        {printer}")
+    out.append("  (recommendations only — nothing has been ordered)")
+    return out
+
+
 def build_weekly_summary(db: Session) -> Tuple[str, str]:
     """(subject, plain-text body) for the weekly fleet summary."""
     summary = queries.fleet_summary(db)
@@ -165,6 +209,12 @@ def build_weekly_summary(db: Session) -> Tuple[str, str]:
             lines.append(f"  {label:<28} {sup.level_pct:>5.0f}%  {where}")
     else:
         lines.append("  none -- all supplies healthy")
+
+    # Supplies to order — recommendations only, aggregated per client and then
+    # per cartridge so an MSP raises one order per customer rather than reading
+    # a per-device list and de-duplicating it by hand. Nothing is ordered here
+    # and nothing about an order is recorded: see central.reorder.
+    lines += _reorder_section(db)
 
     # ESG / sustainability — estimated fleet-wide print footprint, derived from
     # the same page-count history. Cheap to compute, increasingly an RFP ask.

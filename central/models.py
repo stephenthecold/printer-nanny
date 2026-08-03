@@ -637,6 +637,19 @@ class Supply(Base):
     # trustworthy / nothing depleting"; ``forecast_at`` stamps when it was last
     # computed so a stale estimate can be aged out or shown with a timestamp.
     days_to_empty: Mapped[Optional[float]] = mapped_column(Float, default=None)
+    # Companion to days_to_empty on the PAGES axis: level fitted against the
+    # printer's page meter rather than against time. Written by the same worker
+    # pass off the same rows, so it costs no extra query.
+    #
+    # It is a separate measurement rather than days x pages-per-day because the
+    # two say different things. Days-remaining is volatile -- a quiet week
+    # inflates it -- while pages-remaining is a property of the cartridge, is
+    # directly comparable against the page yield a cartridge is sold by, and does
+    # not move when the customer simply stops printing. The reorder
+    # recommendations (central.reorder) trigger on either, so a supply whose
+    # days estimate is too noisy to trust can still be recommended on pages.
+    # ``None`` means "no trustworthy estimate", never "plenty left".
+    pages_to_empty: Mapped[Optional[float]] = mapped_column(Float, default=None)
     forecast_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), default=None)
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
 

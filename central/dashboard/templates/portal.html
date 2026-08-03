@@ -1,5 +1,6 @@
 {% extends "base.html" %}
-{% from "_components.html" import btn, card_cls %}
+{% from "_components.html" import btn, card_cls, badge, table_wrap, table_cls,
+                                  thead_cls, th_cls, td_cls, tr_cls %}
 {% from "base.html" import status_badge, level_bar %}
 {% block title %}{{ client.name }} · {{ app.name or 'Printer Nanny' }}{% endblock %}
 {% block body %}
@@ -44,6 +45,57 @@
     Estimates based on {{ '{:,.0f}'.format(esg.pages) }} pages across {{ esg.printers }} printer(s),
     using standard paper/energy conversion factors. Figures are indicative, not audited.
   </p>
+</section>
+{% endif %}
+
+{# Supplies to order. Scoped to this customer's own fleet in SQL (see
+   routes.customer_portal). Recommendations only: there is no ordering here, by
+   design — this tells a customer what is about to run out so the conversation
+   with their MSP starts before the printer stops. #}
+{% if reorder_recs %}
+<section class="{{ card_cls('md', 'mb-6') }}" id="reorder-panel">
+  <div class="flex items-baseline justify-between mb-1 flex-wrap gap-2">
+    <h2 class="font-semibold">Supplies to order</h2>
+    {% if reorder_summary.order_now %}
+    {{ badge(reorder_summary.order_now ~ ' need ordering now', 'error') }}
+    {% endif %}
+  </div>
+  <p class="text-xs text-slate-500 mb-3">
+    Running low or forecast to run out soon. We'll be in touch — no action needed from you.
+  </p>
+  <div class="{{ table_wrap() }}">
+    <table class="{{ table_cls() }}">
+      <thead class="{{ thead_cls() }}">
+        <tr>
+          <th class="{{ th_cls() }}">Printer</th>
+          <th class="{{ th_cls() }}">Supply</th>
+          <th class="{{ th_cls('right') }}">Level</th>
+          <th class="{{ th_cls('right') }}">Days left</th>
+          <th class="{{ th_cls('right') }}">Pages left</th>
+        </tr>
+      </thead>
+      <tbody>
+        {% for rec in reorder_recs %}
+        <tr class="{{ tr_cls() }}">
+          <td class="{{ td_cls() }}">{{ rec.printer_name }}</td>
+          <td class="{{ td_cls() }}">
+            {{ rec.supply_label }}
+            {% if rec.urgency == urgency_now %}{{ badge('order now', 'error', 'ml-1') }}{% endif %}
+          </td>
+          <td class="{{ td_cls('right', 'tabular-nums') }}">
+            {% if rec.level_pct is not none %}{{ '%.0f'|format(rec.level_pct) }}%{% else %}<span class="text-slate-400">—</span>{% endif %}
+          </td>
+          <td class="{{ td_cls('right', 'tabular-nums') }}">
+            {% if rec.days_remaining is not none %}{{ '%.0f'|format(rec.days_remaining) }}{% else %}<span class="text-slate-400">—</span>{% endif %}
+          </td>
+          <td class="{{ td_cls('right', 'tabular-nums') }}">
+            {% if rec.pages_remaining is not none %}{{ '{:,.0f}'.format(rec.pages_remaining) }}{% else %}<span class="text-slate-400">—</span>{% endif %}
+          </td>
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
 </section>
 {% endif %}
 

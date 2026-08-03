@@ -47,10 +47,14 @@ PAGES = [
     "/manage/audit",
     "/manage/onboard",
     "/manage/suppression",
+    "/supplies/reorder",
     "/security/posture",
     "/admin/backup",
     "/settings?group=branding",
     "/settings?group=notifications",
+    # Carries the reorder thresholds. Previously no Alerts-tab render was
+    # checked at all, so a spec added there was unlabelled-until-noticed.
+    "/settings?group=alerts",
     "/settings?group=polling",
 ]
 

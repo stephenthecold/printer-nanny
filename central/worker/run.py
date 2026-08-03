@@ -36,6 +36,11 @@ JOBS = (
     # retry path in the same pass.
     jobs.flush_quiet_hours,
     jobs.forecast_supplies,
+    # Publish supply-reorder recommendations to the outbound event bus. After
+    # forecast_supplies so it reads this cycle's estimates rather than the last
+    # one's. Interval-gated internally (reorder.emit_interval_min) and off by
+    # default, so on most installs and most cycles it is a settings read.
+    jobs.publish_reorder_recommendations,
     # Interval-gated internally (directory.sync_interval_min); a no-op on most
     # cycles. After the alert path so a slow directory never delays alerting.
     jobs.sync_directories,
