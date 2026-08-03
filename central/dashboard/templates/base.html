@@ -37,7 +37,14 @@
   "Agents", not "Manage", even though both prefixes match.
 #}
 {%- set path = request.url.path if request is defined else '' -%}
-{%- set g_watch = [{'href': '/', 'label': 'Overview'}, {'href': '/alerts', 'label': 'Alerts'}] -%}
+{#- /printers is in the "watching the fleet" group for every role: staff search
+    the whole fleet, a client_readonly user gets the same page scoped to their
+    own client (see routes.printer_search). Longest-prefix marking means the
+    printer *detail* page at /printers/<id> lights this entry up too, which is
+    correct -- it is where the search takes you. -#}
+{%- set g_watch = [{'href': '/', 'label': 'Overview'},
+                   {'href': '/printers', 'label': 'Printers'},
+                   {'href': '/alerts', 'label': 'Alerts'}] -%}
 {%- if nav_pending is defined and nav_pending -%}
   {#- Approvals only appears when there is actually something to approve. -#}
   {%- set _ = g_watch.append({'href': '/approvals', 'label': 'Approvals', 'badge': nav_pending}) -%}

@@ -360,6 +360,61 @@ def client_detail(client_id: int, request: Request, db: Session = Depends(get_db
     )
 
 
+# --- Fleet-wide printer list + search --------------------------------------- #
+@router.get("/printers", response_class=HTMLResponse)
+def printer_search(request: Request, db: Session = Depends(get_db)):
+    """Every printer in one paginated list, searchable by the identifiers a
+    caller actually gives you: IP, hostname, serial, asset tag, model, brand and
+    the operator's friendly name.
+
+    WHO CAN SEE IT, AND WHY IT IS NOT STAFF-ONLY. Staff (admin/tech) search the
+    whole fleet; a client_readonly user reaches the same page scoped to their own
+    client. Making it staff-only was the safer-looking option and is the wrong
+    one: a customer with sixty devices across four sites has exactly the same
+    'which one is 10.4.7.23?' problem, their portal lists their fleet flat with
+    no way to filter it, and refusing them a search over data they are already
+    shown buys no security at all. What buys security is where the scope is
+    applied -- ``client_id`` goes into the SQL, so there is no code path on which
+    a term matches another tenant's printer and is then filtered out afterwards.
+
+    Two further narrowings for that role, both matching what /portal and
+    /clients/{id} already do: a client_readonly user sees **approved** devices
+    only (a pending device is not yet part of their fleet and is not theirs to
+    see), and an account with no ``client_id`` -- a misconfiguration, not a
+    tenant -- gets nothing and is sent to /account. Staff see every discovery
+    state, badged, because "I cannot find 10.4.7.23" is at its most likely
+    precisely when the device is still sitting in the approvals queue.
+    """
+    user = _user(request, db)
+    if user is None:
+        return _login_redirect()
+    readonly = user.role == m.UserRole.client_readonly
+    if readonly and user.client_id is None:
+        return RedirectResponse("/account", status_code=303)
+    # Parsed defensively rather than declared as `page: int`: a truncated or
+    # hand-edited URL should land on page 1, not on a 422 validation page.
+    try:
+        page = int(request.query_params.get("page") or 1)
+    except ValueError:
+        page = 1
+    result = queries.search_printers(
+        db,
+        q=request.query_params.get("q") or "",
+        client_id=user.client_id if readonly else None,
+        states=[m.DiscoveryState.approved] if readonly else None,
+        page=page,
+    )
+    return _render(
+        request,
+        "printer_search.html",
+        db=db,
+        user=user,
+        result=result,
+        scoped_to_client=readonly,
+        printer_label=_printer_label,
+    )
+
+
 # --- Printer detail --------------------------------------------------------- #
 @router.get("/printers/{printer_id}", response_class=HTMLResponse)
 def printer_detail(printer_id: int, request: Request, db: Session = Depends(get_db)):
