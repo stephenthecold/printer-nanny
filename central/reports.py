@@ -14,7 +14,6 @@ alert recipients. The monthly CSV rides as a real attachment.
 
 from __future__ import annotations
 
-import csv
 import io
 import logging
 from datetime import datetime, timezone
@@ -28,6 +27,7 @@ from central import models as m
 from central import queries
 from central.channels import Notification
 from central.channels.email import EmailChannel
+from central.csv_safe import safe_writer
 from central.runtime import load_settings
 
 log = logging.getLogger("central.reports")
@@ -188,9 +188,16 @@ def build_weekly_summary(db: Session) -> Tuple[str, str]:
 
 
 def build_monthly_billing_csv(db: Session) -> bytes:
-    """Inventory + page counts for billing import. One row per approved printer."""
+    """Inventory + page counts for billing import. One row per approved printer.
+
+    This one is emailed as an attachment and opened by hand, and four of its
+    columns (``brand``/``model``/``hostname``/``serial``) are SNMP strings from
+    a device on a client LAN -- so it goes through ``safe_writer``, not
+    ``csv.writer``. Neutralisation lives in the writer rather than at each cell
+    precisely so the period-delta columns coming later cannot bypass it.
+    """
     buf = io.StringIO()
-    writer = csv.writer(buf)
+    writer = safe_writer(buf)
     writer.writerow([
         "client", "site", "ip", "hostname", "brand", "model", "serial",
         "asset_tag", "page_count", "mono_count", "color_count", "last_seen_utc",
