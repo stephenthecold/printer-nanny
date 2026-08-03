@@ -1,0 +1,132 @@
+{% extends "base.html" %}
+{% from "_components.html" import badge, btn, btn_link, card_cls, empty_row, field,
+        page_title, table_cls, table_wrap, td_cls, th_cls, thead_cls, tr_cls %}
+{% from "base.html" import status_badge %}
+{% block title %}Printers · {{ app.name or 'Printer Nanny' }}{% endblock %}
+{% block body %}
+{{ page_title(
+     'Printers',
+     sub=('Every printer in your fleet.' if scoped_to_client
+          else 'Every printer across every client. Search by IP, hostname, serial, asset tag, model, brand or friendly name.')) }}
+
+{# GET, not POST: a search you can bookmark, paste into a ticket and hand to the
+   next technician. No `page` field here, so submitting always lands on page 1 --
+   carrying the old page number into a new search is how you get "no results" on
+   a term that has plenty. #}
+<section class="{{ card_cls('md', 'mb-6') }}">
+  <form method="get" action="/printers" class="flex flex-wrap items-end gap-3">
+    {# grow rather than flex-1: flex-1 resets the basis to 0, and this control
+       needs a real one so the row wraps on a narrow viewport instead of
+       squeezing the search box down to nothing. #}
+    <div class="grow basis-64 min-w-0">
+      {{ field('q', 'Search printers', value=result.q, autofocus=True, autocomplete='off',
+               placeholder='10.4.7.23',
+               help='Matches any part of an IP, hostname, serial, asset tag, model, brand or friendly name.') }}
+    </div>
+    <button class="{{ btn('primary') }}">Search</button>
+    {% if result.q %}
+    <a href="/printers" class="{{ btn_link() }}">Clear</a>
+    {% endif %}
+  </form>
+</section>
+
+<section class="{{ card_cls('none') }}">
+  <div class="flex items-center justify-between gap-3 flex-wrap px-4 py-3 border-b">
+    <h2 class="font-semibold">
+      {% if result.total %}
+        {{ result.total }} printer{{ '' if result.total == 1 else 's' }}
+        {%- if result.q %} matching “{{ result.q }}”{% endif %}
+      {% else %}
+        No matches
+      {% endif %}
+    </h2>
+    {% if result.total %}
+    <p class="text-xs text-slate-500 tabular-nums">
+      Showing {{ result.offset + 1 }}–{{ result.offset + result.rows|length }} of {{ result.total }}
+    </p>
+    {% endif %}
+  </div>
+
+  <div class="{{ table_wrap() }}">
+    <table class="{{ table_cls() }}">
+      <thead class="{{ thead_cls() }}">
+        <tr>
+          <th class="{{ th_cls() }}">Printer</th>
+          <th class="{{ th_cls() }}">IP</th>
+          {% if not scoped_to_client %}<th class="{{ th_cls() }}">Client</th>{% endif %}
+          <th class="{{ th_cls() }}">Site</th>
+          <th class="{{ th_cls() }}">Serial</th>
+          <th class="{{ th_cls() }}">Asset tag</th>
+          <th class="{{ th_cls() }}">Status</th>
+          <th class="{{ th_cls('right') }}">Last seen</th>
+        </tr>
+      </thead>
+      <tbody>
+      {% for row in result.rows %}
+        {% set p = row.printer %}
+        <tr class="{{ tr_cls() }}">
+          <td class="{{ td_cls() }}">
+            {# The link text is the printer's own label, so it names itself for
+               a screen reader reading links out of context. Every value in this
+               row comes off the wire from a device on a customer LAN; this
+               template autoescapes all of them and disables escaping nowhere. #}
+            <a href="/printers/{{ p.id }}" class="text-sky-700 hover:underline font-medium rounded">{{ printer_label(p) }}</a>
+            {% if p.discovery_state.value != 'approved' %}
+              {{ badge(p.discovery_state.value, 'warning' if p.discovery_state.value == 'pending' else 'muted', 'ml-1') }}
+            {% endif %}
+            {# Every searchable field is visible somewhere on the row. A hit
+               whose matching text is nowhere on screen reads as a wrong hit.
+               Built by joining the present values rather than by concatenating
+               with conditionals, so a device that reports a brand and no model
+               does not render a stray separator. #}
+            {% set meta = [[p.brand, p.model] | select | join(' '), p.hostname] | select | join(' · ') %}
+            {% if meta %}<div class="text-xs text-slate-400">{{ meta }}</div>{% endif %}
+          </td>
+          <td class="{{ td_cls('left', 'tabular-nums whitespace-nowrap') }}">{{ p.ip }}</td>
+          {% if not scoped_to_client %}
+          <td class="{{ td_cls('left', 'text-slate-500') }}">
+            <a href="/clients/{{ row.client.id }}" class="hover:underline rounded">{{ row.client.name }}</a>
+          </td>
+          {% endif %}
+          <td class="{{ td_cls('left', 'text-slate-500') }}">{{ row.site.name }}</td>
+          <td class="{{ td_cls('left', 'text-slate-500') }}">{{ p.serial or '—' }}</td>
+          <td class="{{ td_cls('left', 'text-slate-500') }}">{{ p.asset_tag or '—' }}</td>
+          <td class="{{ td_cls() }}">{{ status_badge(p.status) }}</td>
+          <td class="{{ td_cls('right', 'text-slate-500 whitespace-nowrap') }}">
+            {{ p.last_seen.strftime('%Y-%m-%d %H:%M') if p.last_seen else 'never' }}
+          </td>
+        </tr>
+      {% else %}
+        {% set cols = 7 if scoped_to_client else 8 %}
+        {% if result.q %}
+          {{ empty_row(cols, 'Nothing matched that. Try part of an IP, a serial, an asset tag or a model.') }}
+        {% else %}
+          {{ empty_row(cols, 'No printers yet — devices appear here once an agent discovers them.') }}
+        {% endif %}
+      {% endfor %}
+      </tbody>
+    </table>
+  </div>
+
+  {% if result.pages > 1 %}
+  {# Bounded from the start. The audit found 21 unbounded dashboard queries and
+     an audit log capped at 200 rows with no offset, which made 99,800 of 100k
+     rows permanently unreachable; a fleet list is exactly the shape that grows. #}
+  <nav aria-label="Printer results pages" class="flex items-center justify-between gap-3 px-4 py-3 border-t">
+    {% if result.page > 1 %}
+    <a rel="prev" href="/printers?q={{ result.q|urlencode }}&amp;page={{ result.page - 1 }}"
+       aria-label="Previous page of printer results" class="{{ btn('neutral', 'sm') }}">← Previous</a>
+    {% else %}
+    <span class="text-xs text-slate-400">← Previous</span>
+    {% endif %}
+    <span class="text-xs text-slate-500 tabular-nums">Page {{ result.page }} of {{ result.pages }}</span>
+    {% if result.page < result.pages %}
+    <a rel="next" href="/printers?q={{ result.q|urlencode }}&amp;page={{ result.page + 1 }}"
+       aria-label="Next page of printer results" class="{{ btn('neutral', 'sm') }}">Next →</a>
+    {% else %}
+    <span class="text-xs text-slate-400">Next →</span>
+    {% endif %}
+  </nav>
+  {% endif %}
+</section>
+{% endblock %}
