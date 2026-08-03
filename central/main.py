@@ -32,6 +32,7 @@ from central.dashboard import (
     machines,
     manage,
     people,
+    remote as remote_routes,
     routes as dashboard,
     settings_routes,
 )
@@ -162,6 +163,7 @@ app.include_router(machines.router)
 app.include_router(billing_routes.router)
 app.include_router(events_routes.router)
 app.include_router(definitions.router)
+app.include_router(remote_routes.router)
 app.include_router(settings_routes.router)
 app.include_router(backup_routes.router)
 app.include_router(auth_oidc.router)

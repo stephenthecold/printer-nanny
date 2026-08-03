@@ -94,6 +94,22 @@ class CentralClient:
             raise ValueError("device definition feed is not an object")
         return payload
 
+    async def post_remote_result(self, request_id: int, result: dict) -> dict:
+        """Report the outcome of one remote-hands request.
+
+        A central that predates this feature answers 404, which is not worth a
+        traceback: the command could not have come from it, so there is nothing
+        to report to. Any other status still raises -- a 413 (body over the cap)
+        or a 401 is something the agent's log should carry.
+        """
+        resp = await self._client.post(
+            self._url(f"/remote-results/{int(request_id)}"), json=result
+        )
+        if resp.status_code == 404:
+            return {"accepted": False, "reason": "central does not know this request"}
+        resp.raise_for_status()
+        return resp.json()
+
     async def get_commands(self) -> List[dict]:
         resp = await self._client.get(self._url("/commands"))
         resp.raise_for_status()
