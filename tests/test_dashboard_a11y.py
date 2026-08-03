@@ -47,6 +47,7 @@ PAGES = [
     "/manage/audit",
     "/manage/onboard",
     "/manage/suppression",
+    "/manage/billing",
     "/security/posture",
     "/admin/backup",
     "/settings?group=branding",

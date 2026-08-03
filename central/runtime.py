@@ -115,7 +115,8 @@ SPECS: List[Spec] = [
     Spec("reports.monthly_enabled", "bool", "Reports",
          "Send a monthly billing CSV (inventory + page counts)", False),
     Spec("reports.monthly_day", "int", "Reports", "Monthly report day of month", 1,
-         "1-28 -- sent on the first worker cycle after the send hour that day"),
+         "1-31 -- sent on the first worker cycle after the send hour that day. "
+         "Clamped to the month's last day, so 31 still fires in February."),
     Spec("reports.send_hour", "int", "Reports", "Send hour (UTC, 0-23)", 7),
     Spec("reports.recipients", "str", "Reports", "Report recipients", "",
          "Comma-separated. Leave blank to use the alert email recipients."),
