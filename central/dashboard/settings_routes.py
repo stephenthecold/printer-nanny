@@ -3,25 +3,26 @@
 from __future__ import annotations
 
 from collections import OrderedDict
-from pathlib import Path
 from typing import Optional
 
 from datetime import datetime, timezone
 
 from fastapi import APIRouter, Depends, File, Request, UploadFile
 from fastapi.responses import HTMLResponse, RedirectResponse, Response
-from fastapi.templating import Jinja2Templates
 from sqlalchemy import inspect as sa_inspect
 from sqlalchemy.orm import Session
 
 from central import branding
 from central import models as m
 from central import runtime
+from central.dashboard.templating import templates
 from central.db import get_db
 from central.health import worker_banner
 
 router = APIRouter(tags=["settings"])
-_templates = Jinja2Templates(directory=str(Path(__file__).parent / "templates"))
+# One shared Jinja environment (central/dashboard/templating.py): it carries
+# the csrf_field()/csrf_token() globals every form depends on.
+_templates = templates
 
 LOGO_ASSET_NAME = "logo"
 # The size cap and the accepted types now live in central.branding, because the
@@ -106,6 +107,11 @@ async def settings_save(request: Request, db: Session = Depends(get_db)):
     if user is None:
         return RedirectResponse("/login", status_code=303)
     form = dict(await request.form())
+    # The CSRF token is a transport concern, already verified by the app-level
+    # dependency. Dropped explicitly rather than relied on to be ignored:
+    # save_settings only walks SPECS today, so it *is* ignored, but a spec ever
+    # named csrf_token would silently start persisting a live token.
+    form.pop("csrf_token", None)
     # The grouped page posts one group at a time; scope the save to that
     # group's sections so absent checkboxes elsewhere keep their values.
     active_group = _resolve_group(str(form.pop("_group", "")))

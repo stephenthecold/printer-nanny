@@ -25,19 +25,21 @@ from urllib.parse import urlparse
 
 from fastapi import APIRouter, Depends, File, Form, Request, UploadFile
 from fastapi.responses import HTMLResponse, RedirectResponse, StreamingResponse
-from fastapi.templating import Jinja2Templates
 from sqlalchemy.engine import URL, make_url
 from sqlalchemy.orm import Session
 
 from central import models as m
 from central.audit import record
 from central.config import settings
+from central.dashboard.templating import templates
 from central.db import get_db
 from central.health import worker_banner
 from central.runtime import app_branding
 
 router = APIRouter(prefix="/admin/backup", tags=["backup"])
-_templates = Jinja2Templates(directory=str(Path(__file__).parent / "templates"))
+# One shared Jinja environment (central/dashboard/templating.py): it carries
+# the csrf_field()/csrf_token() globals every form depends on.
+_templates = templates
 log = logging.getLogger("central.backup")
 
 
@@ -164,7 +166,40 @@ def backup_page(request: Request, db: Session = Depends(get_db)):
 
 
 @router.get("/download")
+def backup_download_get(request: Request, db: Session = Depends(get_db)):
+    """A stale bookmark, not a download. Streams nothing, ever.
+
+    This route used to *be* the download, and that was the defect: a GET that
+    returns the entire database -- every tenant, every encrypted credential,
+    every audit row -- is reachable by making a logged-in admin's browser
+    navigate, and ``SameSite=lax`` explicitly permits top-level GET navigation.
+    A link, a redirect, a ``window.open`` from any page the operator visits was
+    enough. The size of the side effect matters too: on Postgres each hit forks
+    a ``pg_dump`` of the whole database, so the same link is a cheap way to keep
+    a server busy.
+
+    The download is now ``POST`` with a CSRF token, which a cross-site
+    navigation cannot produce. This handler survives so an operator's bookmark
+    lands on the page with the button rather than on a bare 405 -- degrading to
+    something explicable, per the updater's contract that a refused operation
+    says why.
+    """
+    if _admin(request, db) is None:
+        return RedirectResponse("/login", status_code=303)
+    request.session["flash"] = (
+        "Backup downloads are now a button rather than a link, so another site "
+        "cannot trigger one through your session. Use Download below."
+    )
+    return RedirectResponse("/admin/backup", status_code=303)
+
+
+@router.post("/download")
 def backup_download(request: Request, db: Session = Depends(get_db)):
+    """Stream a full backup. POST, because it discloses the whole database.
+
+    Reached from the button on /admin/backup, which carries the CSRF token; see
+    the GET handler above for why this cannot be a GET.
+    """
     user = _admin(request, db)
     if user is None:
         return RedirectResponse("/login", status_code=303)

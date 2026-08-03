@@ -32,6 +32,7 @@
 {% endif %}
 
 <form method="post" action="{{ action }}" class="{{ card_cls('lg', 'max-w-2xl space-y-4') }}">
+  {{ csrf_field() }}
   <input type="hidden" name="client_id" value="{{ client.id }}" />
   <div class="grid grid-cols-2 gap-4">
     <label class="block">

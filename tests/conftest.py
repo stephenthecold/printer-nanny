@@ -22,6 +22,7 @@ from __future__ import annotations
 import atexit
 import os
 import pathlib
+import re
 import subprocess
 import tempfile
 
@@ -86,6 +87,89 @@ def _default_testclient_base_url() -> None:
 
 if TEST_BASE_URL != "http://testserver":
     _default_testclient_base_url()
+
+
+#: Pulls the token out of any page carrying a form. ``csrf_field()`` emits
+#: exactly this shape (central/csrf.py), so a change to it fails here loudly
+#: rather than quietly disarming every test in the suite.
+_CSRF_INPUT = re.compile(r'name="csrf_token"\s+value="([^"]+)"')
+
+#: Unsafe methods, mirroring central.csrf.SAFE_METHODS from the other side.
+_UNSAFE = frozenset({"POST", "PUT", "PATCH", "DELETE"})
+
+
+def _default_testclient_csrf() -> None:
+    """Make TestClient carry a CSRF token the way a browser does.
+
+    Every state-changing dashboard route now requires one (central/csrf.py), and
+    345 ``.post()`` call sites across 55 files do not have one. Threading a token
+    through each by hand would be a very large diff whose only content is
+    plumbing -- the same trade already taken for ``base_url`` above.
+
+    **This is not a bypass, and the distinction matters.** The token is obtained
+    the only way a browser can obtain one: a real ``GET /login`` over the real
+    app, scraped out of the real rendered form, sent back on the real request and
+    compared by the real check. Nothing here weakens the middleware, and a test
+    that supplies its own ``X-CSRF-Token`` header (``tests/test_csrf.py`` does,
+    including deliberately wrong ones) is left completely alone.
+
+    What that buys is also what it costs: with every test transparently
+    authenticated, no *existing* test can notice a template that forgot its
+    hidden field. That gap is closed from the other direction, by
+    ``test_csrf.py::test_every_rendered_post_form_carries_a_token``, which parses
+    the rendered DOM of every page -- the same reason the a11y suite asserts on
+    rendered HTML rather than on template source.
+
+    The token is cached against the session cookie's current value, so a login
+    (which rotates the token, changing the cookie) invalidates it automatically
+    and the next unsafe request re-reads it.
+    """
+    from starlette.testclient import TestClient
+
+    original = TestClient.request
+
+    def _session_cookie(client) -> str:
+        return client.cookies.get("session") or ""
+
+    def _token_for(client) -> str:
+        cookie = _session_cookie(client)
+        cached = getattr(client, "_pn_csrf", None)
+        if cached is not None and cached[0] == cookie:
+            return cached[1]
+        # GET /login is the one page every role can render, logged in or not,
+        # and rendering it is what mints a token into the session.
+        page = original(client, "GET", "/login")
+        found = _CSRF_INPUT.search(page.text)
+        token = found.group(1) if found else ""
+        client._pn_csrf = (_session_cookie(client), token)
+        return token
+
+    def request(self, method, url, *args, **kwargs):
+        headers = kwargs.get("headers")
+        if (
+            str(method).upper() in _UNSAFE
+            and not (headers and any(k.lower() == "x-csrf-token" for k in dict(headers)))
+            # Mirrors the server's trigger: a session cookie is the ambient
+            # credential the check exists to protect, and POST /login is checked
+            # even without one.
+            and (_session_cookie(self) or str(url).split("?")[0].endswith("/login"))
+        ):
+            token = _token_for(self)
+            if token:
+                merged = dict(headers or {})
+                merged["X-CSRF-Token"] = token
+                kwargs["headers"] = merged
+        return original(self, method, url, *args, **kwargs)
+
+    TestClient.request = request
+    # Kept reachable so tests that need to send exactly what a browser (or an
+    # attacker) sends can opt out -- tests/test_csrf.py subclasses on this.
+    # Without it there is no way to express "arrives without a token", and a
+    # CSRF suite that cannot express that proves nothing.
+    TestClient.request_without_csrf = original
+
+
+_default_testclient_csrf()
 
 
 @atexit.register

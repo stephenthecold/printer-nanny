@@ -16,6 +16,7 @@
 {% endif %}
 
 <form method="post" action="/approvals/bulk" id="bulk-form">
+  {{ csrf_field() }}
 <div class="{{ card_cls('none') }}">
   {% if pending %}
   <div class="flex flex-wrap items-center gap-2 px-4 py-2 border-b bg-slate-50 text-sm">

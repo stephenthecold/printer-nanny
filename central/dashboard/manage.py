@@ -14,7 +14,6 @@ from typing import List, Optional
 
 from fastapi import APIRouter, Depends, File, Form, Request, UploadFile
 from fastapi.responses import FileResponse, HTMLResponse, RedirectResponse
-from fastapi.templating import Jinja2Templates
 from sqlalchemy import func, select
 from sqlalchemy import inspect as sa_inspect
 from sqlalchemy.orm import Session
@@ -29,6 +28,7 @@ from central import suppression
 from central.audit import record
 from central.branding import branding_for
 from central.dashboard import _keystore
+from central.dashboard.templating import templates
 from central.db import get_db
 from central.health import worker_banner
 from central.runtime import load_settings
@@ -41,7 +41,9 @@ def _split_tags(raw: str) -> Optional[list[str]]:
     return tags or None
 
 router = APIRouter(prefix="/manage", tags=["manage"])
-_templates = Jinja2Templates(directory=str(Path(__file__).parent / "templates"))
+# One shared Jinja environment (central/dashboard/templating.py): it carries
+# the csrf_field()/csrf_token() globals every form depends on.
+_templates = templates
 
 _MANAGER_ROLES = {m.UserRole.admin, m.UserRole.tech}
 

@@ -17,7 +17,24 @@
      `defer` so it runs after the document is parsed but before DOMContentLoaded. #}
   <script src="/static/dashboard.js" defer></script>
 </head>
-<body class="h-full text-slate-800 flex flex-col">
+{#
+  CSRF for every htmx-driven control, declared once.
+
+  htmx inherits hx-headers down the DOM, so this single attribute covers every
+  hx-post/hx-delete in the app -- including the bare buttons that have no form
+  to carry a hidden field, and including controls added later. That is the whole
+  point of putting it here rather than on each control: the per-control version
+  is one attribute somebody forgets, and a forgotten one fails as a button that
+  silently does nothing.
+
+  Plain <form> posts cannot set a header at all, so they carry {{ csrf_field() }}
+  instead. Both channels are accepted by central/csrf.py and both are equally
+  unforgeable cross-site; the rule is one channel per mechanism, not per page.
+
+  |tojson quotes and escapes the value, and the attribute is single-quoted
+  because the JSON is double-quoted.
+#}
+<body class="h-full text-slate-800 flex flex-col" hx-headers='{"X-CSRF-Token": {{ csrf_token()|tojson }}}'>
 {% if user %}
 {#
   Navigation.
@@ -178,6 +195,41 @@
 </main>
 {# 'app is defined' keeps this safe when base.html is loaded as a module
    for {% from "base.html" import ... %} elsewhere — module imports don't carry context. #}
+{#
+  htmx does not swap a non-2xx response, so before this an htmx button whose
+  request was refused did *nothing at all* -- no message, no change, nothing in
+  the page to distinguish "refused" from "broken". That is the exact shape of
+  failure the CSRF work had to avoid re-creating, so the handling is global
+  rather than per-control: every htmx error surfaces here, not just this one.
+
+  The server's message is inserted with textContent, never innerHTML: it is a
+  response body, and a response body is not something to hand to an HTML parser.
+#}
+<div id="htmx-error" role="alert" aria-live="assertive"
+     class="hidden fixed bottom-4 right-4 z-50 max-w-sm rounded border border-red-300 bg-red-50 px-3 py-2 text-sm text-red-900 shadow-lg"></div>
+<script>
+  (function () {
+    var box = document.getElementById('htmx-error');
+    var timer = null;
+    document.body.addEventListener('htmx:responseError', function (evt) {
+      var xhr = evt.detail.xhr;
+      var text = (xhr.responseText || '').trim();
+      // Only a short plain-text body is a message meant for a human; an HTML
+      // error page is not, and its markup would be shown as literal text.
+      if (!text || text.length > 400 || text.charAt(0) === '<') {
+        text = 'That action was not completed (HTTP ' + xhr.status + '). Reload the page and try again.';
+      }
+      box.textContent = text;
+      box.classList.remove('hidden');
+      if (timer) { clearTimeout(timer); }
+      timer = setTimeout(function () { box.classList.add('hidden'); }, 12000);
+    });
+    document.body.addEventListener('htmx:sendError', function () {
+      box.textContent = 'Could not reach the server. Check your connection and try again.';
+      box.classList.remove('hidden');
+    });
+  })();
+</script>
 {% if app is defined %}
 <footer class="border-t bg-white text-xs text-slate-500">
   <div class="max-w-7xl mx-auto px-4 py-3 flex items-center gap-4 flex-wrap">

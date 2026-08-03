@@ -62,6 +62,7 @@
     <div class="text-xs font-medium text-emerald-900 mb-1">Windows Server — prebuilt MSI (no Python, no internet on the target)</div>
     {% if msi_available %}
     <form method="post" action="/manage/agents/claim-msi">
+      {{ csrf_field() }}
       <input type="hidden" name="claim_code" value="{{ new_claim.code }}" />
       <input type="hidden" name="site_label" value="{{ new_claim.site }}" />
       <button class="rounded bg-emerald-700 hover:bg-emerald-800 text-white text-sm px-3 py-1.5">Download Windows MSI</button>
@@ -107,6 +108,7 @@
     <div class="text-xs font-medium text-amber-900 mb-1">Windows Server -- prebuilt MSI (no Python, no internet on the target)</div>
     {% if msi_available %}
     <form method="post" action="/manage/agents/msi">
+      {{ csrf_field() }}
       <input type="hidden" name="agent_id" value="{{ new_key.id }}">
       <input type="hidden" name="api_key" value="{{ new_key.key }}">
       <button class="{{ btn('accent') }}">Download Windows MSI</button>
@@ -173,9 +175,11 @@
           </div>
           <div class="flex items-center gap-3 flex-wrap text-xs">
             <form method="post" action="/manage/agents/{{ a.id }}/poll-now" title="Queue a full poll cycle (next heartbeat, ~60s).">
+              {{ csrf_field() }}
               <button class="text-sky-700 hover:underline">Poll now</button>
             </form>
             <form method="post" action="/manage/agents/{{ a.id }}/rescan" title="Queue a discovery sweep across all assigned subnets.">
+              {{ csrf_field() }}
               <button class="text-sky-700 hover:underline">Rescan</button>
             </form>
             {# Names travel in data- attributes and are read through `dataset`,
@@ -192,6 +196,9 @@
             {% if user.role.value == 'admin' %}
             <form method="post" action="/manage/agents/{{ a.id }}/delete" data-name="{{ a.name }}"
                   onsubmit="return confirm('Delete agent ' + this.dataset.name + '?')">
+              {{ csrf_field() }}
+              {{ csrf_field() }}
+              {{ csrf_field() }}
               <button class="text-red-600 hover:underline">Delete</button>
             </form>
             {% endif %}
@@ -423,14 +430,18 @@
         </table>
         {# Row form targets (HTML5 form= pattern -- forms can't nest inside table rows). #}
         {% for s in a.subnets %}
-        <form id="subnet-{{ s.id }}" method="post" action="/manage/subnets/{{ s.id }}"></form>
-        <form id="subnet-del-{{ s.id }}" method="post" action="/manage/subnets/{{ s.id }}/delete"></form>
-        <form id="subnet-handback-{{ s.id }}" method="post" action="/manage/subnets/{{ s.id }}/handback"></form>
+        <form id="subnet-{{ s.id }}" method="post" action="/manage/subnets/{{ s.id }}">
+          {{ csrf_field() }}</form>
+        <form id="subnet-del-{{ s.id }}" method="post" action="/manage/subnets/{{ s.id }}/delete">
+          {{ csrf_field() }}</form>
+        <form id="subnet-handback-{{ s.id }}" method="post" action="/manage/subnets/{{ s.id }}/handback">
+          {{ csrf_field() }}</form>
         {% endfor %}
 
         <details class="mt-2 border-t pt-2">
           <summary class="text-xs text-sky-700 cursor-pointer font-medium">+ Assign subnet</summary>
           <form method="post" action="/manage/agents/{{ a.id }}/subnets" class="mt-2 space-y-2">
+            {{ csrf_field() }}
             <div class="grid grid-cols-4 gap-2">
               <input name="cidr" placeholder="10.10.0.0/24" required aria-label="Subnet CIDR" class="{{ input_sm_cls('col-span-2 tabular-nums') }}" />
               <input name="snmp_community" value="public" aria-label="SNMP community" class="{{ input_sm_cls() }}" />
@@ -526,6 +537,7 @@
     <section class="{{ card_cls('md', 'h-fit') }}">
       <h2 class="font-semibold mb-3">Enroll agent</h2>
       <form method="post" action="/manage/agents" class="space-y-2">
+        {{ csrf_field() }}
         <label class="block">
           <span class="text-xs text-slate-500">Home site</span>
           <select name="site_id" required class="w-full border rounded px-3 py-2 text-sm">
@@ -550,6 +562,7 @@
         the copy left in a chat log stops working after the first install.
       </p>
       <form method="post" action="/manage/agents/claim-code" class="space-y-2">
+        {{ csrf_field() }}
         <label class="block">
           <span class="text-xs text-slate-500">Site the agent will join</span>
           <select name="site_id" required class="w-full border rounded px-3 py-2 text-sm">
@@ -586,6 +599,7 @@
       <form method="post" action="/manage/agents/update-outdated"
             data-version="{{ target_agent_version }}" data-count="{{ outdated_count }}"
             onsubmit="return confirm('Push agent v' + this.dataset.version + ' to the ' + this.dataset.count + ' OUTDATED agent(s)? Each restarts independently within ~60s.')">
+        {{ csrf_field() }}
         <button class="w-full bg-emerald-700 text-white rounded py-2 text-sm font-medium">Update all outdated ({{ outdated_count }})</button>
       </form>
       {% else %}

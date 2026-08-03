@@ -63,6 +63,7 @@
           </td>
           <td class="py-2 text-xs tabular-nums">
             <form method="post" action="/manage/maintenance/schedules/{{ s.id }}" class="flex items-center gap-1">
+              {{ csrf_field() }}
               <input type="date" name="next_due" value="{{ s.next_due.strftime('%Y-%m-%d') if s.next_due else '' }}" class="border rounded px-1 py-0.5 text-xs" />
               <input type="hidden" name="interval_days" value="{{ s.interval_days or '' }}" />
               <input type="hidden" name="page_threshold" value="{{ s.page_threshold or '' }}" />
@@ -73,12 +74,14 @@
           </td>
           <td class="py-2 pr-4 text-right text-xs">
             <form method="post" action="/manage/maintenance/schedules/{{ s.id }}/log" class="inline">
+              {{ csrf_field() }}
               <input name="performed_by" placeholder="Tech name (opt)" class="border rounded px-1 py-0.5 text-xs w-24" />
               <button class="{{ btn('success', 'sm', 'ml-1') }}">Mark serviced</button>
             </form>
             <form method="post" action="/manage/maintenance/schedules/{{ s.id }}/delete" class="inline ml-1"
                   data-name="{{ s.name }}"
                   onsubmit="return confirm('Delete schedule ' + this.dataset.name + '?')">
+              {{ csrf_field() }}
               <button class="text-red-600 hover:underline">remove</button>
             </form>
           </td>
@@ -94,6 +97,7 @@
   <section class="{{ card_cls('md', 'h-fit') }}">
     <h2 class="font-semibold mb-3">Add schedule</h2>
     <form method="post" action="/manage/maintenance/schedules" class="space-y-2">
+      {{ csrf_field() }}
       <label class="block">
         <span class="text-xs text-slate-500">Name</span>
         <input name="name" required placeholder="Quarterly clean, Fuser kit, ..." class="w-full border rounded px-3 py-2 text-sm" />
@@ -177,6 +181,7 @@
         {% if user.role.value == 'admin' %}
         <td class="py-2 pr-4 text-right text-xs">
           <form method="post" action="/manage/maintenance/records/{{ r.id }}/delete" onsubmit="return confirm('Remove this service record?')">
+            {{ csrf_field() }}
             <button class="text-red-600 hover:underline">remove</button>
           </form>
         </td>

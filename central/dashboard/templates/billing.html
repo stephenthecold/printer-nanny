@@ -63,6 +63,7 @@
              class="p-4 {% if not loop.first %}border-t{% endif %}">
       <form method="post" action="/manage/billing/rate-cards/{{ card.id }}"
             class="grid gap-2 sm:grid-cols-2 lg:grid-cols-5 items-end">
+        {{ csrf_field() }}
         <input type="hidden" name="client_id" value="{{ client.id }}" />
         <div class="lg:col-span-2">
           <div class="font-medium flex items-center gap-2 flex-wrap">
@@ -95,6 +96,7 @@
         {% for tier in card.tiers %}
         <form method="post" action="/manage/billing/tiers/{{ tier.id }}/delete"
               onsubmit="return confirm('Remove this band?')">
+          {{ csrf_field() }}
           <input type="hidden" name="client_id" value="{{ client.id }}" />
           <button class="{{ btn('subtle', 'sm', 'tabular-nums') }}"
                   aria-label="Remove the {{ tier.kind.value }} band up to {{ tier.up_to }} pages on {{ card.name }}">
@@ -114,6 +116,7 @@
       <div class="mt-2 flex flex-wrap items-end gap-2">
         <form method="post" action="/manage/billing/rate-cards/{{ card.id }}/tiers"
               class="flex flex-wrap items-end gap-2">
+          {{ csrf_field() }}
           <input type="hidden" name="client_id" value="{{ client.id }}" />
           <div class="w-28">
             {% call select_field('kind', 'Band class', size='sm') %}
@@ -136,6 +139,7 @@
         <div class="ml-auto flex items-end gap-2">
           {% if not card.active %}
           <form method="post" action="/manage/billing/rate-cards/{{ card.id }}/activate">
+            {{ csrf_field() }}
             <input type="hidden" name="client_id" value="{{ client.id }}" />
             <button class="{{ btn('success', 'sm') }}">Make active</button>
           </form>
@@ -143,6 +147,7 @@
           <form method="post" action="/manage/billing/rate-cards/{{ card.id }}/delete"
                 data-name="{{ card.name }}"
                 onsubmit="return confirm('Delete rate card ' + this.dataset.name + '? Past invoices cannot be rebuilt without it.')">
+            {{ csrf_field() }}
             <input type="hidden" name="client_id" value="{{ client.id }}" />
             <button class="{{ btn('danger', 'sm') }}">Delete</button>
           </form>
@@ -158,6 +163,7 @@
   <section class="{{ card_cls('md') }}">
     {{ section_title('Add a rate card') }}
     <form method="post" action="/manage/billing/rate-cards" class="space-y-2">
+      {{ csrf_field() }}
       <input type="hidden" name="client_id" value="{{ client.id }}" />
       {{ field('name', 'Name', required=True, placeholder='Standard MPS 2026') }}
       <div class="grid grid-cols-2 gap-2">

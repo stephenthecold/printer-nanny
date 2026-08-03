@@ -54,6 +54,7 @@
               <form method="post" action="/manage/users/{{ u.id }}/delete" class="inline"
                     data-username="{{ u.username }}"
                     onsubmit="return confirm('Delete user ' + this.dataset.username + '?')">
+                {{ csrf_field() }}
                 <button class="text-xs text-red-600 hover:underline rounded">Delete</button>
               </form>
               {% endif %}
@@ -70,6 +71,7 @@
   <section class="{{ card_cls('md', 'h-fit') }}">
     {{ section_title('Add user') }}
     <form method="post" action="/manage/users" class="space-y-3">
+      {{ csrf_field() }}
       {{ field('username', 'Username', required=True, autocomplete='off') }}
       {{ field('email', 'Email', type='email', help='Optional. Used to match SSO sign-ins.') }}
       {% call select_field('role', 'Role') %}

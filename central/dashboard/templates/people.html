@@ -81,6 +81,7 @@
           </td>
           <td class="py-2 pr-4 text-right">
             <form method="post" action="/manage/people/{{ p.id }}/active" class="inline">
+              {{ csrf_field() }}
               {% if p.active %}
               <button class="text-xs rounded border px-2 py-1 hover:bg-slate-50">Deactivate</button>
               {% else %}
@@ -103,6 +104,7 @@
     <section class="{{ card_cls() }}">
       <div class="font-semibold mb-2 text-sm">Add a person</div>
       <form method="post" action="/manage/people/create" class="space-y-2">
+        {{ csrf_field() }}
         <input type="hidden" name="client_id" value="{{ client.id }}" />
         {{ field('display_name', 'Full name', size='sm', extra_cls='w-full') }}
         {{ field('email', 'Email', type='email', size='sm', extra_cls='w-full') }}
@@ -119,6 +121,7 @@
       <div class="font-semibold mb-2 text-sm">Assign a printer</div>
       {% if printers and (people or groups) %}
       <form method="post" action="/manage/people/assign" class="space-y-2">
+        {{ csrf_field() }}
         <select name="printer_id" class="w-full border rounded px-2 py-1.5 text-sm" required>
           <option value="">Printer…</option>
           {% for pr in printers %}
@@ -156,6 +159,7 @@
     <section class="{{ card_cls() }}">
       <div class="font-semibold mb-2 text-sm">New group</div>
       <form method="post" action="/manage/people/groups/create" class="flex gap-2">
+        {{ csrf_field() }}
         <input type="hidden" name="client_id" value="{{ client.id }}" />
         <input name="name" placeholder="e.g. Accounting" aria-label="New group name"
                class="{{ input_sm_cls('flex-1') }}" required />
@@ -182,6 +186,7 @@
             {% for a in ga %}
               <span class="inline-block">{{ a.printer.display_name or a.printer.model or a.printer.ip }}{% if a.is_default %} <span class="rounded bg-emerald-100 text-emerald-800 px-1">default</span>{% endif %}</span>
               <form method="post" action="/manage/people/unassign" class="inline">
+                {{ csrf_field() }}
                 <input type="hidden" name="assignment_id" value="{{ a.id }}" />
                 <button class="text-slate-400 hover:text-rose-600" title="Remove">×</button>
               </form>{% if not loop.last %}<span class="text-slate-300">·</span> {% endif %}
@@ -197,6 +202,7 @@
       </div>
       {% if people %}
       <form method="post" action="/manage/people/groups/{{ g.id }}/members" class="mt-2">
+        {{ csrf_field() }}
         <div class="flex flex-wrap gap-x-4 gap-y-1">
           {% set members = memberships.get(g.id) or [] %}
           {% for p in people if p.active %}
@@ -237,6 +243,7 @@
           </td>
           <td class="py-2 pr-4 text-right">
             <form method="post" action="/manage/people/unassign" class="inline">
+              {{ csrf_field() }}
               <input type="hidden" name="assignment_id" value="{{ a.id }}" />
               <button class="text-xs rounded border px-2 py-1 hover:bg-slate-50">Remove</button>
             </form>
@@ -311,6 +318,7 @@
 
       <form method="post" action="/manage/people/directory/save"
             class="grid md:grid-cols-2 gap-2 items-end">
+        {{ csrf_field() }}
         <input type="hidden" name="client_id" value="{{ client.id }}" />
         <input type="hidden" name="provider" value="{{ p.key }}" />
         {% for field, label, help in p.fields %}
@@ -343,10 +351,12 @@
       {% if conn %}
       <div class="mt-2 flex gap-2">
         <form method="post" action="/manage/people/directory/{{ conn.id }}/sync" class="inline">
+          {{ csrf_field() }}
           <button class="text-xs rounded border px-2 py-1 hover:bg-slate-50">Sync now</button>
         </form>
         <form method="post" action="/manage/people/directory/{{ conn.id }}/delete" class="inline"
               onsubmit="return confirm('Remove this connection? Synced people are kept.')">
+          {{ csrf_field() }}
           <button class="text-xs rounded border px-2 py-1 text-rose-700 hover:bg-rose-50">Remove</button>
         </form>
       </div>

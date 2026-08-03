@@ -69,11 +69,13 @@
             </td>
             <td class="{{ td_cls('right') }}">
               <form method="post" action="/manage/alert-rules/{{ r.id }}/toggle" class="inline">
+                {{ csrf_field() }}
                 <button class="{{ btn('subtle', 'sm') }}">{{ 'Disable' if r.enabled else 'Enable' }}</button>
               </form>
               <form method="post" action="/manage/alert-rules/{{ r.id }}/delete" class="inline"
                     data-name="{{ r.name }}"
                     onsubmit="return confirm('Delete rule ' + this.dataset.name + '? Its open alerts resolve on the next worker cycle.');">
+                {{ csrf_field() }}
                 <button class="{{ btn('danger', 'sm') }}">Delete</button>
               </form>
             </td>
@@ -118,6 +120,7 @@
   <section class="{{ card_cls() }}">
     {{ section_title('Add a rule') }}
     <form method="post" action="/manage/alert-rules" class="space-y-3 text-sm">
+      {{ csrf_field() }}
       {{ field('name', 'Name', required=True, placeholder='Jams — more than 10 a day') }}
 
       {% call select_field('condition_type', 'Condition', required=True) %}

@@ -67,6 +67,7 @@
             <form method="post" action="/manage/definitions/{{ d.id }}/delete" class="inline"
                   data-key="{{ d.key }}"
                   onsubmit="return confirm('Remove ' + this.dataset.key + '? Agents drop it on their next poll.');">
+              {{ csrf_field() }}
               <button type="submit" class="{{ c.btn('danger', 'sm') }}"
                       aria-label="Delete definition {{ d.key }}">Delete</button>
             </form>
@@ -85,6 +86,7 @@
   {{ c.section_title("Edit definition" if editing else "Add a definition") }}
 
   <form method="post" action="/manage/definitions/save" class="grid gap-3 sm:grid-cols-2">
+    {{ csrf_field() }}
     {% if editing %}<input type="hidden" name="definition_id" value="{{ editing.id }}">{% endif %}
     <input type="hidden" name="enabled_present" value="1">
 
