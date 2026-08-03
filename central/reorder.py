@@ -104,6 +104,13 @@ class ReorderThresholds:
     days_remaining: int = 21       # Xerox ASR orders at 2-3 weeks of usage left
     pages_remaining: int = 500     # 0 disables the pages trigger entirely
     urgent_level_pct: float = 5.0
+    # Receptacles (waste toner, chip boxes) run the OTHER way: their level is
+    # how full they are, so they are ordered when they are nearly full, not
+    # nearly empty. Two separate numbers rather than reusing the pair above,
+    # because "20% remaining" and "80% full" are not the same policy and an
+    # operator tuning one must not silently move the other.
+    receptacle_full_pct: float = 80.0
+    urgent_receptacle_full_pct: float = 95.0
     lead_days: int = 14            # alerts.reorder_lead_days -- the operator has
                                    # already told us how long a cartridge takes
                                    # to arrive; a supply that will not outlast it
@@ -125,6 +132,12 @@ class ReorderThresholds:
             days_remaining=_num("reorder.days_remaining", d.days_remaining, int),
             pages_remaining=_num("reorder.pages_remaining", d.pages_remaining, int),
             urgent_level_pct=_num("reorder.urgent_level_pct", d.urgent_level_pct, float),
+            receptacle_full_pct=_num(
+                "reorder.receptacle_full_pct", d.receptacle_full_pct, float
+            ),
+            urgent_receptacle_full_pct=_num(
+                "reorder.urgent_receptacle_full_pct", d.urgent_receptacle_full_pct, float
+            ),
             lead_days=_num("alerts.reorder_lead_days", d.lead_days, int),
         )
 
@@ -165,6 +178,12 @@ class SupplyRecommendation:
     days_remaining: Optional[float]
     pages_remaining: Optional[float]
     urgency: str
+    # Whether ``level_pct`` is fullness rather than remaining. Carried on the
+    # recommendation, not looked up again by each renderer: the reorder page,
+    # the portal, the weekly report and the outbound event all print this
+    # number, and "5%" means opposite things in the two cases. A consumer that
+    # cannot tell them apart cannot act on either.
+    is_receptacle: bool = False
     triggers: List[str] = field(default_factory=list)   # machine-readable
     reasons: List[str] = field(default_factory=list)    # human-readable, with numbers
 
@@ -224,6 +243,11 @@ class SupplyRecommendation:
                 "type": self.supply_type,
                 "color": self.color,
                 "level_pct": self.level_pct,
+                # What ``level_pct`` means. Without it a consumer reading 92
+                # cannot tell a nearly-full cartridge from a waste box that is
+                # about to halt the printer -- and those call for opposite
+                # actions.
+                "is_receptacle": self.is_receptacle,
                 "days_remaining": self.days_remaining,
                 "pages_remaining": self.pages_remaining,
             },
@@ -234,6 +258,43 @@ def _fmt_days(days: float) -> str:
     return f"{days:.0f}" if days >= 1 else f"{days:.1f}"
 
 
+def _evaluate_receptacle(
+    supply: m.Supply,
+    thresholds: ReorderThresholds,
+) -> Optional[Tuple[List[str], List[str], str]]:
+    """Reorder verdict for a container whose level means "how full".
+
+    One trigger, not three. Days- and pages-remaining are estimates of when a
+    level reaches ZERO, which for a filling container is the state it starts in;
+    the worker's fit refuses a rising series outright, so both are ``None`` here
+    by construction rather than by omission.
+
+    A threshold at or below 0 turns the trigger off, matching the consumed
+    branch -- and 100 is left usable, because "flag it when it is completely
+    full" is a defensible if late policy and clamping it would be us overruling
+    an operator without saying so.
+    """
+    level = supply.level_pct
+    if thresholds.receptacle_full_pct <= 0 or level is None:
+        return None
+    if level < thresholds.receptacle_full_pct:
+        return None
+
+    triggers = ["receptacle_full"]
+    reasons = [
+        f"container is {level:.0f}% full, at or above the "
+        f"{thresholds.receptacle_full_pct:.0f}% replacement level"
+    ]
+    urgency = URGENCY_SOON
+    if level >= thresholds.urgent_receptacle_full_pct:
+        urgency = URGENCY_NOW
+        reasons.append(
+            f"{level:.0f}% full is at or above the "
+            f"{thresholds.urgent_receptacle_full_pct:.0f}% order-now level"
+        )
+    return triggers, reasons, urgency
+
+
 def evaluate_supply(
     supply: m.Supply,
     thresholds: ReorderThresholds,
@@ -242,7 +303,21 @@ def evaluate_supply(
 
     Split out from the query so the policy is unit-testable against a bare
     Supply row, with no database, no printer and no settings table.
+
+    A RECEPTACLE IS A DIFFERENT QUESTION AND TAKES A DIFFERENT BRANCH. Its level
+    is how full it is, so the three triggers below are all inverted for it:
+    ``level <= 20`` means an almost-empty waste box, which was being recommended
+    for reorder as "level 5% is at or below the 5% order-now level" about a part
+    somebody had just fitted. The forecasts do not apply either -- they fit a
+    DECLINING series, so a filling container yields ``None`` from both and, had
+    it not been given its own branch, would simply never have been flagged when
+    it mattered. See ``central.supplies``.
     """
+    from central.supplies import is_receptacle
+
+    if is_receptacle(supply):
+        return _evaluate_receptacle(supply, thresholds)
+
     level = supply.level_pct
     days = supply.days_to_empty
     pages = supply.pages_to_empty
@@ -364,6 +439,7 @@ def recommendations(
                 supply_type=supply.type.value,
                 color=_one_line(supply.color, 40) or None,
                 level_pct=supply.level_pct,
+                is_receptacle=supply.is_receptacle,
                 days_remaining=supply.days_to_empty,
                 pages_remaining=supply.pages_to_empty,
                 urgency=urgency,

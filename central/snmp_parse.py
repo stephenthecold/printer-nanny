@@ -16,6 +16,29 @@ LEVEL_SOME_REMAINING = -3 # at least one unit remains, exact amount unknown
 CAPACITY_UNLIMITED = -1   # supply has no defined maximum (e.g. continuous feed)
 CAPACITY_UNKNOWN = -2
 
+# prtMarkerSuppliesClass (RFC 3805) integer → our stored class string.
+#
+# THIS IS A SEMANTIC FLAG, NOT A LABEL. The MIB says a supply's *level* means
+# two opposite things depending on this column: for supplyThatIsConsumed(3) it
+# is how much REMAINS, and for receptacleThatIsFilled(4) it is how FULL the
+# container is. Nothing read it before, so a waste box reporting 5 -- an almost
+# empty box, the healthiest a waste box gets -- was rendered, counted as a low
+# supply, and recommended for reorder as though it were a cartridge about to run
+# dry. See ``central.supplies`` for the one place that asymmetry is resolved.
+CLASS_OTHER = 1
+CLASS_CONSUMED = 3
+CLASS_RECEPTACLE = 4
+
+SUPPLY_CLASS_CONSUMED = "consumed"      # level == amount remaining
+SUPPLY_CLASS_RECEPTACLE = "receptacle"  # level == how full the container is
+SUPPLY_CLASS_OTHER = "other"            # the device says neither
+
+_SUPPLY_CLASS_BY_CODE = {
+    CLASS_OTHER: SUPPLY_CLASS_OTHER,
+    CLASS_CONSUMED: SUPPLY_CLASS_CONSUMED,
+    CLASS_RECEPTACLE: SUPPLY_CLASS_RECEPTACLE,
+}
+
 # prtMarkerColorantValue / common description keywords → normalized color name.
 _COLOR_KEYWORDS = {
     "black": "black",
@@ -183,6 +206,21 @@ def supply_type_from_code(code: Optional[int]) -> str:
     if code is None:
         return "other"
     return _SUPPLY_TYPE_BY_CODE.get(code, "other")
+
+
+def supply_class_from_code(code: Optional[int]) -> Optional[str]:
+    """Map a prtMarkerSuppliesClass code to our class string.
+
+    ``None`` means "the device did not report a class", which is deliberately
+    NOT the same as ``SUPPLY_CLASS_OTHER`` ("the device reported other(1)").
+    Absence lets a consumer fall back to the supply *type*; an explicit other(1)
+    is the device telling us it will not say, and it must not be mistaken for a
+    reading we never took. An unrecognised code maps to ``other`` rather than
+    raising -- this is a value from a printer on a customer LAN.
+    """
+    if code is None:
+        return None
+    return _SUPPLY_CLASS_BY_CODE.get(code, SUPPLY_CLASS_OTHER)
 
 
 def supply_type_from_description(description: Optional[str]) -> Optional[str]:

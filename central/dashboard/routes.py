@@ -14,6 +14,7 @@ from sqlalchemy.orm import Session
 
 from central import models as m
 from central import queries
+from central import supplies as supplies_lib
 from central.branding import branding_for
 from central.db import get_db
 from central.health import worker_banner
@@ -324,7 +325,13 @@ def client_detail(client_id: int, request: Request, db: Session = Depends(get_db
     # Lowest supply per printer so the listing shows actual levels, not just
     # the forecast: (label, pct) of the most-depleted supply.
     lowest_supply: dict[int, tuple] = {}
-    low_threshold = 20.0
+    # The operator's configured threshold, not a literal. This route hardcoded
+    # 20.0 while ``/`` and the weekly report both resolved
+    # ``queries.low_supply_threshold``, so moving the slider in Settings made
+    # the overview and this page disagree about the same fleet -- on a page a
+    # client_readonly user can reach, which is where an unexplained discrepancy
+    # costs the most.
+    low_threshold = queries.low_supply_threshold(db)
     # Per-site rollup chips: printers / down / warnings / low supplies /
     # soonest order. Plus a client-level total across all sites.
     site_stats: dict[int, dict] = {}
@@ -345,14 +352,25 @@ def client_detail(client_id: int, request: Request, db: Session = Depends(get_db
         elif p.status == m.PrinterStatus.warning:
             stats["warnings"] += 1
             client_stats["warnings"] += 1
+        # Ranked by HEADROOM, not by the raw level: a waste box reports how full
+        # it is, so an emptied one reading 5 was "the most depleted supply" on
+        # every row it appeared in and pushed the actually-dying cartridge out of
+        # the column. ``remaining_pct`` puts both on one comparable scale; the
+        # cell still renders the device's own number, with the flag that says
+        # which way to read it. Receptacles are excluded from the low COUNT for
+        # the same reason ``queries.low_supplies`` excludes them.
         leveled = [s for s in p.supplies if s.level_pct is not None]
         if leveled:
-            worst = min(leveled, key=lambda s: s.level_pct)
+            worst = min(leveled, key=lambda s: supplies_lib.remaining_pct(s))
             lowest_supply[p.id] = (
                 worst.description or worst.color or worst.type.value,
                 worst.level_pct,
+                worst.is_receptacle,
             )
-        low_count = sum(1 for s in leveled if s.level_pct <= low_threshold)
+        low_count = sum(
+            1 for s in leveled
+            if not s.is_receptacle and s.level_pct <= low_threshold
+        )
         stats["low_supplies"] += low_count
         client_stats["low_supplies"] += low_count
         days = (runway.get(p.id) or {}).get("days")

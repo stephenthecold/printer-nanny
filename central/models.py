@@ -714,8 +714,23 @@ class Supply(Base):
         ForeignKey("printers.id", ondelete="CASCADE"), index=True
     )
     type: Mapped[SupplyType] = mapped_column(_enum(SupplyType), default=SupplyType.toner)
+    # prtMarkerSuppliesClass, verbatim from the device: "consumed",
+    # "receptacle", "other", or NULL when the device did not report the column
+    # (also every row written before this existed).
+    #
+    # It is stored rather than derived because it changes what ``level_pct``
+    # MEANS -- remaining for a cartridge, how-full for a waste box -- and a
+    # value that reverses the reading of another column has to travel with it.
+    # NULL is honestly "not reported", never "consumed": the fallback lives in
+    # ``central.supplies.is_receptacle`` where it can be stated once, not
+    # frozen into the row by whichever agent build happened to write it.
+    supply_class: Mapped[Optional[str]] = mapped_column(String(20), default=None)
     color: Mapped[Optional[str]] = mapped_column(String(40), default=None)  # black/cyan/magenta/yellow
     description: Mapped[Optional[str]] = mapped_column(String(200), default=None)
+    # For a CONSUMED supply this is how much remains; for a RECEPTACLE it is how
+    # full the container is. Never read it without asking ``central.supplies``
+    # which one you have -- 5% is a nearly-dead cartridge and a nearly-empty
+    # waste box, and treating those alike is what this column exists to stop.
     level_pct: Mapped[Optional[float]] = mapped_column(Float, default=None)  # None == unknown
     # Coarse state when no numeric level is reported (e.g. "some remaining").
     status_note: Mapped[Optional[str]] = mapped_column(String(60), default=None)
@@ -750,6 +765,22 @@ class Supply(Base):
     __table_args__ = (
         UniqueConstraint("printer_id", "type", "color", name="uq_supply_printer_type_color"),
     )
+
+    @property
+    def is_receptacle(self) -> bool:
+        """True when ``level_pct`` means "how full", not "how much is left".
+
+        A property rather than a template global because the dashboard builds
+        **four** separate Jinja environments (routes / manage / settings /
+        backup): a global registered on one is missing from the other three, and
+        the failure is a template rendering a waste box the wrong way round with
+        nothing in the log. Reached from Jinja as ``sup.is_receptacle``, so no
+        route has to remember to pass it. The rule itself lives once, in
+        ``central.supplies``; this only forwards.
+        """
+        from central.supplies import is_receptacle  # lazy: supplies imports models
+
+        return is_receptacle(self)
 
 
 class Reading(Base):

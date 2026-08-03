@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from datetime import datetime
-from typing import Optional
+from typing import Literal, Optional
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
@@ -37,6 +37,13 @@ class HeartbeatIn(BaseModel):
 
 class SupplyIn(BaseModel):
     type: m.SupplyType = m.SupplyType.toner
+    # prtMarkerSuppliesClass as the agent read it. Constrained to the three
+    # values RFC 3805 defines plus ``None`` ("device did not report it"): this
+    # field decides whether ``level_pct`` is read as remaining or as fullness,
+    # so an unrecognised string must not reach the database and be silently
+    # treated as "consumed" by ``central.supplies``. Older agents omit it,
+    # which is exactly the ``None`` case.
+    supply_class: Optional[Literal["consumed", "receptacle", "other"]] = None
     color: Optional[str] = None
     description: Optional[str] = None
     level_pct: Optional[float] = Field(default=None, ge=0, le=100)
