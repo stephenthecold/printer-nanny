@@ -193,6 +193,32 @@ SPECS: List[Spec] = [
     Spec("snmp.version", "str", "SNMP defaults", "Version (1 / 2c)", "2c"),
     Spec("snmp.timeout", "float", "SNMP defaults", "Timeout (seconds)", 2.0),
     Spec("snmp.retries", "int", "SNMP defaults", "Retries", 1),
+    # Data retention (central.retention -- rollup + opt-in prune of `readings`)
+    Spec("retention.rollup_enabled", "bool", "Data retention",
+         "Roll readings up into daily summaries", True,
+         "Collapses raw readings older than the raw window below into one row per "
+         "printer per UTC day — page/mono/colour meters plus end-of-day supply "
+         "levels — kept forever. Non-destructive on its own: raw readings are only "
+         "removed if you also switch on deletion below."),
+    Spec("retention.raw_days", "int", "Data retention", "Keep raw readings for (days)", 90,
+         "Readings older than this become eligible for rollup, and for deletion if "
+         "that is enabled. Supply-runway forecasts read raw readings only, over a "
+         "30-day window, so anything below 31 is refused and 31 used instead (the "
+         "worker logs it) — a shorter window would starve every estimate without "
+         "failing anywhere. Whole UTC days are rolled, so the window actually kept "
+         "is this many days or up to 24h more, never less."),
+    Spec("retention.delete_enabled", "bool", "Data retention",
+         "Delete raw readings once they are rolled up", False,
+         "DESTRUCTIVE AND IRREVERSIBLE — off by default. A raw reading is only ever "
+         "deleted in the same database transaction that commits its daily rollup, so "
+         "nothing can be removed that was not summarised first, and every pass that "
+         "deletes is written to the audit log."),
+    Spec("retention.max_batches_per_cycle", "int", "Data retention",
+         "Retention batches per worker cycle", 200,
+         "Caps how much retention work one cycle does. A batch is one day-scan or one "
+         "printer-day rollup+delete transaction. The worker runs under a single-leader "
+         "lock, so this is what stops a large backlog from stalling alerting — it "
+         "drains over many cycles instead of one long statement."),
     # Single sign-on (OIDC)
     Spec("oidc.enabled", "bool", "Single sign-on (OIDC)", "Enable SSO login", False),
     Spec("oidc.issuer", "str", "Single sign-on (OIDC)", "Issuer / discovery URL", "",
@@ -321,7 +347,9 @@ SETTINGS_GROUPS: "Dict[str, tuple]" = {
         ["Email (SMTP)", "Microsoft Teams", "Slack", "Webhook (generic)", "FreeScout"],
     ),
     "alerts": ("Alerts & Reports", ["Alerts", "Reports", "ESG / Sustainability"]),
-    "polling": ("Polling & SNMP", ["Polling", "SNMP defaults"]),
+    # Retention lives here because it is the other half of polling: how often we
+    # ask, and how long we keep what comes back.
+    "polling": ("Polling & SNMP", ["Polling", "SNMP defaults", "Data retention"]),
     "auth": ("Authentication",
              ["Single sign-on (OIDC)", "SCIM provisioning", "Directory sync"]),
     "agents": ("Agents", ["Agent install", "Workstations", "Onboarding defaults"]),

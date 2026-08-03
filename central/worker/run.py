@@ -18,6 +18,7 @@ from central.db import SessionLocal, create_all, try_leader_lock
 from central.health import DEFAULT_CYCLE_SECONDS
 from central.logging_config import configure_logging
 from central.reports import run_scheduled_reports
+from central.retention import roll_up_readings
 from central.worker import jobs
 
 log = logging.getLogger("printer_nanny.worker")
@@ -41,6 +42,12 @@ JOBS = (
     jobs.sync_directories,
     # Cheap no-op unless a weekly/monthly report is due (marker-gated).
     run_scheduled_reports,
+    # LAST, deliberately. Retention is the only job here that can delete, and it
+    # is the only one whose work is bounded by a budget rather than by how much
+    # there is to do -- so it must never be the reason alerting, delivery retries
+    # or reports were late in a cycle. An idle pass is one indexed MIN(ts) probe,
+    # so it needs no schedule of its own (central.retention).
+    roll_up_readings,
 )
 
 
