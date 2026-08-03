@@ -1173,8 +1173,14 @@ def check_maintenance_due(db: Session, now: Optional[datetime] = None) -> dict:
     for sched in queries.maintenance_due(db, now):
         printer = db.get(m.Printer, sched.printer_id) if sched.printer_id else None
         # Page-threshold schedules also require the page count to be reached.
+        # The target moves forward with each logged service (page_target() =
+        # meter at last service + threshold), which is what both makes such a
+        # schedule recur and lets this pass RESOLVE its alert afterwards: the
+        # gate below stops adding the key to active_keys, and the resolve sweep
+        # at the bottom closes the alert.
         if sched.page_threshold and printer and printer.page_count is not None:
-            if printer.page_count < sched.page_threshold:
+            target = sched.page_target()
+            if target is not None and printer.page_count < target:
                 continue
         due_str = sched.next_due.date().isoformat() if sched.next_due else "due"
         key = f"maintenance:{sched.id}:{due_str}"

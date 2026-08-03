@@ -2,8 +2,9 @@
 
 from __future__ import annotations
 
+import math
 from datetime import datetime
-from typing import Optional
+from typing import Any, Optional
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
@@ -22,6 +23,76 @@ class ORMModel(BaseModel):
 
 
 # --------------------------------------------------------------------------- #
+# The ingest coercion rule
+#
+# **No value a device reports may reject the request it arrived in.** Pydantic
+# validates the whole body, so one unusable field -- a vendor MIB answering 255
+# for "unknown", a negative sentinel, a 300-character cartridge name off an EWS
+# scrape -- would 422 the ENTIRE batch, every other printer's reading with it.
+# And a rejected batch is not merely lost: ``push_readings`` spools it and
+# ``drain_spool`` replays it verbatim on every cycle, so the same value is
+# refused again forever. The spool never drains, grows to ``max_readings``, and
+# the cap then drops the OLDEST entries -- destroying the good readings while
+# retaining the poisoned one. One bad byte from one printer silently ends
+# collection for that whole agent.
+#
+# Two variants of the same failure are invisible here and fatal in production,
+# because SQLite (dev + the whole test suite) ignores what Postgres enforces:
+# an int past INT4, and a string longer than its VARCHAR column (Postgres raises
+# StringDataRightTruncation). Those surface as a 500 rather than a 422 and block
+# the spool identically, so they are coerced/clipped at this boundary too.
+#
+# Coercion is always toward LESS information (None, "other", "unknown", a
+# truncated string) and never toward more, so nothing here can invent a level, a
+# meter or a severity that the device did not report. Only the request *shape*
+# -- a missing ip, a malformed body -- is still refused.
+# --------------------------------------------------------------------------- #
+def _sane_count(v: Any) -> Optional[int]:
+    """A device-reported count, or None when it cannot be stored.
+
+    Shared by the impression meters and the supply raw counts: negative is
+    nonsense for both, and anything past INT4 overflows the column. Runs in
+    ``mode="before"`` so it also absorbs the shapes pydantic itself would refuse
+    -- a float with a fractional part, a numeric string -- since those reject
+    the batch just as thoroughly as an out-of-range int does.
+    """
+    if v is None or isinstance(v, bool):
+        # bool is an int subclass in Python; a True page count is not a count.
+        return None
+    if isinstance(v, float):
+        if not math.isfinite(v):
+            return None
+        v = int(v)
+    if not isinstance(v, int):
+        try:
+            v = int(str(v).strip())
+        except (TypeError, ValueError):
+            return None
+    return v if 0 <= v <= _INT4_MAX else None
+
+
+def _clipped(v: Any, limit: int) -> Any:
+    """Truncate a device-supplied string to what its column can hold.
+
+    Non-strings pass through untouched so a genuinely wrong type is still
+    reported by normal validation rather than being hidden here.
+    """
+    return v[:limit] if isinstance(v, str) else v
+
+
+def _as_level(v: Any) -> Optional[float]:
+    """``v`` as a finite float, or None if it is not a number at all."""
+    if isinstance(v, bool):
+        # float(True) is 1.0 -- a fabricated 1% reading out of a JSON boolean.
+        return None
+    try:
+        f = float(v)
+    except (TypeError, ValueError):
+        return None
+    return f if math.isfinite(f) else None
+
+
+# --------------------------------------------------------------------------- #
 # Ingest (agent -> central)
 # --------------------------------------------------------------------------- #
 class HeartbeatIn(BaseModel):
@@ -35,15 +106,99 @@ class HeartbeatIn(BaseModel):
     last_update_result: Optional[dict] = None
 
 
+# Widths of the VARCHAR columns these fields land in (central.models.Supply).
+_SUPPLY_TEXT_LIMITS = {"color": 40, "description": 200, "status_note": 60, "unit": 40}
+
+
+def _level_refused_note(raw: Any) -> str:
+    """The ``status_note`` marker for a level we would not store.
+
+    Deliberately short, and written FIRST in the note, so that clipping to the
+    60-char column can only ever eat the device's own wording -- never the
+    explanation for why the percentage is missing.
+    """
+    shown = str(raw)
+    if len(shown) > 12:
+        shown = shown[:12] + "..."
+    return f"level out of range: {shown}"
+
+
 class SupplyIn(BaseModel):
     type: m.SupplyType = m.SupplyType.toner
     color: Optional[str] = None
     description: Optional[str] = None
-    level_pct: Optional[float] = Field(default=None, ge=0, le=100)
+    #: 0-100, or None for "not reported". Deliberately NOT ``Field(ge=0, le=100)``
+    #: -- a constraint here refuses the whole batch. See ``_refuse_bad_level``.
+    level_pct: Optional[float] = None
     status_note: Optional[str] = None
     current: Optional[int] = None
     max_capacity: Optional[int] = None
     unit: Optional[str] = None
+
+    @field_validator("type", mode="before")
+    @classmethod
+    def _known_type(cls, v: Any) -> Any:
+        """An unrecognised supply type becomes ``other``, never a 422.
+
+        ``other`` is the enum's own catch-all and the row keeps its description,
+        colour and counts, so nothing is lost but the classification. The case
+        that matters is an agent NEWER than central (agents self-update; central
+        is updated by the operator) reporting a supply type this build has never
+        heard of -- which would otherwise refuse every batch that agent sends,
+        permanently.
+        """
+        if v is None or isinstance(v, m.SupplyType):
+            return v
+        try:
+            return m.SupplyType(v)
+        except ValueError:
+            return m.SupplyType.other
+
+    @model_validator(mode="before")
+    @classmethod
+    def _refuse_bad_level(cls, data: Any) -> Any:
+        """Coerce an unusable level to None and SAY SO in ``status_note``.
+
+        Coerce rather than clamp: an out-of-range level is a sentinel, not a
+        measurement. Clamping 255 to 100 would report a full cartridge and
+        suppress the low-supply alert; clamping -1 to 0 would raise a false
+        empty. "Not reported" is the one reading that is true, and it is exactly
+        what ``status_note`` exists to caption ("coarse state when no numeric
+        level is reported"), so the supply row survives with its identity,
+        counts and description intact.
+
+        The trace is a per-state note rather than a log line or an event on
+        purpose: a device that answers 255 answers 255 on every poll, so an
+        event would be unbounded noise, while the note renders once next to the
+        supply on the printer page and in the supplies CSV export.
+        """
+        if not isinstance(data, dict):
+            return data
+        raw = data.get("level_pct")
+        if raw is None:
+            return data
+        level = _as_level(raw)
+        if level is not None and 0.0 <= level <= 100.0:
+            return data
+        data = dict(data)  # never mutate the caller's mapping
+        data["level_pct"] = None
+        note = _level_refused_note(raw)
+        existing = data.get("status_note")
+        if isinstance(existing, str) and existing.strip():
+            note = f"{note}; {existing.strip()}"
+        data["status_note"] = note
+        return data
+
+    @field_validator("color", "description", "status_note", "unit", mode="before")
+    @classmethod
+    def _clip_text(cls, v: Any, info) -> Any:
+        return _clipped(v, _SUPPLY_TEXT_LIMITS[info.field_name])
+
+    @field_validator("current", "max_capacity", mode="before")
+    @classmethod
+    def _sane_raw_count(cls, v: Any) -> Optional[int]:
+        """Same guard as the impression meters: these are INT4 columns too."""
+        return _sane_count(v)
 
 
 class EventIn(BaseModel):
@@ -51,6 +206,52 @@ class EventIn(BaseModel):
     severity: m.EventSeverity = m.EventSeverity.info
     source: m.EventSource = m.EventSource.snmp_alert
     message: str
+
+    @field_validator("code", mode="before")
+    @classmethod
+    def _clip_code(cls, v: Any) -> Any:
+        return _clipped(v, 80)  # printer_events.code
+
+    @field_validator("severity", mode="before")
+    @classmethod
+    def _known_severity(cls, v: Any) -> Any:
+        """An unrecognised severity becomes ``warning``.
+
+        Not ``info`` (which buries something we failed to understand) and not
+        ``critical`` (which fabricates an emergency out of a parse failure).
+        Middle of the scale is the only honest answer for "this device said
+        something this build cannot grade".
+        """
+        if v is None or isinstance(v, m.EventSeverity):
+            return v
+        try:
+            return m.EventSeverity(v)
+        except ValueError:
+            return m.EventSeverity.warning
+
+    @field_validator("source", mode="before")
+    @classmethod
+    def _known_source(cls, v: Any) -> Any:
+        """An unrecognised source becomes ``agent``: appended, never reconciled.
+
+        ``_reconcile_events`` treats ``snmp_alert`` rows as standing conditions
+        and resolves the ones absent from a reading. Defaulting an unknown
+        source into that set would let an event we cannot interpret close real
+        open conditions; ``agent`` is the append-only source and cannot.
+        """
+        if v is None or isinstance(v, m.EventSource):
+            return v
+        try:
+            return m.EventSource(v)
+        except ValueError:
+            return m.EventSource.agent
+
+
+# Widths of the VARCHAR columns these land in (central.models.Printer).
+_READING_TEXT_LIMITS = {
+    "ip": 64, "hostname": 200, "brand": 100, "model": 200, "serial": 120,
+    "firmware": 200, "driver_tier_reason": 400, "ipp_endpoint": 300,
+}
 
 
 class ReadingIn(BaseModel):
@@ -90,9 +291,9 @@ class ReadingIn(BaseModel):
     ipp_endpoint: Optional[str] = None
     ipp_capabilities: Optional[dict] = None
 
-    @field_validator("page_count", "mono_count", "color_count")
+    @field_validator("page_count", "mono_count", "color_count", mode="before")
     @classmethod
-    def _sane_meter(cls, v: Optional[int]) -> Optional[int]:
+    def _sane_meter(cls, v: Any) -> Optional[int]:
         """Drop a negative or column-overflowing meter to None at ingest.
 
         Defense at the trust boundary: even an authenticated agent shouldn't be
@@ -100,14 +301,55 @@ class ReadingIn(BaseModel):
         that overflows the INT4 column (which would 500 and drop the batch). A
         bad value is treated as "not reported" rather than rejecting the whole
         reading, so one glitchy field never costs the rest of the poll.
+
+        ``mode="before"`` because the shapes pydantic itself refuses -- a meter
+        reported as 12.5, or as a string -- reject the batch just as thoroughly
+        as an out-of-range int, and for the same non-reason.
         """
-        if v is None:
+        return _sane_count(v)
+
+    @field_validator("ip", "hostname", "brand", "model", "serial", "firmware",
+                     "driver_tier_reason", "ipp_endpoint", mode="before")
+    @classmethod
+    def _clip_text(cls, v: Any, info) -> Any:
+        return _clipped(v, _READING_TEXT_LIMITS[info.field_name])
+
+    @field_validator("driver_tier", mode="before")
+    @classmethod
+    def _known_tier(cls, v: Any) -> Any:
+        """An unrecognised driver tier reads as absent, not as a 422.
+
+        Absent is already the documented "no new information" (probing is
+        throttled, and most readings carry no tier at all), so a tier this build
+        does not know leaves the printer's last good observation in place --
+        which is the same thing a routine SNMP poll does.
+        """
+        if v is None or isinstance(v, m.DriverTier):
+            return v
+        try:
+            return m.DriverTier(v)
+        except ValueError:
             return None
-        return v if 0 <= v <= _INT4_MAX else None
+
+    @field_validator("status", mode="before")
+    @classmethod
+    def _known_status(cls, v: Any) -> Any:
+        """An unrecognised status becomes ``unknown`` -- the enum's own "we
+        don't know", and the value a reading carries when nothing answered."""
+        if v is None or isinstance(v, m.PrinterStatus):
+            return v
+        try:
+            return m.PrinterStatus(v)
+        except ValueError:
+            return m.PrinterStatus.unknown
 
 
 class ReadingsBatchIn(BaseModel):
     readings: list[ReadingIn]
+
+
+# Same columns, same widths -- discovery writes the identity fields readings do.
+_DISCOVERED_TEXT_LIMITS = dict(_READING_TEXT_LIMITS, mac=32)
 
 
 class DiscoveredIn(BaseModel):
@@ -119,6 +361,14 @@ class DiscoveredIn(BaseModel):
     serial: Optional[str] = None
     firmware: Optional[str] = None
     subnet_cidr: Optional[str] = None
+
+    @field_validator("ip", "mac", "hostname", "brand", "model", "serial",
+                     "firmware", mode="before")
+    @classmethod
+    def _clip_text(cls, v: Any, info) -> Any:
+        # subnet_cidr is deliberately absent: it is only ever matched against
+        # enrolled Subnet rows, never stored, so it has no column to overflow.
+        return _clipped(v, _DISCOVERED_TEXT_LIMITS[info.field_name])
 
 
 class DiscoveredBatchIn(BaseModel):

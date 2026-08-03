@@ -6,8 +6,10 @@
 <p class="text-sm text-slate-500 mb-4">
   Per-printer or model-wide schedules. The worker opens a "Maintenance due"
   alert when a schedule's <em>next due</em> date passes (and the page count, when
-  set, has been reached). Logging service rolls <em>next due</em> forward and
-  auto-resolves the open alert on the next worker cycle.
+  set, has been reached). Marking it serviced rolls <em>next due</em> forward by
+  the repeat interval and moves the page target on by one threshold from the
+  meter as it reads now, then auto-resolves the open alert on the next worker
+  cycle. A schedule with neither is a one-off: it says so when you log it.
 </p>
 
 <div class="grid md:grid-cols-3 gap-6">
@@ -20,7 +22,7 @@
           <th class="px-4 py-2">Name</th>
           <th class="py-2">Scope</th>
           <th class="py-2">Every</th>
-          <th class="py-2">At page</th>
+          <th class="py-2">Due at page</th>
           <th class="py-2">Component</th>
           <th class="py-2">Next due</th>
           <th class="py-2 w-44 text-right pr-4"></th>
@@ -44,7 +46,16 @@
             {% endif %}
           </td>
           <td class="py-2 text-xs tabular-nums">{{ (s.interval_days|string ~ ' day(s)') if s.interval_days else '—' }}</td>
-          <td class="py-2 text-xs tabular-nums">{{ '{:,}'.format(s.page_threshold) if s.page_threshold else '—' }}</td>
+          {# The target moves with each logged service, so show where it is NOW
+             (meter at last service + threshold) with the repeat under it. #}
+          <td class="py-2 text-xs tabular-nums">
+            {% if s.page_threshold %}
+            {{ '{:,}'.format(s.page_target()) }}
+            {% if s.last_serviced_page_count %}
+            <div class="text-slate-400">every {{ '{:,}'.format(s.page_threshold) }}</div>
+            {% endif %}
+            {% else %}—{% endif %}
+          </td>
           <td class="py-2 text-xs">
             {% if s.component_type %}
             <span class="px-1.5 py-0.5 rounded bg-amber-100 text-amber-700">{{ s.component_type }} ≤ {{ '%g'|format(s.life_threshold) }}%</span>

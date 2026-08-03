@@ -930,6 +930,18 @@ class MaintenanceSchedule(Base):
     name: Mapped[str] = mapped_column(String(200))
     interval_days: Mapped[Optional[int]] = mapped_column(Integer, default=None)
     page_threshold: Mapped[Optional[int]] = mapped_column(Integer, default=None)
+    # Meter reading at the last logged service. This is what lets a page-driven
+    # schedule RECUR: the effective target is ``last_serviced_page_count +
+    # page_threshold`` (see ``page_target``), so a serviced kit is next due one
+    # kit-life further on rather than staying permanently due.
+    #
+    # NULL means "never serviced" -> base 0 -> the target is the configured
+    # threshold, which is exactly what this schedule did before the column
+    # existed. So every existing row keeps firing where it always did, and no
+    # data migration is needed. Rolling ``page_threshold`` itself instead was
+    # rejected: the step would then be read back out of the value it had just
+    # been added to, doubling on every service.
+    last_serviced_page_count: Mapped[Optional[int]] = mapped_column(Integer, default=None)
     # Component-life trigger: when set, the worker opens a maintenance-due alert
     # once the matching component-life Supply row (belt / fuser / laser / drum /
     # PF kit — populated by the Brother provider's maintenance blob) drops to
@@ -949,6 +961,18 @@ class MaintenanceSchedule(Base):
     #   laser  -> Supply(type=other, color=laser)
     #   pf_kit -> Supply(type=other, color in {pf-kit-mp, pf-kit-1})
     COMPONENT_TYPES = ("fuser", "drum", "belt", "laser", "pf_kit")
+
+    def page_target(self) -> Optional[int]:
+        """The meter reading at which this schedule is next due on pages.
+
+        One source of truth for the worker's due-check, the schedules table and
+        the "marked serviced" message -- three places that must agree about
+        when the next service lands, and would otherwise each re-derive it.
+        None when the schedule has no page trigger at all.
+        """
+        if self.page_threshold is None:
+            return None
+        return (self.last_serviced_page_count or 0) + self.page_threshold
 
 
 class MaintenanceRecord(Base):

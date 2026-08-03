@@ -1862,10 +1862,32 @@ def schedule_log_service(
     notes: str = Form(""),
     db: Session = Depends(get_db),
 ):
-    """Operator clicked 'Mark serviced': record a MaintenanceRecord and roll
-    next_due forward by interval_days (when set). The worker's reconcile pass
-    will see next_due > now on the next cycle and auto-resolve the
-    maintenance-due alert."""
+    """Operator clicked 'Mark serviced': record the service and RE-ARM the
+    schedule, then say in the flash exactly when it will next come due.
+
+    A schedule can recur three ways, and this handler must leave at least one of
+    them armed or state plainly that none is:
+
+    * ``interval_days`` -- roll ``next_due`` forward from now.
+    * ``page_threshold`` on a specific printer -- anchor the page target to the
+      meter as it reads now (``last_serviced_page_count``), so the next service
+      lands one threshold further on. ``next_due`` deliberately stays where it
+      is: the worker only reaches a page-gated schedule via ``next_due <= now``,
+      so clearing it here would disarm the page trigger permanently. The
+      resolve comes from the page gate instead -- the schedule stops being
+      counted due, and the reconcile sweep closes its alert.
+    * ``component_type`` -- driven by the part's own life percentage. Nothing to
+      roll; it keeps working either way.
+
+    When none of those can be armed the schedule genuinely cannot recur, and
+    leaving ``next_due`` in the past would hold its maintenance-due alert open
+    forever: the operator marks it serviced, is told it worked, and the alert
+    never clears. (That was the shipped behaviour -- ``next_due`` was rolled
+    ONLY for an interval schedule, and left untouched otherwise.) So
+    ``next_due`` is cleared, which resolves the alert on the next worker cycle,
+    and the flash says the schedule will not become due again rather than
+    reporting a bare success.
+    """
     from datetime import datetime as _dt
     from datetime import timedelta as _td
     from datetime import timezone as _tz
@@ -1877,25 +1899,83 @@ def schedule_log_service(
     if sched is None:
         return _redirect("/manage/maintenance")
     now = _dt.now(_tz.utc)
-    next_due = (
-        now + _td(days=sched.interval_days) if sched.interval_days else None
-    )
-    rec = m.MaintenanceRecord(
-        printer_id=sched.printer_id,
-        type=m.MaintenanceType.scheduled,
-        performed_by=performed_by.strip() or actor.username,
-        performed_at=now,
-        notes=(notes.strip() or sched.name) + f" (schedule #{sched.id})",
-        next_due=next_due,
-    )
-    db.add(rec)
-    if next_due is not None:
-        sched.next_due = next_due
+    printer = db.get(m.Printer, sched.printer_id) if sched.printer_id else None
+
+    recurs: list = []     # how it will come due again, in the operator's words
+    notices: list = []    # what could NOT be re-armed, and why
+    rolled_date = False
+    armed_on_pages = False
+
+    if sched.interval_days:
+        sched.next_due = now + _td(days=sched.interval_days)
+        rolled_date = True
+        recurs.append(f"on {sched.next_due.date().isoformat()}")
+
+    if sched.page_threshold:
+        if printer is None:
+            notices.append(
+                "Its page target could not be moved: this schedule is not tied "
+                "to one printer."
+            )
+        elif printer.page_count is None:
+            notices.append(
+                "Its page target could not be moved: this printer has never "
+                "reported a page count."
+            )
+        else:
+            sched.last_serviced_page_count = printer.page_count
+            armed_on_pages = True
+            recurs.append(
+                f"at {sched.page_target():,} pages "
+                f"(meter now {printer.page_count:,})"
+            )
+
+    if sched.component_type and sched.life_threshold is not None:
+        recurs.append(
+            f"when the {sched.component_type} reaches "
+            f"{sched.life_threshold:g}% or below"
+        )
+
+    if not rolled_date and not armed_on_pages:
+        # Nothing re-armed the date, so a next_due left in the past would keep
+        # this schedule permanently due and its alert permanently open.
+        sched.next_due = None
+
+    if printer is not None:
+        db.add(m.MaintenanceRecord(
+            printer_id=printer.id,
+            type=m.MaintenanceType.scheduled,
+            performed_by=performed_by.strip() or actor.username,
+            performed_at=now,
+            notes=(notes.strip() or sched.name) + f" (schedule #{sched.id})",
+            next_due=sched.next_due,
+        ))
+    else:
+        # maintenance_records.printer_id is NOT NULL -- a service log entry is
+        # per printer by definition, and a model-wide schedule has no single
+        # answer. Previously this inserted NULL and 500'd the whole request.
+        notices.append(
+            "No service record was written: a schedule that is not tied to one "
+            "printer has no printer to log it against."
+        )
+
+    msg = [f"Service logged for '{sched.name}'."]
+    if recurs:
+        msg.append("Next due " + " and ".join(recurs) + ".")
+    else:
+        msg.append(
+            "It will NOT become due again - give it a repeat interval "
+            "(Every N days) to make it recur."
+        )
+    msg.extend(notices)
+
     record(db, request, actor, "maintenance.log",
            target=f"sched:{sched.id} {sched.name}",
-           detail=f"by:{performed_by.strip() or actor.username}")
+           detail=f"by:{performed_by.strip() or actor.username} "
+                  f"next_due:{sched.next_due.date().isoformat() if sched.next_due else '-'} "
+                  f"page_target:{sched.page_target() or '-'}")
     db.commit()
-    _flash(request, f"Service logged for '{sched.name}'.")
+    _flash(request, " ".join(msg))
     return _redirect("/manage/maintenance")
 
 
