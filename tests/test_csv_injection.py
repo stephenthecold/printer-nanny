@@ -26,6 +26,7 @@ from decimal import Decimal
 import pytest
 from fastapi.testclient import TestClient
 
+from central import billing
 from central import models as m
 from central import reports
 from central.api import exports
@@ -282,6 +283,9 @@ def _writer_factories(func) -> set:
 @pytest.mark.parametrize("func", [
     reports.build_monthly_billing_csv,
     exports._csv_response,
+    # The invoice CSV is the third producer, and it carries the same device
+    # strings (printer label, model-derived name, serial) into the same Excel.
+    billing.invoice_csv,
 ])
 def test_neutralisation_lives_in_the_writer_not_the_cells(func):
     """The property that must survive future columns: neutralisation is a

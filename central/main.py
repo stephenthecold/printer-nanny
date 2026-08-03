@@ -25,6 +25,7 @@ from central.api import (
 from central.config import settings
 from central.dashboard import (
     backup_routes,
+    billing as billing_routes,
     installer,
     machines,
     manage,
@@ -80,6 +81,7 @@ app.include_router(dashboard.router)
 app.include_router(manage.router)
 app.include_router(people.router)
 app.include_router(machines.router)
+app.include_router(billing_routes.router)
 app.include_router(settings_routes.router)
 app.include_router(backup_routes.router)
 app.include_router(auth_oidc.router)

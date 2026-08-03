@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import enum
 from datetime import date, datetime, timezone
+from decimal import Decimal
 from typing import Optional
 
 from sqlalchemy import (
@@ -33,6 +34,7 @@ from sqlalchemy import (
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from central.db import Base
+from central.money import Money, Rate
 
 
 def utcnow() -> datetime:
@@ -1823,3 +1825,141 @@ class DirectoryConnection(Base):
         UniqueConstraint("client_id", "provider", name="uq_directory_conn_client_provider"),
         CheckConstraint("provider <> 'manual'", name="ck_directory_conn_not_manual"),
     )
+
+
+# --------------------------------------------------------------------------- #
+# Billing: cost-per-page rate cards
+# --------------------------------------------------------------------------- #
+class MeterClass(str, enum.Enum):
+    """The two things a cost-per-page contract prices separately."""
+
+    mono = "mono"
+    color = "color"
+
+
+class UnsplitPolicy(str, enum.Enum):
+    """What to do with pages from a device that reports no mono/colour split.
+
+    This is a **commercial decision an operator has to make**, which is why it
+    is a stored column rather than an inference. A mono laser genuinely has no
+    colour meter, so "colour = 0" is right for it and catastrophically wrong for
+    an MFP whose colour meter simply failed to decode.
+
+    ``exclude`` (the default) prices nothing it cannot classify: those pages are
+    reported on the invoice as unbilled, with the reason, so the gap is visible
+    rather than absorbed. ``bill_as_mono`` is the operator saying "the devices in
+    this fleet that report no split are mono devices, bill them at the mono
+    rate" -- an explicit, audited choice attached to the rate card.
+
+    It applies **only** when a device reports neither meter. A device reporting
+    mono but not colour is not covered by it: the pages it did not classify are
+    by definition not the mono ones, so calling them mono would be a different
+    and worse guess.
+    """
+
+    exclude = "exclude"
+    bill_as_mono = "bill_as_mono"
+
+
+class BillingRateCard(Base):
+    """One client's cost-per-page contract terms.
+
+    Per client, like everything else commercial here. The **active** card is the
+    one invoices are built from, and at most one card per client may be active
+    (partial unique index below) -- otherwise "which card produced this invoice"
+    has no answer, and two operators reading the same invoice would each be able
+    to point at a different set of rates.
+
+    Superseded cards are kept, inactive, rather than deleted: they are the terms
+    a previous period was billed under.
+    """
+
+    __tablename__ = "billing_rate_cards"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    client_id: Mapped[int] = mapped_column(
+        ForeignKey("clients.id", ondelete="CASCADE"), index=True
+    )
+    name: Mapped[str] = mapped_column(String(200))
+    # ISO 4217 alpha-3, validated on save. Held per card rather than globally
+    # because an MSP with customers either side of a border bills each in its
+    # own currency; nothing here converts between them, and the invoice states
+    # which one it is in rather than assuming the reader knows.
+    currency: Mapped[str] = mapped_column(String(3), default="USD")
+
+    # Base cost per page. Also the rate for every page above the last volume
+    # band, which is what removes the need for an "unbounded tier" row and the
+    # question of what happens when somebody forgets to add one.
+    mono_rate: Mapped[Decimal] = mapped_column(Rate())
+    color_rate: Mapped[Decimal] = mapped_column(Rate())
+
+    # Optional monthly minimum commitment. When the metered work comes to less
+    # than this, the invoice carries an explicit adjustment line -- never a
+    # silently inflated total.
+    minimum_charge: Mapped[Optional[Decimal]] = mapped_column(Money(), default=None)
+
+    unsplit_policy: Mapped[UnsplitPolicy] = mapped_column(
+        _enum(UnsplitPolicy), default=UnsplitPolicy.exclude
+    )
+    active: Mapped[bool] = mapped_column(Boolean, default=True)
+    notes: Mapped[Optional[str]] = mapped_column(Text, default=None)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+
+    client: Mapped[Client] = relationship()
+    tiers: Mapped[list[BillingRateTier]] = relationship(
+        back_populates="rate_card",
+        cascade="all, delete-orphan",
+        order_by="BillingRateTier.up_to",
+    )
+
+    __table_args__ = (
+        UniqueConstraint("client_id", "name", name="uq_rate_card_client_name"),
+        # At most one active card per client. Partial, so any number of retired
+        # cards can coexist -- the same shape as the printer serial index.
+        Index(
+            "uq_rate_card_client_active",
+            "client_id",
+            unique=True,
+            postgresql_where=text("active"),
+            sqlite_where=text("active"),
+        ),
+    )
+
+
+class BillingRateTier(Base):
+    """One volume band of a rate card, for one meter class.
+
+    Bands are **graduated (marginal)**, not cliff-edged: a band covers the pages
+    between the previous band's ceiling and its own, and only those. Pages above
+    the highest band fall back to the card's base rate.
+
+    Graduated rather than "whole volume at the rate its total qualifies for"
+    because the latter is non-monotonic -- printing one more page can make the
+    bill go *down* -- and an invoice nobody can explain is worse than one that is
+    slightly less generous.
+    """
+
+    __tablename__ = "billing_rate_tiers"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    rate_card_id: Mapped[int] = mapped_column(
+        ForeignKey("billing_rate_cards.id", ondelete="CASCADE"), index=True
+    )
+    kind: Mapped[MeterClass] = mapped_column(_enum(MeterClass))
+    #: Inclusive ceiling of this band, in pages.
+    up_to: Mapped[int] = mapped_column(Integer)
+    rate: Mapped[Decimal] = mapped_column(Rate())
+
+    rate_card: Mapped[BillingRateCard] = relationship(back_populates="tiers")
+
+    __table_args__ = (
+        UniqueConstraint("rate_card_id", "kind", "up_to", name="uq_rate_tier_card_kind_upto"),
+        CheckConstraint("up_to > 0", name="ck_rate_tier_up_to_positive"),
+    )
+    # No CHECK on `rate`: fixed-point columns are stored as text on SQLite (see
+    # central.money), where SQLite's type ordering makes `rate >= 0` true for
+    # every text value. A constraint that is real on one backend and vacuous on
+    # the other is worse than none -- it reads as enforcement. Non-negativity is
+    # enforced at the single point that parses operator input
+    # (`money.parse_rate`) and again in the type's bind path, which raises rather
+    # than storing a value that would mis-sort.

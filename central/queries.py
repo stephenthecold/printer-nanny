@@ -3,8 +3,9 @@
 from __future__ import annotations
 
 import ipaddress
+from collections import namedtuple
 from datetime import datetime, timedelta, timezone
-from typing import Optional
+from typing import Iterable, Optional
 
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session, contains_eager
@@ -698,27 +699,132 @@ def page_count_history(db: Session, printer_id: int, limit: int = 90) -> list[m.
     return list(reversed(rows))
 
 
-def _printed_pages_for_printer(rows: "list[tuple[int]]") -> int:
-    """Sum positive page-count deltas across one printer's reading series.
+def positive_delta(values: "Iterable[Optional[int]]") -> int:
+    """Sum positive steps across one cumulative meter series (oldest→newest).
 
-    ``rows`` is oldest→newest ``(page_count,)`` tuples. We only add a delta
-    when it's positive, so a counter reset (firmware reflash) or a printer
-    swap onto the same DB row (page_count drops to a smaller absolute number)
-    contributes 0 for that step instead of a large NEGATIVE number that would
-    cancel out real prints. The trade-off — pages printed between the last
-    reading before a reset and the reset itself are lost — is the safe
-    direction for a billing-adjacent estimate: never invent prints, never go
-    negative.
+    We only add a delta when it's positive, so a counter reset (firmware
+    reflash) or a printer swap onto the same DB row (the meter drops to a
+    smaller absolute number) contributes 0 for that step instead of a large
+    NEGATIVE number that would cancel out real prints. The trade-off — pages
+    printed between the last reading before a reset and the reset itself are
+    lost — is the safe direction for anything billing-adjacent: never invent
+    prints, never go negative.
+
+    ``None`` entries are skipped rather than treated as zero: a poll that
+    reported no meter is silence, not a reading of nought.
     """
     total = 0
     prev: Optional[int] = None
-    for (pc,) in rows:
-        if pc is None:
+    for value in values:
+        if value is None:
             continue
-        if prev is not None and pc > prev:
-            total += pc - prev
-        prev = pc
+        if prev is not None and value > prev:
+            total += value - prev
+        prev = value
     return total
+
+
+def _printed_pages_for_printer(rows: "list[tuple[int]]") -> int:
+    """``positive_delta`` over ``(page_count,)`` tuples, as the ESG rollup reads them."""
+    return positive_delta(pc for (pc,) in rows)
+
+
+#: One printer's metered work over a period. Every field is ``Optional``: a
+#: meter the device never reported in the window is **unknown**, which is not
+#: the same fact as zero and must never be billed as zero. See
+#: ``central.billing`` for what each combination means commercially.
+PeriodMeters = namedtuple("PeriodMeters", "pages mono color")
+
+# The three cumulative meters, and the Reading column each one lives in. Kept as
+# data so adding a fourth meter later is a line here rather than three more
+# copies of the same delta loop.
+_METER_COLUMNS = (
+    ("pages", m.Reading.page_count),
+    ("mono", m.Reading.mono_count),
+    ("color", m.Reading.color_count),
+)
+
+
+def _meter_rows(
+    db: Session, printer_id: int, start: datetime, end: datetime
+) -> "list[tuple]":
+    """The in-window meter series for one printer, oldest→newest.
+
+    **The one place the billing period reads its source.** Today that is the raw
+    ``readings`` table. When the daily rollup lands it preserves ``page_count`` /
+    ``mono_count`` / ``color_count`` per printer per day, which is the same shape
+    this returns — a time-ordered series of *cumulative* meter values — so the
+    rollup can be unioned in here (raw rows inside the retention window, rolled
+    up rows before it) without the delta arithmetic above changing at all. That
+    is deliberately the only coupling: nothing else in the billing path knows
+    where a row came from, and none of it references the rollup table, so this
+    works whether or not that table exists yet.
+    """
+    stmt = (
+        select(m.Reading.page_count, m.Reading.mono_count, m.Reading.color_count)
+        .where(
+            m.Reading.printer_id == printer_id,
+            m.Reading.ts >= start,
+            m.Reading.ts < end,
+        )
+        .order_by(m.Reading.ts.asc(), m.Reading.id.asc())
+    )
+    return list(db.execute(stmt))
+
+
+def _meter_baseline(
+    db: Session, printer_id: int, column, start: datetime
+) -> Optional[int]:
+    """The last value this meter held *before* the period opened, if any.
+
+    Seeding the delta with it is what makes consecutive periods add up to the
+    lifetime total. Without it, every period silently discards the pages printed
+    between its first reading and the period boundary — one poll interval's
+    worth at each month end, and rather more for a printer that was asleep.
+
+    It deliberately does **not** make the meter "known": known-ness is measured
+    strictly inside the window, so a device that stopped reporting its colour
+    meter this month reads as unknown rather than as a suspiciously round zero.
+    """
+    stmt = (
+        select(column)
+        .where(
+            m.Reading.printer_id == printer_id,
+            m.Reading.ts < start,
+            column.is_not(None),
+        )
+        .order_by(m.Reading.ts.desc(), m.Reading.id.desc())
+        .limit(1)
+    )
+    return db.scalar(stmt)
+
+
+def period_meters(
+    db: Session, printer_id: int, start: datetime, end: datetime
+) -> PeriodMeters:
+    """Pages printed by one printer in ``[start, end)``, per meter, reset-safe.
+
+    Returns ``None`` for any meter the device did not report inside the window,
+    and an ``int`` (possibly 0) for one it did. That distinction is the whole
+    point: blank means "we do not know", 0 means "we know it printed nothing".
+
+    Cost: one windowed scan plus at most one ``LIMIT 1`` baseline lookup per
+    meter that is actually present -- so a mono-only device costs three queries,
+    not four. Per printer, like the ESG rollup next door. On a large fleet the
+    right fix is the daily rollup (fewer rows per printer), not batching the
+    baseline into a window function that only one backend has.
+    """
+    rows = _meter_rows(db, printer_id, start, end)
+    out = {}
+    for offset, (name, column) in enumerate(_METER_COLUMNS):
+        values = [row[offset] for row in rows]
+        if all(v is None for v in values):
+            out[name] = None
+            continue
+        baseline = _meter_baseline(db, printer_id, column, start)
+        series = values if baseline is None else [baseline] + values
+        out[name] = positive_delta(series)
+    return PeriodMeters(**out)
 
 
 def sustainability_rollup(

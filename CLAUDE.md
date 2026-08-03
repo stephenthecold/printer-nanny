@@ -548,6 +548,54 @@ enforced; none of them is optional.
   rename silently clear the flag. `trusted` pairs with a hidden `trusted_present`;
   `runtime.save_settings` solves the same problem with its `sections` argument.
   Same failure class as the `save_settings(sections=None)` wipe.
+- **Money is `Decimal` end to end, and `Numeric` alone does not deliver that.**
+  A cost-per-page rate is six decimals and an invoice multiplies it by five-figure
+  page counts, so a float round trip shows up as an invoice whose lines stop
+  adding up to its own total. SQLAlchemy's `Numeric` is exact on Postgres and
+  *not* on SQLite — which is where the whole suite and every dev install run, so
+  the arithmetic would be verified against the wrong storage. `central/money.py`
+  therefore stores NUMERIC on Postgres and a **zero-padded fixed-scale string**
+  on SQLite (padded so text ordering equals numeric ordering), and it overrides
+  `bind_processor`/`result_processor` to stop the impl chain: `Numeric.bind_processor`
+  returns `processors.to_float` on any dialect whose `supports_native_decimal` is
+  False, which is the inherited default on *both* `PGDialect` and `SQLiteDialect`.
+  Neither supported backend reaches that line today; the override is what keeps
+  that from being contingent on a dialect internal nobody re-checks. Two rules
+  come with the SQLite variant: **never SUM/AVG a money column in SQL** (it is
+  text there, and SQLite would coerce to float — all arithmetic happens in Python),
+  and a CHECK on a money column is **vacuous** on SQLite (text always compares
+  greater than a number), so non-negativity is enforced at the parse point instead
+  of pretended in the schema.
+- **The rounding rule is half-up, at the invoice line, once.** Python's default
+  is banker's rounding, which is not what an invoice does or what a customer with
+  a calculator expects. Pages × a six-decimal rate and every graduated band stay
+  at full precision; the single quantization lands on the line amount, and the
+  invoice total is the exact sum of already-rounded lines — so the printed lines
+  always add up to the printed total. Rounding per *page* instead drifts by up to
+  half a cent times the page count: 40,000 pages at 0.0085 bills $400.00 rather
+  than $340.00, a $60 artefact of nothing but the rounding rule.
+- **Billing extends the blank-vs-zero discipline the CSV started.** A meter the
+  device did not report in the period is `None`, never 0 — `queries.period_meters`
+  returns one or the other and the engine has a branch for each. A device
+  reporting mono but not colour is billed for its mono pages only, with the
+  remainder disclosed as *unbilled* on the invoice; a device reporting neither is
+  priced only if the rate card carries an explicit `unsplit_policy` saying so.
+  That policy is a stored operator decision rather than an inference because
+  "colour = 0" is right for a mono laser and catastrophically wrong for an MFP
+  whose colour meter failed to decode — and it deliberately does **not** cover the
+  partial-split case, since pages a device did not call mono are by definition not
+  mono. Period deltas are reset-safe (positive steps only), so a firmware reflash
+  or a replacement device on the same row contributes 0 rather than a large
+  negative that would cancel out a month of real printing.
+- **Volume bands are graduated, and at most one rate card per client is active.**
+  Marginal bands (each covering only the pages between the previous ceiling and
+  its own, with the card's base rate above the highest) rather than
+  whole-volume-at-the-qualifying-rate, because the latter is non-monotonic —
+  printing one more page can lower the bill — and an invoice nobody can explain is
+  worse than one that is slightly less generous. It also removes the unbounded
+  tier row somebody would eventually forget to add. The single active card is a
+  **partial unique index**, not a convention: with two, "which card produced this
+  invoice" has no answer and the rates depend on row order.
 
 ## Dev
 - `pip install -e ".[dev]"` (add `postgres` / `agent` / `agent-mdns` extras as needed).
@@ -1220,6 +1268,17 @@ days-until-order supply forecasts, per-client / per-site rollups, recent
 activity, maintenance schedules, audit log, DB backup/restore, one-screen
 onboarding (claim-code self-enrollment, trusted-subnet auto-approve, bulk
 approvals, per-client defaults).
+
+**Billing** (`/manage/billing`, admin-only — a rate card is a customer's
+commercial terms, not fleet operations): per-client cost-per-page rate cards with
+mono/colour rates, optional graduated volume bands and an optional monthly
+minimum, priced over the reading series into invoice-shaped output (preview +
+CSV, both audited). Invoices are **derived on demand, never stored** — the meters
+are append-only and the card records the terms, so a stored copy is a second
+source of truth that drifts the moment a rate is corrected, and doing it honestly
+would mean immutability, a numbering series and credit notes. The monthly billing
+CSV carries `pages_period`/`mono_period`/`color_period` **beside** the untouched
+lifetime meters, over the last complete calendar month.
 
 **Channels**: email (incl. OAuth SMTP / XOAUTH2), Slack, Teams, FreeScout,
 generic webhook. Attachments supported on email for reports.
