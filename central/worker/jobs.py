@@ -8,7 +8,7 @@ from __future__ import annotations
 from datetime import datetime, timedelta, timezone
 from typing import Optional
 
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
 from central import models as m
@@ -150,6 +150,132 @@ def _printers_in_scope(db: Session, rule: m.AlertRule):
     return db.scalars(stmt)
 
 
+# An occurrence-rate rule's window is operator-typed, and an unbounded one is a
+# scan of every event ever recorded -- the trap FORECAST_HISTORY_WINDOW_DAYS
+# already had to be walked back from, on a table that is likewise append-only.
+# 30 days is well past any plausible "N per day / per shift / per hour" rule and
+# is enforced in BOTH places a window can arrive: the form, so an operator is
+# told, and the evaluator, so a hand-edited row cannot bypass it.
+OCCURRENCE_MAX_WINDOW_MINUTES = 60 * 24 * 30
+
+# LIKE metacharacters in an operator-typed match string. Left unescaped, a code
+# of "100%" silently becomes "match everything", which is a rule that reports a
+# flood the operator never asked about rather than failing visibly.
+_LIKE_ESCAPE = "\\"
+
+
+def _like_contains(needle: str) -> str:
+    """Build a case-insensitive CONTAINS pattern with metacharacters escaped."""
+    escaped = (
+        needle.replace(_LIKE_ESCAPE, _LIKE_ESCAPE * 2)
+        .replace("%", _LIKE_ESCAPE + "%")
+        .replace("_", _LIKE_ESCAPE + "_")
+    )
+    return f"%{escaped}%"
+
+
+def _severities_at_or_above(floor: m.EventSeverity) -> list:
+    return [sev for sev, rank in _SEVERITY_RANK.items() if rank >= _SEVERITY_RANK.get(floor, 0)]
+
+
+def _occurrence_window_minutes(rule: m.AlertRule) -> Optional[int]:
+    """The rule's rolling window, clamped. None when the rule cannot be evaluated.
+
+    A rule with no window (or a nonsensical one) is skipped rather than given a
+    default: the window is half the operator's statement of intent, and inventing
+    it would make a rule fire on a period nobody chose.
+    """
+    raw = rule.window_minutes
+    if raw is None:
+        return None
+    try:
+        minutes = int(raw)
+    except (TypeError, ValueError):
+        return None
+    if minutes <= 0:
+        return None
+    return min(minutes, OCCURRENCE_MAX_WINDOW_MINUTES)
+
+
+def _occurrence_counts(
+    db: Session, rule: m.AlertRule, since: datetime
+) -> dict:
+    """Matching event counts per printer in ``rule``'s scope, since ``since``.
+
+    ONE grouped query per rule, not one COUNT per printer: the printer loop
+    below already runs per rule, and a per-printer count would put a query per
+    printer per rule on every worker cycle (~1,000 on a 500-printer fleet with
+    two rate rules), which is the N+1 shape this codebase keeps having to undo.
+    The scope filter is a join onto printers rather than an ``IN (:ids)`` list
+    because the id list would overrun SQLite's 999-variable limit on a fleet
+    that size -- a failure that only appears in production.
+
+    Bounded by construction: ``since`` is always set, and both filters are
+    parameterised.
+    """
+    stmt = (
+        select(m.PrinterEvent.printer_id, func.count(m.PrinterEvent.id))
+        .join(m.Printer, m.Printer.id == m.PrinterEvent.printer_id)
+        .where(
+            m.PrinterEvent.ts >= since,
+            m.Printer.discovery_state == m.DiscoveryState.approved,
+        )
+        .group_by(m.PrinterEvent.printer_id)
+    )
+    if rule.scope == m.AlertScope.client and rule.scope_id:
+        stmt = stmt.where(m.Printer.client_id == rule.scope_id)
+    elif rule.scope == m.AlertScope.site and rule.scope_id:
+        stmt = stmt.where(m.Printer.site_id == rule.scope_id)
+    elif rule.scope == m.AlertScope.printer and rule.scope_id:
+        stmt = stmt.where(m.Printer.id == rule.scope_id)
+
+    code = (rule.match_code or "").strip()
+    if code:
+        stmt = stmt.where(
+            m.PrinterEvent.code.is_not(None),
+            m.PrinterEvent.code.ilike(_like_contains(code), escape=_LIKE_ESCAPE),
+        )
+    if rule.match_min_severity is not None:
+        stmt = stmt.where(
+            m.PrinterEvent.severity.in_(_severities_at_or_above(rule.match_min_severity))
+        )
+    return {pid: count for pid, count in db.execute(stmt)}
+
+
+def _fmt_window(minutes: Optional[int]) -> str:
+    """A window as an operator would say it: 45m, 6h, 24h, 7d."""
+    if not minutes:
+        return "0m"
+    if minutes % 1440 == 0:
+        return f"{minutes // 1440}d"
+    if minutes % 60 == 0:
+        return f"{minutes // 60}h"
+    return f"{minutes}m"
+
+
+def _occurrence_subject(rule: m.AlertRule) -> str:
+    """What the rule is counting, for an alert title."""
+    code = (rule.match_code or "").strip()
+    return f"'{code}' events" if code else "events"
+
+
+def _occurrence_criteria(rule: m.AlertRule) -> str:
+    """A one-line restatement of what was counted.
+
+    The alert has to be self-explanatory in an email that carries no link back
+    to the rule: "12 events" is unactionable without "...whose code contains
+    'jam', at warning or above".
+    """
+    code = (rule.match_code or "").strip()
+    parts = [
+        f"Counting events whose code contains '{code}'" if code
+        else "Counting every event"
+    ]
+    if rule.match_min_severity is not None:
+        parts.append(f"at {rule.match_min_severity.value} or above")
+    return ", ".join(parts) + "."
+
+
 def _external_ref_from(results, channels) -> Optional[str]:
     """Pull the FreeScout ticket id out of a dispatch result set.
 
@@ -179,12 +305,32 @@ def _find_open_alert(db: Session, dedupe_key: str) -> Optional[m.Alert]:
     )
 
 
+def _flap_cooldown_minutes(runtime: Optional[dict], cap_minutes: Optional[int]) -> int:
+    """The effective flap-cooldown window, in minutes. 0 disables folding.
+
+    ``cap_minutes`` exists for occurrence-rate rules and is the one place the
+    cooldown is allowed to be shortened. See ``_revive_flapping_alert`` for why.
+    """
+    minutes = int((runtime or {}).get("alerts.renotify_cooldown_min", 0) or 0)
+    if cap_minutes is not None:
+        minutes = min(minutes, max(0, int(cap_minutes)))
+    return minutes
+
+
+def _flap_suffix(detail: str, flap_count: int, minutes: int) -> str:
+    """Annotate a detail string with the flap bookkeeping, if it has flapped."""
+    if not flap_count:
+        return detail
+    return "%s (re-opened; flapped %d× within %dm)" % (detail, flap_count, minutes)
+
+
 def _revive_flapping_alert(
     db: Session,
     dedupe_key: str,
     detail: str,
     now: datetime,
     runtime: Optional[dict],
+    cap_minutes: Optional[int] = None,
 ) -> Optional[m.Alert]:
     """Re-open a same-condition alert that resolved inside the flap window.
 
@@ -202,10 +348,21 @@ def _revive_flapping_alert(
     its own schedule; ``last_notified_at`` is left untouched so that clock keeps
     running from the real notification rather than being reset by every flap.
 
+    ``cap_minutes`` shortens the cooldown for a single call, and exists for
+    occurrence-rate rules. Folding asserts "this is the same incident", and for
+    a rate condition that claim is only true while the two firings are counting
+    overlapping events -- i.e. within the rule's own window W. A 10-minute
+    "5 jams" rule under the default 30-minute cooldown would otherwise have a
+    genuinely NEW burst -- five fresh jams sharing not one event with the
+    previous alert -- folded in silently, with no notification: the damping
+    mechanism defeating the very feature that exists to measure repetition.
+    Capping at W makes the two cases distinguishable by the only evidence
+    available, which is whether any counted event is common to both.
+
     Returns the revived alert, or None when nothing is eligible (no recent
     resolve, or the cooldown is disabled).
     """
-    minutes = int((runtime or {}).get("alerts.renotify_cooldown_min", 0) or 0)
+    minutes = _flap_cooldown_minutes(runtime, cap_minutes)
     if minutes <= 0:
         return None
     cutoff = now - timedelta(minutes=minutes)
@@ -227,11 +384,7 @@ def _revive_flapping_alert(
     alert.state = m.AlertState.open
     alert.resolved_at = None
     alert.flap_count = (alert.flap_count or 0) + 1
-    alert.detail = "%s (re-opened; flapped %d× within %dm)" % (
-        detail,
-        alert.flap_count,
-        minutes,
-    )
+    alert.detail = _flap_suffix(detail, alert.flap_count, minutes)
     return alert
 
 
@@ -381,6 +534,8 @@ def _open_alert(
     now: Optional[datetime] = None,
     runtime: Optional[dict] = None,
     stats: Optional[dict] = None,
+    cooldown_cap_min: Optional[int] = None,
+    refresh_detail: bool = False,
 ) -> Optional[m.Alert]:
     """Open an alert if one isn't already live for this dedupe_key. Returns it (or None).
 
@@ -389,11 +544,29 @@ def _open_alert(
     case did a NEW alert open, so callers must not count it as one. ``stats``, if
     given, has its ``flapped`` key incremented so the cycle summary can report
     damping that happened instead of a notification.
+
+    ``refresh_detail`` rewrites a *live* alert's detail from this pass's text
+    without notifying. It is off by default because for a state condition the
+    detail barely moves ("9%" vs "8%"), and on for occurrence-rate rules because
+    there the number IS the alert: dedupe would otherwise leave "10 jams in 24h"
+    on screen while the printer sits at sixty, which is the alert asserting
+    something untrue rather than merely stale. Silent by design -- re-notifying
+    per cycle is the noise every other mechanism here exists to stop, and
+    escalation already covers "still not fixed".
     """
-    if _find_open_alert(db, dedupe_key) is not None:
+    live = _find_open_alert(db, dedupe_key)
+    if live is not None:
+        if refresh_detail:
+            live.detail = _flap_suffix(
+                detail,
+                live.flap_count or 0,
+                _flap_cooldown_minutes(runtime, cooldown_cap_min),
+            )
         return None
     now = now or _now()
-    revived = _revive_flapping_alert(db, dedupe_key, detail, now, runtime)
+    revived = _revive_flapping_alert(
+        db, dedupe_key, detail, now, runtime, cap_minutes=cooldown_cap_min
+    )
     if revived is not None:
         if stats is not None:
             stats["flapped"] = stats.get("flapped", 0) + 1
@@ -453,7 +626,12 @@ def _close_ticket_for(alert: m.Alert, channels) -> Optional[dict]:
         return {"external_ref": ref, "ok": False, "detail": f"unhandled: {exc}"}
 
 
-def _resolve_stale(db: Session, active_keys: set[str], channels=None) -> int:
+def _resolve_stale(
+    db: Session,
+    active_keys: set[str],
+    channels=None,
+    now: Optional[datetime] = None,
+) -> int:
     """Resolve live rule-driven alerts whose condition no longer holds this run.
 
     Covers both cleared conditions (key not re-added) and alerts orphaned by a
@@ -463,7 +641,14 @@ def _resolve_stale(db: Session, active_keys: set[str], channels=None) -> int:
     predicted-depletion alerts own their own lifecycle (check_maintenance_due /
     forecast_supplies) and are skipped; a resolved alert that opened a FreeScout
     ticket gets it auto-closed.
+
+    ``resolved_at`` is stamped from the pass's ``now``, not from a fresh
+    wall-clock read. The flap window is measured backwards from ``now`` against
+    exactly this column, so two different clocks inside one cycle make "did this
+    re-fire inside the cooldown?" depend on how long the cycle took -- and make
+    it unanswerable at all under an injected clock.
     """
+    now = now or _now()
     resolved = 0
     stmt = select(m.Alert).where(m.Alert.state.in_(_LIVE_STATES))
     for alert in db.scalars(stmt):
@@ -474,7 +659,7 @@ def _resolve_stale(db: Session, active_keys: set[str], channels=None) -> int:
             continue
         if alert.dedupe_key not in active_keys:
             alert.state = m.AlertState.resolved
-            alert.resolved_at = _now()
+            alert.resolved_at = now
             _close_ticket_for(alert, channels)
             resolved += 1
     return resolved
@@ -515,6 +700,34 @@ def evaluate_alerts(db: Session, now: Optional[datetime] = None) -> dict:
             if rule.condition_type == m.AlertConditionType.printer_offline
             else None
         )
+
+        # Likewise once per rule: one grouped, windowed count for every printer
+        # in scope, read out of a dict inside the loop below.
+        occurrence_window = occurrence_counts = None
+        occurrence_n = occurrence_floor = 0
+        if rule.condition_type == m.AlertConditionType.occurrence_rate:
+            occurrence_window = _occurrence_window_minutes(rule)
+            occurrence_n = int(rule.threshold or 0)
+            if occurrence_window is None or occurrence_n < 1:
+                # Unusable rule: without a window there is nothing to count
+                # over, and a count of zero is satisfied by every printer that
+                # has ever emitted nothing, forever. Skipped rather than
+                # defaulted -- both halves are the operator's statement of what
+                # "too often" means, and neither can be guessed for them.
+                continue
+            occurrence_counts = _occurrence_counts(
+                db, rule, now - timedelta(minutes=occurrence_window)
+            )
+            # Hysteresis, same philosophy as alerts.supply_deadband_pct: open at
+            # the count, but hold open until it falls a margin BELOW it. A
+            # rolling window sheds occurrences on its own as they age out, so
+            # without a margin every rate alert resolves the moment the oldest
+            # event leaves the window and re-opens on the very next one.
+            occurrence_floor = occurrence_n - (
+                occurrence_n
+                * float(runtime.get("alerts.occurrence_clear_margin_pct", 0) or 0)
+                / 100.0
+            )
 
         for printer in _printers_in_scope(db, rule):
             if rule.condition_type == m.AlertConditionType.printer_offline:
@@ -621,10 +834,52 @@ def evaluate_alerts(db: Session, now: Optional[datetime] = None) -> dict:
                                    stats=stats):
                         opened += 1
 
+            elif rule.condition_type == m.AlertConditionType.occurrence_rate:
+                # Rate, not state: how many matching events landed inside the
+                # rolling window, versus how many the operator called too many.
+                count = (occurrence_counts or {}).get(printer.id, 0)
+                key = f"rule:{rule.id}:printer:{printer.id}:rate"
+                window_label = _fmt_window(occurrence_window)
+                subject = _occurrence_subject(rule)
+                if count >= occurrence_n:
+                    active_keys.add(key)
+                    title = f"Frequent {subject} on {_printer_label(printer)}"
+                    detail = (
+                        f"{count} matching event(s) in the last {window_label} "
+                        f"(threshold {occurrence_n}). {_occurrence_criteria(rule)}"
+                    )
+                    if _open_alert(
+                        db, rule, key, title, detail, printer=printer,
+                        candidates=candidates, now=now, runtime=runtime,
+                        stats=stats,
+                        # Two departures from the other condition types, both
+                        # because a rate alert's content IS its number. See
+                        # _open_alert and _revive_flapping_alert for the full
+                        # reasoning.
+                        cooldown_cap_min=occurrence_window,
+                        refresh_detail=True,
+                    ):
+                        opened += 1
+                elif count > occurrence_floor:
+                    live = _find_open_alert(db, key)
+                    if live is not None:
+                        # Inside the recovery margin with the alert still live:
+                        # keep the key active so the resolve pass leaves it
+                        # alone, and say on the alert that it is receding rather
+                        # than leaving the opening count on screen.
+                        active_keys.add(key)
+                        live.detail = _flap_suffix(
+                            f"{count} matching event(s) in the last {window_label} — "
+                            f"holding open until it drops below {occurrence_floor:.0f} "
+                            f"(threshold {occurrence_n}). {_occurrence_criteria(rule)}",
+                            live.flap_count or 0,
+                            _flap_cooldown_minutes(runtime, occurrence_window),
+                        )
+
     # Pass the unwrapped candidate channels so a resolved alert's FreeScout
     # ticket can be auto-closed (route metadata isn't needed to close a ticket).
     close_channels = [rc.channel for rc in candidates]
-    resolved = _resolve_stale(db, active_keys, close_channels)
+    resolved = _resolve_stale(db, active_keys, close_channels, now=now)
     # Flush the resolutions so the escalation query (run on a session with
     # autoflush off) doesn't re-notify alerts we just resolved this same pass.
     db.flush()

@@ -198,6 +198,13 @@ class AlertConditionType(str, enum.Enum):
     # forecast pass, not by an AlertRule, so it has its own open/resolve
     # lifecycle (auto-resolves when the cartridge is swapped/refilled).
     predicted_depletion = "predicted_depletion"
+    # Rate, not state: N matching printer_events inside a rolling window of
+    # AlertRule.window_minutes. Every other condition here asks "is this true
+    # right now"; this one asks "has this happened too often lately", which is
+    # the difference between "the printer is jammed" (already covered by
+    # error_severity) and "the printer jams ten times a day" (nothing covered
+    # it). threshold = the count N; see AlertRule for the matching columns.
+    occurrence_rate = "occurrence_rate"
 
 
 class AlertState(str, enum.Enum):
@@ -812,6 +819,21 @@ class PrinterEvent(Base):
 
     printer: Mapped[Printer] = relationship(back_populates="events")
 
+    # Occurrence-rate rules ask "how many matching events for this printer since
+    # T", once per rule per cycle, forever. The pre-existing single-column
+    # indexes make that a scan of everything the printer has ever emitted
+    # followed by a filter -- this table is append-only for anything that isn't
+    # a standing snmp_alert condition, so that cost grows without bound as an
+    # install ages. Leading with printer_id and ranging on ts turns it into one
+    # index range per printer.
+    #
+    # Declared here and NOT only in migration 0037: revision 0001 is a
+    # Base.metadata.create_all(), so the ORM metadata is what builds a fresh
+    # database. An index that lives only in the migration is silently absent on
+    # every new install -- exactly the trap ix_suppression_enabled_scope
+    # documents next door.
+    __table_args__ = (Index("ix_printer_events_printer_ts", "printer_id", "ts"),)
+
 
 # --------------------------------------------------------------------------- #
 # Maintenance
@@ -883,6 +905,31 @@ class AlertRule(Base):
     channel_ids: Mapped[Optional[list]] = mapped_column(JSON, default=None)  # [notification_channel.id]
     enabled: Mapped[bool] = mapped_column(Boolean, default=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+
+    # -- occurrence_rate only ------------------------------------------------ #
+    # The rolling window W, in minutes, over which ``threshold`` occurrences are
+    # counted. NULL on every other condition type, and a rule that reaches the
+    # evaluator without one is skipped rather than defaulted: guessing a window
+    # invents the operator's intent, and an unbounded one is the append-only
+    # full-table scan the readings forecast already had to be walked back from.
+    window_minutes: Mapped[Optional[int]] = mapped_column(Integer, default=None)
+    # Which events count. Matched case-insensitively as a SUBSTRING of
+    # PrinterEvent.code -- "jam" catches the agent's "jammed" without an
+    # operator having to know the RFC 3805 spelling. NULL/empty counts every
+    # event in the window. Deliberately NOT matched against PrinterEvent.message:
+    # that text is device-controlled free-form prose, so matching on it would
+    # make a rule's behaviour depend on a string a printer on a customer LAN
+    # chooses, and it cannot be indexed.
+    match_code: Mapped[Optional[str]] = mapped_column(String(80), default=None)
+    # Optional severity floor for what counts. NULL means "any severity",
+    # including info -- several normal conditions (low paper, power-save
+    # offline) are recorded at info, so a rate rule that wants only real faults
+    # sets this to warning. Kept separate from ``severity`` (which is the
+    # severity of the alert this rule RAISES) so an operator can raise a
+    # critical alert about a flood of warnings.
+    match_min_severity: Mapped[Optional[EventSeverity]] = mapped_column(
+        _enum(EventSeverity), default=None
+    )
 
 
 class SuppressionWindow(Base):

@@ -142,6 +142,13 @@ SPECS: List[Spec] = [
          "level climbs this far ABOVE it. Stops a cartridge reading just either "
          "side of the threshold from resolving and re-alerting every cycle. "
          "0 disables the margin (clears the moment it's back over the line)."),
+    Spec("alerts.occurrence_clear_margin_pct", "float", "Alerts",
+         "Occurrence-rate recovery margin (%)", 25.0,
+         "An occurrence-rate alert (“10 jams a day”) opens at its count "
+         "and only clears once the count in the window falls this far BELOW it. "
+         "Without a margin the alert resolves the moment one occurrence ages "
+         "out of the rolling window and re-opens on the very next one — which "
+         "is how flapping was invented. 0 disables the margin."),
     Spec("alerts.renotify_cooldown_min", "int", "Alerts", "Flap cooldown (minutes)", 30,
          "If a condition clears and re-fires within this window, re-open the "
          "original alert instead of raising a new one, and don't re-notify — "

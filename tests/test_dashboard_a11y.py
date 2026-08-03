@@ -46,6 +46,7 @@ PAGES = [
     "/manage/maintenance",
     "/manage/audit",
     "/manage/onboard",
+    "/manage/alert-rules",
     "/manage/suppression",
     "/manage/billing",
     "/security/posture",

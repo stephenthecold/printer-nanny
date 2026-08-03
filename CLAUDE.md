@@ -356,6 +356,48 @@ enforced; none of them is optional.
   severity skip or unconfigured dry-run terminates as `DeliveryStatus.skipped`
   rather than `delivered`. When adding a channel or an early-return, anything
   that reports success without transmitting **must** set `sent=False`.
+- **Occurrence-rate alerting asks a different question from every other rule,
+  and that changes what damping means.** `AlertConditionType.occurrence_rate`
+  counts matching `printer_events` in a rolling window (`alert_rules.
+  window_minutes`, `match_code`, `match_min_severity`; `threshold` is the count
+  N) — "not every jam, but ten jams a day". `printer_events` is the *only*
+  counting source, and it already has the right shape: `_reconcile_events`
+  refreshes a standing snmp_alert condition **in place** and inserts a new row
+  only once it has cleared, so a printer jammed for a day is one occurrence and
+  a printer that jams and is cleared twelve times is twelve. Four rules follow,
+  and each exists because the alert spine's existing damping was built for
+  *state* conditions:
+  - **The count is the alert's content, so dedupe must not freeze it.** A live
+    rate alert's detail is rewritten each cycle with the current count (never
+    re-notified — escalation already covers "still not fixed"). Without that,
+    an alert that opened at 10/day sits in front of the operator saying 10 while
+    the printer is at 60: the alert asserting something untrue, not merely stale.
+  - **The flap cooldown is capped at the rule's own window.** Folding claims
+    "same incident", and for a rate condition that is true exactly while the two
+    firings count overlapping events. A 10-minute "5 jams" rule under the shipped
+    30-minute cooldown would otherwise have a genuinely new burst — five fresh
+    jams sharing not one event with the previous alert — folded in silently, the
+    damping mechanism defeating the feature that exists to measure repetition.
+    The cap can only ever *shorten*; a 24h-window rule keeps the operator's 30m.
+  - **Hysteresis is mandatory here, not optional.** A rolling window sheds
+    occurrences by itself, so with no margin every rate alert resolves the moment
+    the oldest event ages out and re-opens on the next one — flapping by
+    construction. `alerts.occurrence_clear_margin_pct` (default 25) holds it open
+    until the count falls that far below N, and the hold is stated on the alert
+    rather than being silent.
+  - **The window is bounded at both ends.** A rule with no window is skipped
+    rather than defaulted, and `OCCURRENCE_MAX_WINDOW_MINUTES` clamps in the
+    evaluator as well as the form — an unwindowed count is the append-only
+    full-table scan `FORECAST_HISTORY_WINDOW_DAYS` already had to be walked back
+    from. Counting is ONE grouped query per rule (not per printer), joined to
+    `printers` for scope rather than an `IN (:ids)` list that overruns SQLite's
+    999-variable limit on a real fleet. `match_code` is escaped before it reaches
+    a `LIKE`: an unescaped `%` silently turns a narrow rule into "match
+    everything", which fails *open*.
+  Alert rules also finally have an operator surface (`/manage/alert-rules`).
+  There was none before — the four defaults came from `seed.py` and the only way
+  to change a threshold was SQL, which is survivable when a condition is one
+  number and not when it is three decisions with no defensible default.
 - Secret-typed settings + SNMPv3 USM passwords are **encrypted at rest** with
   a Fernet key derived from `SECRET_KEY`. Lazy migration: legacy plaintext is
   swept into encrypted form on every save and at api startup.
@@ -1262,7 +1304,9 @@ transports, **not** against real tenants.
   because a red X for "no Developer account" teaches people to ignore red Xs.
 
 **Core**: central server, multi-tenant model, push-based agents, brand-agnostic
-SNMP, alerting with dedupe + auto-resolve + flap damping, quiet hours + maintenance
+SNMP, alerting with dedupe + auto-resolve + flap damping, occurrence-rate rules
+("10 jams a day") with their own hysteresis and a window-capped cooldown, alert
+rule CRUD at `/manage/alert-rules`, quiet hours + maintenance
 windows, scheduled reports, friendly names,
 days-until-order supply forecasts, per-client / per-site rollups, recent
 activity, maintenance schedules, audit log, DB backup/restore, one-screen
