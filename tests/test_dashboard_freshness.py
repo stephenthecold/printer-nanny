@@ -46,9 +46,30 @@ FRESHNESS_TEMPLATE = (
 # with the code under test. Anchoring here keeps both honest -- the offsets below
 # stay exact for the unit tests, and stay *true* for the rendered ones.
 #
-# Second-scale drift between import and assertion is harmless: every state
-# threshold in this feature is minutes or hours wide.
+# It is re-anchored PER TEST by the autouse fixture below, not just once at
+# import. Import-time alone was not enough: this suite takes ~6 minutes, so by
+# the time a late test rendered, the fixture's "90 seconds old" printer was
+# really ~8 minutes old against the server's clock and a "live" assertion failed
+# as 'lagging'. That is a real property of the feature (it measures the DATA's
+# age, correctly) surfacing as a flaky test, and the flakiness would have grown
+# with every test added ahead of it.
 NOW = datetime.now(timezone.utc)
+
+
+@pytest.fixture(autouse=True)
+def _anchor_now():
+    """Re-anchor ``NOW`` to the real clock for each test.
+
+    The unit tests pass ``now=NOW`` explicitly, so they only need the fixture
+    data and the asserted instant to agree with each other. The HTTP tests need
+    more: ``/fragments/freshness`` renders on the server's own clock, so the
+    data must be genuinely that old *now*, not relative to some earlier instant.
+    Rebinding the module global satisfies both, because every reader looks it up
+    at call time.
+    """
+    global NOW
+    NOW = datetime.now(timezone.utc)
+    yield
 
 
 # --------------------------------------------------------------------------- #
@@ -88,7 +109,7 @@ def _worker_ok(db, at=None):
 
 
 @pytest.fixture()
-def fleet(db):
+def fleet(db, _anchor_now):
     """Two tenants: one current, one four hours behind.
 
     Ages are chosen to straddle the 30-minute default offline grace with room to

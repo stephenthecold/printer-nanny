@@ -68,7 +68,7 @@ log = logging.getLogger("central.main")
 # cookie" is the trigger rather than a path allowlist.
 app = FastAPI(
     title="Printer Nanny",
-    version="0.32.0",
+    version="1.0.0",
     dependencies=[Depends(csrf_protect)],
 )
 # Honor X-Forwarded-Proto/For from the reverse proxy so request.base_url returns
