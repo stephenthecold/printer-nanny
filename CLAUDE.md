@@ -213,9 +213,15 @@ enforced; none of them is optional.
   **Quote the machine with the number**, always — a bare figure is
   unfalsifiable, which is how a run on a *busy* box (9min) once got reported as
   a regression against a documented one.
-  - **Measured 2026-08-03 on `claude/completion-program` @ `4c68f40`**, Apple M2
-    Max (12 cores), macOS 26.5.2, Python 3.9.6, SQLite, unpiped:
-    **2534 passed / 35 skipped in 189s (3:08)**, exit 0. That is 2569 collected.
+  - **Measured 2026-08-03 on `claude/completion-program` @ `b970ba5`**, Apple M2
+    Max (12 cores), macOS 26.5.2, Python 3.9.6, unpiped, both backends:
+    - SQLite: **2811 passed / 39 skipped in 390s (6:30)**, exit 0.
+    - Postgres 16 (throwaway container): **2825 passed / 25 skipped in 459s
+      (7:39)**, exit 0.
+    Both collect 2850. The skip counts differ *by design* and the totals
+    reconcile: `postgres_only` tests skip on SQLite and `sqlite_only` tests skip
+    on Postgres. A run where both numbers match is the thing to distrust — it
+    means one of the two marks stopped being applied.
   - The GitHub-runner (~2.5min) and 4-vCPU-container (~6-7min) figures below
     this line were measured at ~1770 tests and have **not** been re-measured
     since the suite grew by ~45%; treat them as stale, not as targets.
