@@ -52,6 +52,9 @@ PAGES = [
     "/manage/suppression",
     "/manage/billing",
     "/supplies/reorder",
+    # Carries the "add an expected yield" form -- five controls, one of them a
+    # select whose only visible context is the column it sits in.
+    "/supplies/yield",
     "/manage/definitions",
     "/security/posture",
     "/admin/backup",

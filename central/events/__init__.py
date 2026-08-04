@@ -32,6 +32,8 @@ from central.events.emit import (
     emit_alert_resolved,
     emit_printer_offline,
     emit_supply_reorder_recommended,
+    emit_supply_replaced,
+    emit_supply_yield_below_expected,
     scope_allows,
     subscriptions_for,
 )
@@ -47,6 +49,8 @@ __all__ = [
     "emit_alert_resolved",
     "emit_printer_offline",
     "emit_supply_reorder_recommended",
+    "emit_supply_replaced",
+    "emit_supply_yield_below_expected",
     "scope_allows",
     "subscriptions_for",
     "validate_url",

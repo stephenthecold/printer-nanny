@@ -122,6 +122,37 @@ def min_raw_days() -> int:
     return max(FORECAST_HISTORY_WINDOW_DAYS, RUNWAY_HISTORY_WINDOW_DAYS) + 1
 
 
+def effective_raw_days(runtime: Optional[Dict[str, Any]]) -> int:
+    """``retention.raw_days``, coerced and floored -- the value actually in force.
+
+    Extracted so it has exactly one spelling. ``roll_up_readings`` decides which
+    days are rolled up; ``central.supply_yield`` has to know the same boundary,
+    because it reads rollups below it and raw readings above it and an overlap
+    would double-count a day's pages into a cartridge's yield while a gap would
+    silently drop them. Two copies of "90, unless it was typed wrong, unless the
+    floor" is exactly the drift this project keeps paying for.
+
+    Says so out loud when it clamps, every time, rather than in silence: an
+    operator who typed 7 needs to know why they are still getting 31 days, and a
+    guard nobody can observe is indistinguishable from no guard at all.
+    """
+    rt = runtime or {}
+    try:
+        raw_days = int(rt.get("retention.raw_days", 90) or 90)
+    except (TypeError, ValueError):
+        raw_days = 90
+    floor = min_raw_days()
+    if raw_days < floor:
+        log.warning(
+            "retention.raw_days=%s is below the %s-day floor the supply forecast "
+            "reads over; using %s. Lower it further only by narrowing the "
+            "forecast window first.",
+            raw_days, floor, floor,
+        )
+        return floor
+    return raw_days
+
+
 def _now() -> datetime:
     return datetime.now(timezone.utc)
 
@@ -409,22 +440,10 @@ def roll_up_readings(db: Session, now: Optional[datetime] = None) -> Dict[str, A
     if not rt.get("retention.rollup_enabled", True):
         return {}
 
-    try:
-        raw_days = int(rt.get("retention.raw_days", 90) or 90)
-    except (TypeError, ValueError):
-        raw_days = 90
-    floor = min_raw_days()
-    if raw_days < floor:
-        # Said out loud, every pass, rather than clamped in silence: an operator
-        # who typed 7 needs to know why they are still getting 31 days, and a
-        # guard nobody can observe is indistinguishable from no guard at all.
-        log.warning(
-            "retention.raw_days=%s is below the %s-day floor the supply forecast "
-            "reads over; using %s. Lower it further only by narrowing the "
-            "forecast window first.",
-            raw_days, floor, floor,
-        )
-        raw_days = floor
+    # Coerced and floored in one place, shared with central.supply_yield -- which
+    # reads rollups below this boundary and raw readings above it, so the two
+    # must agree on where it is.
+    raw_days = effective_raw_days(rt)
     try:
         budget = max(1, int(rt.get("retention.max_batches_per_cycle", 200) or 200))
     except (TypeError, ValueError):

@@ -36,6 +36,7 @@ from central.dashboard import (
     remote as remote_routes,
     routes as dashboard,
     settings_routes,
+    yield_routes,
 )
 from central.dashboard.templating import render_csrf_error
 from central.db import create_all, get_db
@@ -67,7 +68,7 @@ log = logging.getLogger("central.main")
 # cookie" is the trigger rather than a path allowlist.
 app = FastAPI(
     title="Printer Nanny",
-    version="0.31.0",
+    version="0.32.0",
     dependencies=[Depends(csrf_protect)],
 )
 # Honor X-Forwarded-Proto/For from the reverse proxy so request.base_url returns
@@ -179,6 +180,7 @@ app.include_router(billing_routes.router)
 app.include_router(events_routes.router)
 app.include_router(definitions.router)
 app.include_router(remote_routes.router)
+app.include_router(yield_routes.router)
 app.include_router(settings_routes.router)
 app.include_router(backup_routes.router)
 app.include_router(auth_oidc.router)

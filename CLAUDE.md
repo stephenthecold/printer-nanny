@@ -106,6 +106,9 @@ enforced; none of them is optional.
     the `Decimal`-end-to-end money type that makes it exact on SQLite too.
   - `reorder.py` — supply reorder **recommendations**, computed on read, stored
     nowhere. Recommend-only is structural, not a matter of discipline.
+  - `supply_yield.py` — **yield-gap / non-OEM detection**: pages per cartridge,
+    measured between replacements, against what a cartridge should deliver.
+    Measurements persist (`supply_cycles`); the verdict is computed on read.
   - `retention.py` — raw-reading retention + the daily rollup.
   - `collector.py` — **collector redundancy**: the per-subnet lease that lets a
     standby agent take over and proves two never collect at once.
@@ -187,7 +190,7 @@ enforced; none of them is optional.
   - `mdns.py` — optional Bonjour/DNS-SD discovery (`agent[mdns]` extras).
   - `updater.py` — self-update via `update_agent` command; writes
     `.pn-update-result.json` so the dashboard can show success/failure.
-- `migrations/` — Alembic environment + versions (0001 → 0041). Revision 0001 is
+- `migrations/` — Alembic environment + versions (0001 → 0043). Revision 0001 is
   `Base.metadata.create_all()`, so **the ORM metadata is what builds a fresh DB** —
   an index declared only in a later migration is silently absent on new installs.
   Declare indexes in the model's `__table_args__` and mirror them in the migration.
@@ -938,6 +941,48 @@ enforced; none of them is optional.
   rename silently clear the flag. `trusted` pairs with a hidden `trusted_present`;
   `runtime.save_settings` solves the same problem with its `sections` argument.
   Same failure class as the `save_settings(sections=None)` wipe.
+- **Yield-gap detection measures a cartridge, and the finding is an accusation**
+  (`central/supply_yield.py`, `supply_cycles`, `supply_yield_expectations`,
+  `/supplies/yield`). A persistent shortfall in pages-per-cartridge is the
+  non-OEM / refill signal, and a false positive tells an MSP their customer buys
+  grey-market consumables. Everything below follows from that asymmetry:
+  - **A cartridge change is a level that RISES**, LibreNMS's cheap trick, and the
+    only signal a printer gives. That test is `supplies.refill_boundaries`,
+    shared verbatim with the depletion forecast — which needs the *last*
+    boundary where this needs *every* one. Two copies could disagree about where
+    a cartridge started and credit its pages to its predecessor, with nothing
+    anywhere reporting it.
+  - **Persist the measurement, compute the judgement**, the same split as
+    `reorder.py`. A cycle cannot be recomputed once its raw readings age out (a
+    drum outlives the 90-day window), so it is a row; the verdict is derived on
+    read, so a threshold change lands on the next render and there is no stale
+    verdict to reconcile when a cartridge is swapped.
+  - **A day is read from exactly one source, and never from none.** Rollups
+    below `retention.effective_raw_days`, raw readings above it — *plus* raw
+    readings below it for days no rollup covers, because deletion ships OFF and
+    the rollup pass works forward from a watermark a bounded number of
+    printer-days per cycle. Reading only rollups there discarded real history
+    silently: the cartridges with the most history were measured over the least
+    of it. Found by the end-to-end smoke, invisible to every unit test above it.
+  - **Expected yield has two sources and states which one it used.** An
+    operator's datasheet figure per model tag beats a fleet-derived MEDIAN
+    across *other* printers of the same model. The subject is excluded from its
+    own baseline, or a printer running non-OEM calibrates the expectation to
+    itself. The baseline's weakness is stated in the UI rather than buried: a
+    fleet where every unit of a model runs non-OEM calibrates to non-OEM and
+    finds nothing.
+  - **Absence is neither a finding nor a clean bill of health.** Under
+    `yield.min_cycles` (3) completed cartridges the row reads *insufficient
+    data* and shows the measurement without a verdict; with no expectation it
+    reads *no expected yield*, never *within expected*. Same correction the
+    security-posture report needed. Thresholds are clamped on read, so a
+    hand-edited `app_settings` row cannot turn one cartridge into a finding.
+  - **The replacement log is deliberately NOT written to `printer_events`.**
+    That table is the counting source for occurrence-rate rules, and a rule
+    matching everything above a severity would start counting toner changes as
+    printer faults — a new feature silently changing an existing one's numbers.
+  - Staff-only, like `/security/posture` and for the same reason: every useful
+    response to a shortfall is an MSP conversation, not a self-service page.
 - **Money is `Decimal` end to end, and `Numeric` alone does not deliver that.**
   A cost-per-page rate is six decimals and an invoice multiplies it by five-figure
   page counts, so a float round trip shows up as an invoice whose lines stop
@@ -1715,6 +1760,24 @@ matter of discipline. No SKU catalogue, no inventory, no PO generation, no order
 state machine — a human places every order, and an `supply.reorder_recommended`
 event lets an MSP's own ERP act on it. If a change starts to need an order
 lifecycle, that is the signal it is out of scope.
+
+**Cartridge yield** (`/supplies/yield`, **staff only**): pages actually
+delivered per cartridge, measured between one replacement and the next, against
+what a cartridge for that model should deliver. A persistent shortfall is the
+non-OEM / refill signal — the one thing an MSP cannot otherwise see, because
+every individual reading looks entirely normal. Replacements are detected from
+the supply level RISING (`supplies.refill_boundaries`, shared with the depletion
+forecast), the interval's pages come from the same rollup-then-raw series
+billing reads, and expected yield comes from an operator-entered datasheet
+figure per model tag or, failing that, the fleet median across *other* printers
+of the same model. Presented as **"yield below expected"** with the non-OEM
+reading offered as an interpretation next to the things that equally explain it;
+the threshold is operator-settable and defaults to a conservative 30% over at
+least 3 completed cartridges. Below that it says *insufficient data* and shows
+the measurement without a verdict. Two opt-in events
+(`supply.replaced`, `supply.yield_below_expected`) let an ERP act on it. See the
+conventions for why absence is reported as itself, why the subject printer is
+excluded from its own baseline, and why nothing lands in `printer_events`.
 
 **Device security posture** (`/security/posture`, **staff only**, with a CSV
 export that enforces the same by 403 rather than by tenant-scoping — an export

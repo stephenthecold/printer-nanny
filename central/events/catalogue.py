@@ -151,6 +151,41 @@ CATALOGUE: Dict[str, EventType] = {
                 "site.id", "site.name",
             ),
         ),
+        EventType(
+            "supply.replaced",
+            1,
+            "A cartridge was replaced: the supply level rose, which is the only "
+            "replacement signal a printer gives. Carries what the cartridge that "
+            "came OUT delivered -- pages, level consumed, how long it lasted.",
+            (
+                "printer.id", "printer.name", "printer.ip", "printer.model",
+                "printer.serial", "printer.location",
+                "supply.type", "supply.color",
+                "cycle.id", "cycle.started_at", "cycle.ended_at", "cycle.pages",
+                "cycle.start_level_pct", "cycle.min_level_pct",
+                "cycle.consumed_pct", "cycle.observed_yield_pages",
+                "cycle.complete", "site.id", "site.name",
+            ),
+        ),
+        EventType(
+            "supply.yield_below_expected",
+            1,
+            "A supply slot's measured pages-per-cartridge is persistently below "
+            "what a cartridge for this model is expected to deliver. A "
+            "MEASUREMENT, not a verdict: a shortfall is consistent with non-OEM "
+            "or refilled cartridges, and equally with heavy page coverage. The "
+            "expectation's source is carried so a consumer can weigh it.",
+            (
+                "printer.id", "printer.name", "printer.ip", "printer.model",
+                "printer.serial", "printer.location",
+                "supply.type", "supply.color",
+                "yield.observed_pages", "yield.expected_pages",
+                "yield.expected_source", "yield.expected_detail",
+                "yield.shortfall_pct", "yield.threshold_pct",
+                "yield.cycles_counted", "yield.last_replaced_at",
+                "site.id", "site.name",
+            ),
+        ),
     )
 }
 

@@ -1,0 +1,272 @@
+{% extends "base.html" %}
+{#
+  Cartridge yield — pages actually delivered, against pages expected.
+
+  Two things about the WORDING here are load-bearing, not stylistic:
+
+  * The verdict column says "below expected", never "non-OEM". A shortfall is a
+    measurement; non-OEM is one reading of it, and so are heavy page coverage, a
+    starter cartridge, and a datasheet quoting 5% coverage nobody prints at. The
+    interpretation is offered once, in prose, next to the things that would
+    equally explain it — because a page that leads with the accusation is a page
+    that gets one MSP into one very bad conversation.
+  * "Insufficient data" and "no expected yield" are shown as themselves and
+    counted separately from findings. Absence is never rendered as a clean bill
+    of health, and never as a finding either.
+
+  There is deliberately no freshness strip: unlike the reorder list, nothing here
+  depends on today's supply levels. A cartridge that ran short last March ran
+  short whether or not the fleet polled this morning.
+#}
+{% import "_components.html" as c %}
+{% block title %}Cartridge yield · {{ app.name or 'Printer Nanny' }}{% endblock %}
+{% block body %}
+
+{{ c.page_title(
+     'Cartridge yield',
+     'Pages each cartridge actually delivered, measured between one replacement and the next.') }}
+
+{% if flash %}
+  <div class="{{ c.note('info', 'mb-4') }}">{{ flash }}</div>
+{% endif %}
+
+<div class="grid sm:grid-cols-2 lg:grid-cols-4 gap-4 mb-5">
+  <div class="{{ c.card_cls('sm') }}">
+    <div class="text-2xl font-semibold tabular-nums {{ 'text-red-700' if summary.below else 'text-slate-800' }}">{{ summary.below }}</div>
+    <div class="text-xs text-slate-500">below expected</div>
+  </div>
+  <div class="{{ c.card_cls('sm') }}">
+    <div class="text-2xl font-semibold text-slate-800 tabular-nums">{{ summary.within }}</div>
+    <div class="text-xs text-slate-500">within expected</div>
+  </div>
+  <div class="{{ c.card_cls('sm') }}">
+    <div class="text-2xl font-semibold text-slate-800 tabular-nums">{{ summary.no_verdict }}</div>
+    <div class="text-xs text-slate-500">not enough evidence to judge</div>
+  </div>
+  <div class="{{ c.card_cls('sm') }}">
+    <div class="text-2xl font-semibold text-slate-800 tabular-nums">{{ summary.printers }}</div>
+    <div class="text-xs text-slate-500">printer(s) measured</div>
+  </div>
+</div>
+
+{# The rules are stated on the page rather than buried in Settings: a finding an
+   operator cannot check the derivation of is a finding they end up ignoring. #}
+<div class="{{ c.note('muted', 'mb-5') }}">
+  A cartridge slot is flagged when its median measured yield is
+  <strong class="tabular-nums">{{ '%.0f'|format(thresholds.shortfall_pct) }}%</strong> or more below expected,
+  over at least <strong class="tabular-nums">{{ thresholds.min_cycles }}</strong> completed cartridges,
+  counting only cartridges that used at least
+  <strong class="tabular-nums">{{ '%.0f'|format(thresholds.min_consumed_pct) }}%</strong> of their level.
+  A fleet baseline needs <strong class="tabular-nums">{{ thresholds.baseline_min_cycles }}</strong> cartridges
+  from <strong class="tabular-nums">{{ thresholds.baseline_min_printers }}</strong> other printers of the same model.
+  {% if user.role.value == 'admin' %}
+  <a href="/settings?group=alerts" class="text-sky-700 hover:underline">Change these in Settings</a>.
+  {% endif %}
+  <span class="block mt-1">
+    <strong>A shortfall is a measurement, not a verdict.</strong> Non-OEM or refilled cartridges
+    are the usual explanation, and so are heavy page coverage, a cartridge fitted part-used,
+    a starter cartridge, and a rated yield quoted at coverage nobody prints at. Check what was
+    actually fitted before raising it with a customer.
+  </span>
+</div>
+
+{% if clients|length > 1 %}
+<form method="get" action="/supplies/yield" class="flex items-end gap-2 mb-5 flex-wrap">
+  <div class="w-64 max-w-full">
+    {% call c.select_field('client_id', 'Client', size='sm') %}
+      <option value="">All clients</option>
+      {% for cl in clients %}
+      <option value="{{ cl.id }}" {% if selected_client_id == cl.id %}selected{% endif %}>{{ cl.name }}</option>
+      {% endfor %}
+    {% endcall %}
+  </div>
+  <button class="{{ c.btn('neutral', 'sm') }}">Filter</button>
+  {% if selected_client_id %}
+  <a href="/supplies/yield" class="{{ c.btn('subtle', 'sm') }}">Clear</a>
+  {% endif %}
+</form>
+{% endif %}
+
+{# ------------------------------------------------------- measured slots -- #}
+<div class="{{ c.card_cls() }} mb-8">
+  {{ c.section_title('Measured supply slots') }}
+  <div class="{{ c.table_wrap() }}">
+    <table class="{{ c.table_cls() }}">
+      <thead class="{{ c.thead_cls() }}">
+        <tr>
+          <th class="{{ c.th_cls() }}">Printer</th>
+          <th class="{{ c.th_cls() }}">Supply</th>
+          <th class="{{ c.th_cls('right') }}">Cartridges</th>
+          <th class="{{ c.th_cls('right') }}">Measured yield</th>
+          <th class="{{ c.th_cls('right') }}">Expected</th>
+          <th class="{{ c.th_cls() }}">Assessment</th>
+        </tr>
+      </thead>
+      <tbody>
+        {% for row in rows %}
+        <tr class="{{ c.tr_cls() }}">
+          <td class="{{ c.td_cls() }}">
+            <a href="/printers/{{ row.printer_id }}" class="font-medium hover:underline">{{ row.printer_label }}</a>
+            <div class="text-xs text-slate-400">{{ row.client_name }}{% if row.site_name %} · {{ row.site_name }}{% endif %}</div>
+          </td>
+          <td class="{{ c.td_cls() }}">
+            {{ row.supply_label }}
+            {% if row.model %}<div class="text-xs text-slate-400">{{ row.model }}</div>{% endif %}
+          </td>
+          <td class="{{ c.td_cls('right', 'tabular-nums') }}">
+            {{ row.cycles_counted }}
+            {% if row.cycles_total != row.cycles_counted %}
+            <span class="text-xs text-slate-400">of {{ row.cycles_total }}</span>
+            {% endif %}
+          </td>
+          <td class="{{ c.td_cls('right', 'tabular-nums') }}">
+            {# The measurement is shown even when there is not enough of it to
+               judge — withholding it would hide the only thing an operator can
+               go and check. What is withheld is the VERDICT. #}
+            {% if row.observed_pages is not none %}
+              {{ '{:,.0f}'.format(row.observed_pages) }}
+            {% else %}<span class="text-slate-400">—</span>{% endif %}
+          </td>
+          <td class="{{ c.td_cls('right', 'tabular-nums') }}">
+            {% if row.expected.known %}
+              {{ '{:,.0f}'.format(row.expected.pages) }}
+              <div class="text-xs text-slate-400">
+                {% if row.expected.source == source_operator %}entered
+                {% elif row.expected.source == source_fleet %}fleet median (n={{ row.expected.sample_cycles }})
+                {% endif %}
+              </div>
+            {% else %}<span class="text-slate-400">—</span>{% endif %}
+          </td>
+          <td class="{{ c.td_cls() }}">
+            {% if row.verdict == verdict_below %}
+              {{ c.badge('%.0f%% below expected'|format(row.shortfall_pct), 'error') }}
+            {% elif row.verdict == verdict_within %}
+              {{ c.badge('within expected', 'ok') }}
+            {% elif row.verdict == verdict_insufficient %}
+              {{ c.badge('insufficient data', 'muted') }}
+            {% else %}
+              {{ c.badge('no expected yield', 'muted') }}
+            {% endif %}
+            <div class="text-xs text-slate-500 mt-0.5">{{ row.reasons | join('; ') }}</div>
+          </td>
+        </tr>
+        {% else %}
+          {{ c.empty_row(6, 'No completed cartridge cycles yet. A slot appears here once a supply level has been seen to RISE — that is the only signal a printer gives that a cartridge was changed.') }}
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+</div>
+
+{# ------------------------------------------------ replacement history --- #}
+<div class="{{ c.card_cls() }} mb-8">
+  {{ c.section_title('Recent cartridge replacements') }}
+  <p class="text-xs text-slate-500 mb-3">
+    Detected from the supply level rising. This is what makes the yields above checkable —
+    a cartridge somebody swapped early looks exactly like a cartridge that ran short.
+  </p>
+  <div class="{{ c.table_wrap() }}">
+    <table class="{{ c.table_cls() }}">
+      <thead class="{{ c.thead_cls() }}">
+        <tr>
+          <th class="{{ c.th_cls() }}">Replaced</th>
+          <th class="{{ c.th_cls() }}">Printer</th>
+          <th class="{{ c.th_cls() }}">Supply</th>
+          <th class="{{ c.th_cls('right') }}">Pages</th>
+          <th class="{{ c.th_cls('right') }}">Level used</th>
+          <th class="{{ c.th_cls('right') }}">Scaled to a full cartridge</th>
+        </tr>
+      </thead>
+      <tbody>
+        {% for cy in replacements %}
+        <tr class="{{ c.tr_cls() }}">
+          <td class="{{ c.td_cls() }} whitespace-nowrap">{{ cy.ended_at.strftime('%Y-%m-%d') if cy.ended_at else '—' }}</td>
+          <td class="{{ c.td_cls() }}">
+            <a href="/printers/{{ cy.printer_id }}" class="hover:underline">{{ cy.printer.display_name or cy.printer.model or cy.printer.ip }}</a>
+          </td>
+          <td class="{{ c.td_cls() }}">{{ (cy.color ~ ' ' ~ cy.supply_type) if cy.color else cy.supply_type }}</td>
+          <td class="{{ c.td_cls('right', 'tabular-nums') }}">{{ '{:,}'.format(cy.pages or 0) }}</td>
+          <td class="{{ c.td_cls('right', 'tabular-nums') }}">{{ '%.0f'|format(consumed_pct(cy)) }}%</td>
+          <td class="{{ c.td_cls('right', 'tabular-nums') }}">
+            {% set oy = observed_yield(cy) %}
+            {% if oy is not none %}{{ '{:,.0f}'.format(oy) }}{% else %}<span class="text-slate-400">—</span>{% endif %}
+          </td>
+        </tr>
+        {% else %}
+          {{ c.empty_row(6, 'No cartridge replacements recorded yet.') }}
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+</div>
+
+{# --------------------------------------------------- expected yields ---- #}
+<div class="{{ c.card_cls() }} mb-8">
+  {{ c.section_title('Expected yields') }}
+  <p class="text-xs text-slate-500 mb-3">
+    The rated pages-per-cartridge off the datasheet. An entered figure beats the fleet baseline,
+    because it is a fact about the hardware rather than a comparison against its peers — and a fleet
+    where every printer of a model runs the same non-OEM cartridge would calibrate its own baseline
+    to that and find nothing. Matched as a case-insensitive part of the printer's model string,
+    longest match wins, and two equally specific figures are refused rather than guessed between.
+  </p>
+  <div class="{{ c.table_wrap('mb-4') }}">
+    <table class="{{ c.table_cls() }}">
+      <thead class="{{ c.thead_cls() }}">
+        <tr>
+          <th class="{{ c.th_cls() }}">Model contains</th>
+          <th class="{{ c.th_cls() }}">Supply</th>
+          <th class="{{ c.th_cls('right') }}">Expected pages</th>
+          <th class="{{ c.th_cls() }}">Note</th>
+          <th class="{{ c.th_cls('right') }}"><span class="sr-only">Actions</span></th>
+        </tr>
+      </thead>
+      <tbody>
+        {% for ex in expectations %}
+        <tr class="{{ c.tr_cls() }}">
+          <td class="{{ c.td_cls() }} font-mono text-xs">{{ ex.model_tag }}</td>
+          <td class="{{ c.td_cls() }}">{{ (ex.color ~ ' ' ~ ex.supply_type) if ex.color else ex.supply_type ~ ' (any colour)' }}</td>
+          <td class="{{ c.td_cls('right', 'tabular-nums') }}">{{ '{:,}'.format(ex.expected_pages) }}</td>
+          <td class="{{ c.td_cls('left', 'text-xs text-slate-500') }}">{{ ex.note or '' }}</td>
+          <td class="{{ c.td_cls('right') }} whitespace-nowrap">
+            {# The value travels in a data- attribute and is read through
+               dataset: a Jinja expression inside an on* handler is a script
+               context, where autoescaping is decoded back to a quote before the
+               handler compiles. #}
+            <form method="post" action="/supplies/yield/expectations/{{ ex.id }}/delete" class="inline"
+                  data-tag="{{ ex.model_tag }}"
+                  onsubmit="return confirm('Remove the expected yield for ' + this.dataset.tag + '? Measurements are kept.');">
+              {{ csrf_field() }}
+              <button type="submit" class="{{ c.btn('danger', 'sm') }}"
+                      aria-label="Delete expected yield for {{ ex.model_tag }} {{ ex.supply_type }}">Delete</button>
+            </form>
+          </td>
+        </tr>
+        {% else %}
+          {{ c.empty_row(5, 'None entered — slots fall back to the fleet baseline, where there are enough comparable cartridges to derive one.') }}
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+
+  <form method="post" action="/supplies/yield/expectations" class="grid gap-3 sm:grid-cols-2">
+    {{ csrf_field() }}
+    {{ c.field('model_tag', 'Model contains', required=True, placeholder='MFC-L8900',
+               help='Case-insensitive, at least 3 characters. Matched against the model string the device reports.') }}
+    {% call c.select_field('supply_type', 'Supply type', required=True) %}
+      {% for st in supply_types %}
+      <option value="{{ st }}" {% if st == 'toner' %}selected{% endif %}>{{ st }}</option>
+      {% endfor %}
+    {% endcall %}
+    {{ c.field('color', 'Colour', placeholder='black',
+               help='Leave blank to cover every colour of this supply type.') }}
+    {{ c.field('expected_pages', 'Expected pages', type='number', min=1, required=True,
+               placeholder='3000', help='Rated yield per cartridge, off the datasheet.') }}
+    {{ c.field('note', 'Note', placeholder='Standard-yield TN-421, 5% coverage',
+               extra_cls='sm:col-span-2') }}
+    <div class="sm:col-span-2">
+      <button class="{{ c.btn('primary') }}">Save expected yield</button>
+    </div>
+  </form>
+</div>
+{% endblock %}
