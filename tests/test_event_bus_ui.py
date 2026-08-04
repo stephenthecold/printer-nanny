@@ -611,18 +611,54 @@ def test_the_migration_builds_what_create_all_builds(tmp_path, db):
 
     tables = ("event_subscriptions", "outbound_events", "event_deliveries")
 
-    engine = create_engine("sqlite:///%s" % (tmp_path / "migrated.sqlite3"))
-    with engine.begin() as conn:
-        # The FK parent only; everything else is the migration's job.
-        m.Client.__table__.create(conn)
-        ctx = MigrationContext.configure(conn)
-        with Operations.context(ctx):
-            module.upgrade()
-        migrated = {t: _schema(sa_inspect(conn), t) for t in tables}
-
     from central.db import engine as orm_engine
 
-    fresh = {t: _schema(sa_inspect(orm_engine), t) for t in tables}
+    # BOTH sides must be built on the SAME backend. This previously hardcoded a
+    # SQLite engine for the migration side while ``create_all`` ran on whatever
+    # the suite is pointed at, so under PN_TEST_DATABASE_URL it compared a
+    # SQLite schema against a Postgres one and reported ``DATETIME`` vs
+    # ``TIMESTAMP`` as drift. On SQLite the bug was invisible because both sides
+    # happened to be SQLite -- which is the same shape as every other defect
+    # running the suite on Postgres has surfaced.
+    #
+    # Building the migration side on a schema of its own (Postgres) or a file
+    # (SQLite) keeps it isolated from the fixture's tables either way.
+    if orm_engine.dialect.name == "sqlite":
+        engine = create_engine("sqlite:///%s" % (tmp_path / "migrated.sqlite3"))
+        cleanup = None
+    else:
+        engine = orm_engine
+        cleanup = tables
+
+    try:
+        with engine.begin() as conn:
+            if cleanup:
+                # Same database as the fixture, so drop anything the ORM already
+                # created before asking the migration to build it.
+                for t in reversed(cleanup):
+                    conn.exec_driver_sql("DROP TABLE IF EXISTS %s CASCADE" % t)
+            else:
+                # The FK parent only; everything else is the migration's job.
+                m.Client.__table__.create(conn)
+            ctx = MigrationContext.configure(conn)
+            with Operations.context(ctx):
+                module.upgrade()
+            migrated = {t: _schema(sa_inspect(conn), t) for t in tables}
+
+        if cleanup:
+            # Rebuild what create_all would have made, on the same backend.
+            with engine.begin() as conn:
+                for t in cleanup:
+                    conn.exec_driver_sql("DROP TABLE IF EXISTS %s CASCADE" % t)
+            m.Base.metadata.create_all(
+                orm_engine, tables=[m.Base.metadata.tables[t] for t in tables]
+            )
+        fresh = {t: _schema(sa_inspect(orm_engine), t) for t in tables}
+    finally:
+        if cleanup:
+            m.Base.metadata.create_all(
+                orm_engine, tables=[m.Base.metadata.tables[t] for t in tables]
+            )
 
     for table in tables:
         assert migrated[table] == fresh[table], (

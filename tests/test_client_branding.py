@@ -206,9 +206,18 @@ def test_hostile_colour_is_refused_at_the_route(db, two_clients, hostile):
 @pytest.mark.parametrize("hostile", HOSTILE_COLORS)
 def test_hostile_colour_written_directly_to_the_db_never_renders(db, two_clients, hostile):
     """The database is not a trust boundary. A value that got in by a hand
-    edit, a restored backup or a future writer must still not reach the CSS."""
+    edit, a restored backup or a future writer must still not reach the CSS.
+
+    The value is truncated to the column width first, and that is the point
+    rather than a workaround: ``brand_primary_color`` is ``String(32)``, and a
+    real backend ENFORCES that. Postgres refuses the 60-character payload with
+    StringDataRightTruncation, so writing it unmodified tested the column's
+    length rather than the renderer's defence -- and passed on SQLite only
+    because SQLite does not enforce VARCHAR limits at all. What must not render
+    is whatever can actually be *in* the column, which is bounded by its width.
+    """
     a, _b = two_clients
-    a.brand_primary_color = hostile
+    a.brand_primary_color = hostile[:32]
     db.commit()
     body = _login("acme-ro").get("/portal").text
     assert "attacker.example" not in body
