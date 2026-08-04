@@ -24,6 +24,8 @@ import pytest
 from fastapi.testclient import TestClient
 
 from central import models as m
+from sqlalchemy import select
+
 from central import reorder
 from central import runtime
 from central.main import app
@@ -462,16 +464,76 @@ def test_publish_without_the_bus_installed_reports_nothing_sent(db):
     _supply(db, _printer(db, client, site), level=5.0)
     db.commit()
     recs = reorder.recommendations(db)
-    assert reorder._resolve_publisher() is None, (
-        "central.events now exists -- wire it into _resolve_publisher and "
-        "update this test rather than deleting it"
-    )
 
-    result = reorder.publish_recommendations(db, recs)
+    # The bus IS installed now, so absence has to be simulated rather than
+    # observed. This test used to assert `_resolve_publisher() is None` for real
+    # and pass -- which is how the feature stayed disconnected: central.events
+    # shipped without a `publish`, reorder read that as "no event bus", and
+    # enabling reorder.emit_events published nothing forever while the suite
+    # stayed green. The assertion was a tripwire with a comment saying to rewire
+    # it; nobody read the comment, because nothing failed.
+    import central.events as _ev
+    real = _ev.publish
+    try:
+        del _ev.publish
+        assert reorder._resolve_publisher() is None
+        result = reorder.publish_recommendations(db, recs)
+    finally:
+        _ev.publish = real
+
     assert result.published == 0
     assert result.skipped == len(recs)
     assert result.ok  # nothing went WRONG; nothing was sent either
     assert "central.events.publish" in result.reason
+
+
+def test_the_publisher_is_actually_wired_to_the_event_bus(db):
+    """The wiring itself, which nothing asserted before.
+
+    Every other publish test injects a fake publisher, so they exercised the loop
+    and never the resolution -- the one thing that was broken. This drives the
+    real `central.events.publish` and checks a row landed.
+    """
+    from central import models as m
+
+    client, site = _client_site(db)
+    _supply(db, _printer(db, client, site), level=5.0)
+    db.commit()
+    recs = reorder.recommendations(db)
+    assert recs, "fixture must produce a recommendation for this to mean anything"
+
+    assert reorder._resolve_publisher() is not None
+    result = reorder.publish_recommendations(db, recs)
+    db.commit()
+
+    assert result.failed == 0, result.reason
+    assert result.published == len(recs)
+    rows = list(db.scalars(
+        select(m.OutboundEvent).where(m.OutboundEvent.type == reorder.EVENT_TYPE)
+    ))
+    assert len(rows) == len(recs)
+    assert rows[0].client_id == client.id, "client scope must survive the bridge"
+
+
+def test_republishing_the_same_recommendation_is_deduped(db):
+    """The producer owns the identity rule here, so the bridge has to carry its
+    dedupe_key through rather than inventing one."""
+    from central import models as m
+
+    client, site = _client_site(db)
+    _supply(db, _printer(db, client, site), level=5.0)
+    db.commit()
+    recs = reorder.recommendations(db)
+
+    reorder.publish_recommendations(db, recs)
+    db.commit()
+    reorder.publish_recommendations(db, recs)
+    db.commit()
+
+    rows = list(db.scalars(
+        select(m.OutboundEvent).where(m.OutboundEvent.type == reorder.EVENT_TYPE)
+    ))
+    assert len(rows) == len(recs), "a second pass must not re-emit the same cartridge"
 
 
 def test_one_failing_event_does_not_cost_the_rest_their_events(db):
@@ -568,7 +630,18 @@ def test_the_interval_marker_does_not_move_when_nothing_was_published(db):
     runtime.save_settings(db, {"reorder.emit_events": "on"}, sections=None)
     db.commit()
 
-    out = jobs.publish_reorder_recommendations(db)  # no bus installed
+    # The bus is installed now, so "nothing was published" has to be arranged.
+    # Before, this passed for real -- which is the same blind spot that let the
+    # publisher stay unwired: every reorder-event test observed a bus that was
+    # never there.
+    import central.events as _ev
+
+    real = _ev.publish
+    try:
+        del _ev.publish
+        out = jobs.publish_reorder_recommendations(db)
+    finally:
+        _ev.publish = real
     assert out["reorder_events"]["published"] == 0
     assert db.get(m.AppSetting, jobs.REORDER_EMIT_MARKER) is None
 

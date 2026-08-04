@@ -507,3 +507,44 @@ def emit_supply_yield_below_expected(
         client_id=printer.client_id,
         idempotency_key="%s:%s" % (assessment.dedupe_key, window),
     )
+
+
+def publish(db: Session, event_type: str, payload: Dict[str, Any]):
+    """Emit a pre-built payload that already carries its own dedupe key.
+
+    The bridge for producers that compose their own body and own their identity
+    rule -- ``central.reorder`` is the one today. Those callers deliberately do
+    not go through a typed ``emit_*`` helper, because the helper's job is to
+    *build* a payload from ORM rows and they have already done that work, from a
+    projection the ORM does not hold.
+
+    **This function is load-bearing and was missing.** ``reorder`` resolves its
+    publisher as ``central.events.publish`` and treats absence as "the event bus
+    is not installed", which was true when the bus did not exist and became a
+    silent lie when it landed under a different name. So switching on
+    ``reorder.emit_events`` published nothing, forever, and the operator's only
+    feedback was a toggle that appeared to work. Nothing failed; the feature was
+    simply not connected. Wire new producers to this rather than re-deriving the
+    resolution, and keep the name.
+
+    ``payload["dedupe_key"]`` is required, because dedupe is the caller's rule
+    here: emit's contract is that the key is what the *consumer* sees and uses to
+    reject a duplicate, so inventing one on their behalf would put our idea of
+    "the same occurrence" somewhere they cannot see it. ``period`` scopes the key
+    to one window and defaults to the UTC date, matching the typed helpers.
+    """
+    key = payload.get("dedupe_key")
+    if not key:
+        raise ValueError(
+            f"{event_type} payload has no dedupe_key; the producer owns the "
+            "identity rule for this path"
+        )
+    window = payload.get("period") or _now().date().isoformat()
+    client = payload.get("client") or {}
+    return emit(
+        db,
+        event_type,
+        data=payload,
+        client_id=client.get("id") if isinstance(client, dict) else None,
+        idempotency_key="%s:%s" % (key, window),
+    )

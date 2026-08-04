@@ -17,6 +17,7 @@ from __future__ import annotations
 import json
 import os
 import stat
+import subprocess
 import time
 
 import pytest
@@ -770,3 +771,55 @@ def test_once_neither_reads_nor_writes_the_sentinel(tmp_path, monkeypatch):
     # A sentinel left by the service must not change what --once reports.
     service.record_refusal("pnw_k", "revoked", state_dir=str(tmp_path))
     assert workstation_cli.main(common) == 2, "--once must still really try"
+
+
+# --------------------------------------------------------------------------- #
+# The state directory's permissions
+# --------------------------------------------------------------------------- #
+# os.chmod on Windows toggles the read-only attribute and writes NO DACL, so the
+# 0600 set on machine.json was never a permission there at all -- the file simply
+# inherited BUILTIN\Users:(I)(RX) from C:\ProgramData, and any logged-in user
+# could read this machine's live bearer credential. Verified by observation on
+# Windows 11 before the fix: the interactive user held (I)(OI)(CI)(F).
+def test_the_state_directory_is_restricted_to_its_owner(tmp_path):
+    d = tmp_path / "state"
+    d.mkdir()
+    svc._state_dir_secured.discard(os.path.abspath(str(d)))
+    svc._secure_state_dir(str(d))
+
+    if os.name == "nt":
+        out = subprocess.run(["icacls", str(d)], capture_output=True, text=True).stdout
+        # SIDs resolve to localised names in icacls OUTPUT, so assert on the
+        # thing that is stable: nobody else is on the list, and inheritance is
+        # broken. A surviving "(I)" means /inheritance:r did not take.
+        assert "(I)" not in out, f"inheritance was not broken:\n{out}"
+        entries = [ln for ln in out.splitlines()[:20] if ":(" in ln]
+        assert len(entries) == 2, f"expected exactly SYSTEM + Administrators:\n{out}"
+    else:
+        assert stat.S_IMODE(os.stat(d).st_mode) == 0o700
+
+
+def test_securing_the_state_directory_never_takes_the_service_down(tmp_path, monkeypatch):
+    """Best-effort by design: a workstation must still provision its queues if
+    the ACL cannot be set. It warns rather than raising -- but it does warn,
+    because a silent failure is how this stayed invisible."""
+    d = tmp_path / "state"
+    d.mkdir()
+    svc._state_dir_secured.discard(os.path.abspath(str(d)))
+
+    def boom(*a, **k):
+        raise OSError("icacls is missing")
+
+    monkeypatch.setattr(os, "chmod", boom)
+    if os.name == "nt":
+        import subprocess as _sp
+        monkeypatch.setattr(_sp, "run", boom)
+    svc._secure_state_dir(str(d))  # must not raise
+
+
+def test_writing_state_secures_the_directory_it_creates(tmp_path, monkeypatch):
+    """The call has to be wired in, not merely available."""
+    seen = []
+    monkeypatch.setattr(svc, "_secure_state_dir", lambda d: seen.append(d))
+    svc.save_state({"api_key": "pnm_secret"}, str(tmp_path))
+    assert seen == [str(tmp_path)]

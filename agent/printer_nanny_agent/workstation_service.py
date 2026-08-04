@@ -179,15 +179,85 @@ def _windows_state_dir() -> str:
     return os.path.join(base, "PrinterNanny")
 
 
+#: SIDs, not names. `BUILTIN\\Administrators` is `VORDEFINIERT\\Administratoren`
+#: on a German Windows and localised again on every other one, so granting by
+#: name silently fails off an English install -- the same "every string is
+#: translated" lesson the CUPS backend already paid for. S-1-5-18 is LocalSystem
+#: (the service account, which must read its own credential) and S-1-5-32-544 is
+#: Administrators.
+_WINDOWS_ACL_SIDS = ("*S-1-5-18", "*S-1-5-32-544")
+
+#: Once per process. Applying it per write would spawn icacls every poll; doing
+#: it at first use still covers the case that matters, which is a directory
+#: someone else created before us.
+_state_dir_secured: set = set()
+
+
+def _secure_state_dir(directory: str) -> None:
+    """Restrict ``directory`` to its owner, on whichever OS this is.
+
+    **On Windows ``os.chmod`` writes no DACL** -- it toggles the read-only
+    attribute and nothing else. So the mode set on the state file below was
+    never a permission at all there, and `%PROGRAMDATA%\\PrinterNanny` simply
+    inherited `BUILTIN\\Users:(I)(RX)` from `C:\\ProgramData`: any logged-in user
+    could read `machine.json` and lift this machine's live bearer credential,
+    which is enough to pull the tenant's assignments and every driver package
+    its client owns. That is the identical rule CLAUDE.md records as fixed for
+    `workstation.toml` in the MSI; it was never applied to the runtime state
+    file, which holds the longer-lived secret.
+
+    `C:\\ProgramData` also grants Users *create-subdirectory* and CREATOR OWNER
+    full control by inheritance, and the MSI does not create our subdirectory --
+    the service does, at first run. So an unprivileged user who creates it first
+    owns the subtree, and everything LocalSystem later writes there inherits
+    their ACL, including the extracted driver payloads. Enforcing rather than
+    only setting-on-create is what closes that: we re-assert the ACL once per
+    process whether or not we were the one who made the directory.
+
+    Best-effort by design. A failure here must not stop a workstation
+    provisioning its queues, so it warns and continues -- but it warns, because
+    a silent failure is how this became invisible the first time.
+    """
+    real = os.path.abspath(directory)
+    if real in _state_dir_secured:
+        return
+    _state_dir_secured.add(real)
+    if os.name != "nt":
+        try:
+            os.chmod(real, stat.S_IRWXU)  # 0700; real permissions on POSIX
+        except OSError as exc:
+            log.warning("could not restrict %s: %s", real, exc)
+        return
+    import subprocess
+
+    # argv list, never a shell: `real` comes from %PROGRAMDATA% or --state-dir
+    # and is not ours to trust with a command line.
+    cmd = ["icacls", real, "/inheritance:r"]
+    for sid in _WINDOWS_ACL_SIDS:
+        cmd += ["/grant:r", f"{sid}:(OI)(CI)F"]
+    try:
+        proc = subprocess.run(cmd, capture_output=True, text=True, timeout=30)
+    except (OSError, subprocess.SubprocessError) as exc:
+        log.warning("could not restrict %s (icacls did not run): %s", real, exc)
+        return
+    if proc.returncode != 0:
+        log.warning(
+            "could not restrict %s: icacls exited %s: %s",
+            real, proc.returncode, (proc.stderr or proc.stdout).strip()[:300],
+        )
+
+
 def _write_json_atomic(path: str, payload: dict) -> None:
     """Write owner-only, atomically.
 
     The permissions are set on the temp file *before* the rename, so the file
     never exists under its final name in a world-readable state -- this holds a
-    live API key, and a window is still a window.
+    live API key, and a window is still a window. On Windows that mode is not
+    the protection (see ``_secure_state_dir``); the directory ACL is.
     """
     directory = os.path.dirname(path) or "."
     os.makedirs(directory, exist_ok=True)
+    _secure_state_dir(directory)
     fd, tmp = tempfile.mkstemp(dir=directory, prefix=".pn-state.")
     try:
         with os.fdopen(fd, "w", encoding="utf-8") as fp:
@@ -666,6 +736,11 @@ def fetch_driver(
         return unpacked
 
     os.makedirs(cache_dir, exist_ok=True)
+    # Same reason as the state file: this tree is under %PROGRAMDATA%, whose
+    # inherited ACL lets any user create and own a subdirectory. Everything
+    # unpacked here is handed to pnputil as LocalSystem, so a writable cache is
+    # arbitrary driver installation.
+    _secure_state_dir(cache_dir)
     archive = os.path.join(cache_dir, sha + ".pkg")
     client.download_driver(int(driver["package_id"]), archive)
 
