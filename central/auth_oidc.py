@@ -10,6 +10,7 @@ Disabled by default; the login page shows an SSO button only when enabled.
 
 from __future__ import annotations
 
+import logging
 import secrets
 from typing import Optional
 
@@ -23,6 +24,8 @@ from central import models as m
 from central import runtime
 from central.csrf import rotate_token
 from central.db import get_db
+
+log = logging.getLogger(__name__)
 
 router = APIRouter(tags=["auth"])
 
@@ -169,8 +172,26 @@ async def _userinfo_email(
     return resp.json().get("email")
 
 
+#: ``auth_provider`` values that an SSO login may adopt without an operator
+#: saying so first. Both are already IdP-managed identities -- ``scim`` in
+#: particular is the normal Entra/Okta shape, where SCIM provisions the account
+#: and OIDC authenticates it, so refusing that pairing would break the common
+#: deployment. ``local`` is deliberately absent: see ``_match_or_provision``.
+_LINKABLE_PROVIDERS = frozenset({"oidc", "scim"})
+
+
 def _match_or_provision(db: Session, email: str, claims: dict, cfg: dict) -> Optional[m.User]:
     email = email.lower()
+    # An IdP that says the address is NOT verified is telling us the user typed
+    # it. Self-service and guest sign-up are ordinary features of Entra, Google
+    # and Keycloak, so an unverified claim is attacker-chosen text -- and this
+    # function turns text into "which account is this". A *missing* claim is
+    # tolerated because plenty of IdPs omit it for their own managed users;
+    # an explicit false is not.
+    if claims.get("email_verified") is False:
+        log.warning("SSO refused: the IdP reports %s as unverified", email)
+        return None
+
     user = db.scalar(
         select(m.User).where((m.User.email == email) | (m.User.username == email))
     )
@@ -179,6 +200,29 @@ def _match_or_provision(db: Session, email: str, claims: dict, cfg: dict) -> Opt
         # be able to log back in via SSO -- treat it as "not provisioned" so the
         # off-boarding gate holds across both auth paths.
         if not user.active:
+            return None
+        # DO NOT let an SSO login adopt a PASSWORD account. Matching alone used
+        # to be enough, which made this the shortest path to admin in the
+        # product: register any address the IdP will accept, and the first
+        # existing row whose email OR username equals it becomes your session --
+        # including the bootstrap admin, whose username is an operator's address
+        # often enough. No password, no throttle, no forced rotation, and the
+        # match ran BEFORE the auto_provision gate, so turning auto-provisioning
+        # off did not close it either.
+        #
+        # Linking is still legitimate -- an MSP moving a local account to SSO --
+        # so it is a decision an operator makes, not one an unauthenticated
+        # caller makes for them. Two supported ways to grant it: set
+        # ``oidc.link_local_accounts``, or change that user's auth provider.
+        if user.auth_provider not in _LINKABLE_PROVIDERS and not cfg.get(
+            "link_local_accounts", False
+        ):
+            log.warning(
+                "SSO refused: %s already exists as a %r account. Enable "
+                "'Let SSO adopt existing password accounts' in Settings if this "
+                "is a deliberate migration.",
+                email, user.auth_provider,
+            )
             return None
         if user.email is None:
             user.email = email

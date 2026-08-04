@@ -1140,7 +1140,15 @@ def _component_schedule_printers(db: Session, sched: m.MaintenanceSchedule):
     if sched.printer_id:
         stmt = stmt.where(m.Printer.id == sched.printer_id)
     elif sched.model:
-        stmt = stmt.where(m.Printer.model.ilike(f"%{sched.model}%"))
+        # Escaped, for the same reason the comment on _LIKE_ESCAPE gives about
+        # match codes: a model of "%" is not a match-everything request, it is an
+        # operator typo, and silently widening one component schedule to the
+        # whole approved fleet produces maintenance alerts nobody asked for on
+        # printers the schedule was never about. This was the one ilike in the
+        # codebase that skipped the helper sitting directly above it.
+        stmt = stmt.where(
+            m.Printer.model.ilike(_like_contains(sched.model), escape=_LIKE_ESCAPE)
+        )
     return db.scalars(stmt)
 
 

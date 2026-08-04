@@ -31,7 +31,7 @@
   {% if new_key %}
     <div class="{{ c.note('warning', 'mb-4') }}">
       <p class="font-medium">Copy this key now — it is not shown again.</p>
-      <code class="mt-2 block break-all rounded bg-slate-900 px-3 py-2 font-mono text-xs text-slate-100">{{ new_key }}</code>
+      <code class="mt-2 block break-all rounded bg-slate-900 px-3 py-2 font-mono text-xs text-slate-100">{{ new_key.key }}</code>
       <p class="mt-2 text-xs">Bake it into this client's installer as <code>PN_ENROLL_KEY</code>. It can only enroll machines — it cannot read your fleet.</p>
     </div>
   {% endif %}

@@ -93,7 +93,15 @@ SPECS: List[Spec] = [
     # Generic webhook (PSA / PagerDuty / Zapier / etc.)
     Spec("webhook.enabled", "bool", "Webhook (generic)",
          "POST every alert to a custom URL", False),
-    Spec("webhook.url", "str", "Webhook (generic)", "Webhook URL", "",
+    # "secret", not "str": an incoming-webhook URL IS the credential -- whoever
+    # holds it can post to that channel -- which is exactly why the Slack and
+    # Teams ones above are secrets, and why webhook.auth_token two lines below
+    # is. This one was the odd man out, so the generic destination was the only
+    # channel URL stored in cleartext, rendered into the settings HTML instead
+    # of a placeholder, and carried verbatim in every pg_dump. The upgrade is
+    # lazy and needs no flag day: decrypt_value passes existing plaintext
+    # through unchanged, and the next settings save sweeps it into enc:v1:.
+    Spec("webhook.url", "secret", "Webhook (generic)", "Webhook URL", "",
          "JSON POST destination. See docs for the payload shape."),
     Spec("webhook.auth_header", "str", "Webhook (generic)", "Auth header name",
          "Authorization", "Header name for the credential (e.g. X-Api-Key)"),
@@ -396,6 +404,17 @@ SPECS: List[Spec] = [
     Spec("oidc.scopes", "str", "Single sign-on (OIDC)", "Scopes", "openid email profile"),
     Spec("oidc.button_label", "str", "Single sign-on (OIDC)", "Login button label", "Sign in with SSO"),
     Spec("oidc.auto_provision", "bool", "Single sign-on (OIDC)", "Auto-create users on first login", True),
+    # OFF by default, because ON is an admin-takeover primitive. Without it, an
+    # SSO login whose email matched an existing PASSWORD account simply became
+    # that account -- so anyone who could get an address issued by the IdP (guest
+    # or self-service sign-up, both ordinary features) could land on the
+    # bootstrap admin. Turning it on is a real migration an MSP performs
+    # deliberately; leaving it off costs an operator one field on the user.
+    Spec("oidc.link_local_accounts", "bool", "Single sign-on (OIDC)",
+         "Let SSO adopt existing password accounts", False,
+         "Off by default. On, an SSO login whose email matches a local "
+         "account signs in AS that account -- enable only while migrating "
+         "known users to SSO."),
     Spec("oidc.default_role", "str", "Single sign-on (OIDC)", "Role for new SSO users", "tech"),
     # SCIM 2.0 provisioning (RFC 7644). Lets an IdP (Entra ID / Okta / etc.)
     # create, update and -- critically -- DEPROVISION (deactivate) users

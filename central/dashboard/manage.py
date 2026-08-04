@@ -76,6 +76,28 @@ def _flash(request: Request, message: str) -> None:
     request.session["flash"] = message
 
 
+def _site_belongs_to(db: Session, site_id: int, client_id: Optional[int]) -> bool:
+    """Is ``site_id`` a site of ``client_id``?
+
+    A printer's ``site_id`` and ``client_id`` are two separately-writable columns
+    that the rest of the system assumes agree, and **the ingest path keys on the
+    site, not the client**: ``/targets`` selects printers by
+    ``site_id.in_(sites_served_by_agent(...))``, and that set deliberately spans
+    clients so one agent can serve several whose networks bridge at HQ.
+
+    So a printer left pointing at another client's site is handed to that
+    client's agent -- ``snmp_community`` included -- and its readings are
+    accepted, while ``build_invoice`` still scopes by ``client_id`` and bills the
+    pages to the original tenant. Nothing in the UI shows the split. The two
+    columns are checked here rather than reconciled, because guessing which one
+    the operator meant is how a printer ends up silently re-homed.
+    """
+    if client_id is None:
+        return False
+    site = db.get(m.Site, site_id)
+    return site is not None and site.client_id == client_id
+
+
 def _pop_flash(request: Request) -> Optional[str]:
     return request.session.pop("flash", None)
 
@@ -606,6 +628,9 @@ def printer_create(
 ):
     if _manager(request, db) is None:
         return _redirect("/login")
+    if not _site_belongs_to(db, site_id, client_id):
+        _flash(request, "That site does not belong to this client; printer not added.")
+        return _redirect(f"/manage/clients/{client_id}")
     printer = m.Printer(
         client_id=client_id, site_id=site_id, ip=ip.strip(),
         display_name=display_name.strip() or None,
@@ -643,6 +668,12 @@ def printer_update(
         return _redirect("/login")
     printer = db.get(m.Printer, printer_id)
     if printer:
+        if not _site_belongs_to(db, site_id, printer.client_id):
+            # Refused rather than clamped to the printer's current site: a form
+            # that silently ignores the field the operator just changed is its
+            # own kind of lie.
+            _flash(request, "That site belongs to a different client; no changes saved.")
+            return _redirect(f"/manage/printers/{printer.id}")
         printer.site_id = site_id
         printer.ip = ip.strip()
         printer.display_name = display_name.strip() or None

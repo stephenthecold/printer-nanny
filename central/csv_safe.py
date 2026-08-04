@@ -71,8 +71,16 @@ RISKY_LEADING_CHARS = frozenset(
 # optional exponent. Deliberately rejects inf/nan/underscores/hex -- see module
 # docstring. Anything matching this is a number to every spreadsheet, so it is
 # exempt even though it may begin with '-' or '+'.
+#
+# Anchored with ``\Z``, NOT ``$``: in Python ``$`` also matches immediately
+# before a trailing newline, so ``"-5\n"`` would satisfy this pattern and be
+# handed back unmodified. Nothing exploitable follows from that one specific
+# string -- a bare number plus a newline is not a formula anywhere -- but the
+# exemption is the one hole deliberately left in the neutraliser, and an
+# exemption that quietly accepts a character class it was never meant to is how
+# the next hole gets found by somebody else.
 _NUMERIC_LITERAL = re.compile(
-    r"^[+-]?(?:\d+(?:\.\d*)?|\.\d+)(?:[eE][+-]?\d+)?$"
+    r"^[+-]?(?:\d+(?:\.\d*)?|\.\d+)(?:[eE][+-]?\d+)?\Z"
 )
 
 # csv.writer renders these itself and can never produce a formula from them.
