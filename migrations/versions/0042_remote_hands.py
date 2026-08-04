@@ -39,7 +39,7 @@ import sqlalchemy as sa
 from alembic import op
 
 revision = "0042_remote_hands"
-down_revision = "0040_collector_redundancy"
+down_revision = "0042_auth_hardening"
 branch_labels = None
 depends_on = None
 

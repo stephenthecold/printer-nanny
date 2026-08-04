@@ -280,6 +280,12 @@ def login(
     # A proven password empties both buckets: the username's, and the source's
     # (see ratelimit.clear for why the second one is safe).
     ratelimit.clear(db, username=username, ip=source)
+    # Rotate the CSRF token on the privilege transition, exactly as the OIDC
+    # callback does (auth_oidc.py). Without it, a token an attacker observed or
+    # fixed while the visitor was anonymous stays valid once they authenticate,
+    # which is the session-fixation half of CSRF -- and it was present on the
+    # SSO path and missing here, which is the worst arrangement of the two.
+    rotate_token(request.session)
     request.session["user_id"] = user.id
     if user.must_change_password:
         request.session[FORCE_PASSWORD_CHANGE_KEY] = True

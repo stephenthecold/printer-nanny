@@ -47,6 +47,7 @@
               <a href="/manage/users/{{ u.id }}/edit" class="text-xs text-sky-700 hover:underline rounded">Edit</a>
               {% if u.username|lower in locked_users %}
               <form method="post" action="/manage/users/{{ u.id }}/unlock" class="inline">
+                {{ csrf_field() }}
                 <button class="text-xs text-sky-700 hover:underline rounded">Clear throttle</button>
               </form>
               {% endif %}

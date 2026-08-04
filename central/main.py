@@ -55,8 +55,6 @@ configure_logging()
 
 log = logging.getLogger("central.main")
 
-app = FastAPI(title="Printer Nanny", version="0.31.0")
-
 # MIDDLEWARE ORDER IS LOAD-BEARING. add_middleware inserts at index 0 and the
 # stack is wrapped in reverse, so the LAST one added is the OUTERMOST. Reading
 # the four below from the bottom up gives the order a request meets them.

@@ -27,7 +27,7 @@ from alembic import op
 import sqlalchemy as sa
 
 revision = "0042_maintenance_page_base"
-down_revision = "0040_collector_redundancy"
+down_revision = "0042_supply_class"
 branch_labels = None
 depends_on = None
 

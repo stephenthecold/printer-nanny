@@ -30,7 +30,7 @@ import sqlalchemy as sa
 from alembic import op
 
 revision = "0042_auth_hardening"
-down_revision = "0040_collector_redundancy"
+down_revision = "0042_maintenance_page_base"
 branch_labels = None
 depends_on = None
 

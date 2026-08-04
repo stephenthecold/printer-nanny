@@ -187,10 +187,12 @@
                not JS escaping -- see the convention in CLAUDE.md. #}
             <form method="post" action="/manage/agents/{{ a.id }}/rotate-key" data-name="{{ a.name }}"
                   onsubmit="return confirm('Issue a new key for ' + this.dataset.name + '? The old key stops working.')">
+              {{ csrf_field() }}
               <button class="text-sky-700 hover:underline">Rotate key</button>
             </form>
             <form method="post" action="/manage/agents/{{ a.id }}/update" data-name="{{ a.name }}"
                   onsubmit="return confirm('Push the latest agent build to ' + this.dataset.name + '? Agent pip-installs the new package and restarts. Takes ~60s.')">
+              {{ csrf_field() }}
               <button class="text-emerald-700 hover:underline" title="After the next heartbeat the version timestamp changes -- that's the rollout confirmation.">Update</button>
             </form>
             {% if user.role.value == 'admin' %}

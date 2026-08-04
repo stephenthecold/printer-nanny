@@ -114,6 +114,7 @@
                 <form method="post" action="/manage/events/{{ s.id }}/rotate" class="inline"
                       data-name="{{ s.name }}"
                       onsubmit="return confirm('Rotate the signing secret for ' + this.dataset.name + '? The current one stops working immediately.');">
+                  {{ csrf_field() }}
                   <button class="{{ btn('warning', 'sm') }}">Rotate secret</button>
                 </form>
                 <form method="post" action="/manage/events/{{ s.id }}/delete" class="inline"

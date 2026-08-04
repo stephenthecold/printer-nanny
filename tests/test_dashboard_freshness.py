@@ -37,7 +37,18 @@ FRESHNESS_TEMPLATE = (
     REPO_ROOT / "central" / "dashboard" / "templates" / "_freshness.html"
 )
 
-NOW = datetime(2026, 8, 3, 12, 0, 0, tzinfo=timezone.utc)
+# Anchored to the real clock at import, NOT a fixed instant.
+#
+# The unit tests pass ``now=NOW`` explicitly and would be happy with any fixed
+# value. The HTTP tests are not: ``/fragments/freshness`` renders on the server's
+# own clock, so fixture rows written relative to a hardcoded 2026-08-03 read as
+# hours stale and a "live" assertion fails for a reason that has nothing to do
+# with the code under test. Anchoring here keeps both honest -- the offsets below
+# stay exact for the unit tests, and stay *true* for the rendered ones.
+#
+# Second-scale drift between import and assertion is harmless: every state
+# threshold in this feature is minutes or hours wide.
+NOW = datetime.now(timezone.utc)
 
 
 # --------------------------------------------------------------------------- #
@@ -252,7 +263,7 @@ def test_no_data_at_all(db):
     assert fresh.state == f.STATE_NO_DATA
     assert fresh.age_seconds is None
     assert fresh.iso == ""
-    assert "never reported" in fresh.headline
+    assert "has ever reported" in fresh.headline
     # No timestamp to tick, so nothing claims an age.
     assert fresh.age_text == "unknown"
 
@@ -315,7 +326,14 @@ def test_a_broken_read_never_breaks_the_page(db, monkeypatch):
 
 def test_worker_warning_is_only_for_the_role_that_never_sees_the_banner(db, fleet):
     """Staff get the banner (with job names); tenants get one plain sentence."""
-    db.add(m.WorkerJobRun(job="evaluate_alert_rules",
+    # The job name must be one ``central.health._known_job_names`` actually
+    # registers: worker_health filters rows to known jobs, so an unregistered
+    # name is silently discarded and the stall it describes becomes invisible.
+    # This test previously used "evaluate_alert_rules" (the real job is
+    # "evaluate_alerts") and passed anyway -- because the fixed clock made the
+    # fixture's own healthy row look stale too, so the assertion was satisfied
+    # by an artefact rather than by the row it adds here.
+    db.add(m.WorkerJobRun(job="evaluate_alerts",
                           last_success_at=NOW - timedelta(hours=3),
                           expected_interval_seconds=60))
     db.commit()
