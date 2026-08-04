@@ -18,18 +18,46 @@ they list is already shipped. **Read this file, not those, for what is left.**
 
 ## 0. Status, and the errors in this document that were found by checking
 
-**Phase 1 is complete. Phase 2 landed ten of its twelve features. Phase 3 has not
-started.** Nothing in §6b — the hardware verification — has been executed, and
-none of it can be from a container; `deploy/HARDWARE-VERIFICATION.md` is the
-single operator-followable brief for that part.
+**Every phase that can be completed without hardware is complete. What is left is
+§6b and only §6b** — the verification that needs a real printer, a real Windows
+box and a real Mac. `deploy/HARDWARE-VERIFICATION.md` is the single
+operator-followable brief for it.
+
+> **Re-verified 2026-08-04 against `8ca354d`, by reading the code rather than the
+> commit messages.** The rows below previously read "Phase 3 NOT STARTED" and
+> "F12 NOT BUILT"; both were **wrong**, and had been since `e7d64f8`. The status
+> block was written at `4c68f40` and never updated as the work landed, which is
+> the same failure this document opens by warning about — committed, for the
+> third time, by this document. Anything that says a §6a item is open is stale;
+> §3's State column is left as written at `4c68f40` and is superseded by the
+> re-verification recorded there.
 
 | | State |
 |---|---|
 | Phase 1 (§4) | **DONE**, all six items, plus one found while doing them |
-| Phase 2 (§5) | **F1–F11 DONE. F12 NOT BUILT.** |
-| Phase 3 (§6a) | **NOT STARTED.** Every item re-checked against code below |
-| Phase 3 (§6b) | **NOT STARTED**, and not startable here — see `deploy/HARDWARE-VERIFICATION.md` |
-| Version | central **0.32.0** / agent **0.17.0**. Not 1.0.0 — §6c is unreached |
+| Phase 2 (§5) | **DONE — F1–F12.** F12 was the documented cut point and was *not* cut: `central/remote.py`, `central/dashboard/remote.py` |
+| Phase 3 (§6a) | **DONE — all eleven**, plus the fourteen `confirm()` sinks and the duplicated `FastAPI(...)`. Evidence per item in §3 |
+| Phase 3 (§6b) | **NOT STARTED**, and not startable from a container — see `deploy/HARDWARE-VERIFICATION.md`. **This is the whole of what remains.** |
+| Version | central **1.0.0** / agent **1.0.0** (`8ca354d`) |
+
+### The 1.0.0 claim, stated honestly
+
+§6c gates 1.0.0 on **§6a and §6b**, and singles out D4 — "a downgrade that
+deletes operator settings including SMTP credentials is data loss with a
+documented trigger" — as something that must be fixed before any 1.0 claim.
+
+**D4 is fixed** (`migrations/guard.py`: a global `drop_table` guard that refuses
+a destructive downgrade unless `refuse_if_populated` finds the table empty, with
+an explicit override env var, exercised against the real `alembic` CLI in
+`tests/test_migration_downgrade_guard.py`). So the gate that was called out by
+name is genuinely met, and so is the rest of §6a.
+
+**§6b is not**, and it is half the gate. So 1.0.0 is currently a claim about the
+code, not about the product: nothing in it has been verified against the printer
+that is known to reject a queue Windows says is healthy. That is the one thing
+this codebase has learned four times not to infer — a queue that exists, lists
+and converges is not a queue that prints. Treat the version as provisional until
+§6b runs, or re-cut it afterwards.
 
 ### Errors in this document, corrected below
 
@@ -57,26 +85,32 @@ to know *what* to distrust:
    actually happens is that the `MaintenanceRecord` row is written with
    `next_due=None` and the *schedule* keeps its stale, now-past `next_due` — so
    the schedule stays permanently due and the maintenance alert never
-   auto-resolves, while the UI says "Service logged". Still a bug, still open,
-   different bug.
+   auto-resolves, while the UI says "Service logged". Still a bug, different
+   bug — and **fixed since** (§6a): `next_due` is cleared for an interval-less
+   schedule, which resolves the alert on the next worker cycle.
 4. **The baseline figures are stale by ~45%.** §7 quotes 1756 passed / 21
    skipped; §8 quotes "~2.5 min here". Re-measured — see §7.
-5. **`python3 scripts/ipp_bisect.py --contract` does not work as documented.**
-   §6b, `deploy/WINDOWS-IPP-BISECT-PROMPT.md` and `deploy/WINDOWS-MSI-TESTING.md`
-   all document that bare form. argparse declares `subject`, `donor` and
-   `--oracle` as **required** and evaluates them before the `--contract` early
-   return, so it exits 2 and prints usage. Pass three placeholders. Not yet
-   fixed in the source docs.
+5. ~~**`python3 scripts/ipp_bisect.py --contract` does not work as documented.**~~
+   **Fixed 2026-08-04 — in the code, not the docs.** §6b,
+   `deploy/WINDOWS-IPP-BISECT-PROMPT.md` and `deploy/WINDOWS-MSI-TESTING.md` all
+   documented the bare form; argparse evaluates required-ness *during*
+   `parse_args`, before the `--contract` early return, so it exited 2 and printed
+   usage. Three documents agreeing on the intended behaviour is the specification
+   — so `subject`/`donor`/`--oracle` are now enforced by hand *after* that return
+   rather than declared required, and the docs were left saying what they said.
+   A real run still refuses identically (exit 2, argparse's own usage line and
+   message) when an argument is missing; only `--contract` behaves better.
+   The placeholder workaround still works. `tests/test_ipp_bisect.py`.
 
-### One code defect found while checking, not fixed here
+### One code defect found while checking — **since fixed**
 
-`central/main.py:54-55` declares `app = FastAPI(title="Printer Nanny",
-version="0.30.0")` **twice**, on consecutive lines. It is a merge artefact from
-`78f3345` (the F10 merge) and is currently harmless — the second binding replaces
-an identical object before any route, middleware or handler is attached — but it
-is dead code in the most load-bearing statement in the file, and the first person
-to add a line between them will produce a silently unconfigured app. Left as a
-finding rather than fixed, because this pass was documentation-only.
+`central/main.py:54-55` declared `app = FastAPI(title="Printer Nanny",
+version="0.30.0")` **twice**, on consecutive lines — a merge artefact from
+`78f3345` (the F10 merge). It was harmless as it stood, since the second binding
+replaced an identical object before any route, middleware or handler was
+attached, but it was dead code in the most load-bearing statement in the file and
+the first person to add a line between the two would have produced a silently
+unconfigured app. `central/main.py` now declares `app` exactly once.
 
 ---
 
@@ -145,7 +179,12 @@ see §5 F6 for what the work actually turned out to be.
 
 ---
 
-## 3. Verified still open *(as originally written — status re-checked 2026-08-03)*
+## 3. Verified still open *(as originally written; State column re-checked 2026-08-03, then again 2026-08-04)*
+
+> **The State column below is superseded.** It was accurate at `4c68f40`. Every
+> item in it — S3, S4, S5, C5, C6, D3, D4, O4, O5, O6, O7 — has since been
+> closed; each row's evidence is given inline where it was re-verified against
+> `8ca354d`. Read §0 for the current position.
 
 Every item below was confirmed against current code **when this plan was
 written**. Three were reproduced outright; those are marked **[reproduced]** and
@@ -241,7 +280,7 @@ Everything else in §3 explicitly waits.
 
 ---
 
-## 5. Phase 2 — the feature program — **F1–F11 DONE; F12 NOT BUILT**
+## 5. Phase 2 — the feature program — **DONE, F1–F12**
 
 | | Feature | State |
 |---|---|---|
@@ -256,7 +295,7 @@ Everything else in §3 explicitly waits.
 | F9 | Per-client white-label | **DONE** — `central/branding.py`, migration 0038 |
 | F10 | Server-pushed device definitions | **DONE** — `central/device_definitions.py` + the agent's vendored copy, migration 0039 |
 | F11 | Collector redundancy | **DONE** — `central/collector.py`, migration 0040 |
-| F12 | Remote hands / EWS proxy | **NOT BUILT**, and this was the documented cut point (§8): "if the program has to be cut short, cut F12 first". Still open |
+| F12 | Remote hands / EWS proxy | **DONE** — `central/remote.py` + `central/dashboard/remote.py`, `/manage/printers/{id}/remote/*`. It was the documented cut point (§8: "if the program has to be cut short, cut F12 first") and did not need cutting |
 
 Sequenced by dependency and risk, since order was delegated. The governing
 principles: cheap-and-independent first so the branch shows progress early;
@@ -459,7 +498,7 @@ worker already has leader election and a standby concept to model this on
 (`worker/health.py`); **agents** have nothing equivalent. PrintFleet's own figure:
 10–20% of collectors stop working at some point.
 
-### F12 — Remote hands: EWS proxy, writes where supported *(XL, last)* — **NOT BUILT; still open**
+### F12 — Remote hands: EWS proxy, writes where supported *(XL, last)* — **DONE**
 
 Confirmed absent 2026-08-03: no module, no route, no migration, no test. This is
 the documented cut point (§8: "if the program has to be cut short, cut F12
@@ -497,9 +536,23 @@ held — the agent line moved only for F10/F11, which is exactly what it is for.
 
 ---
 
-## 6. Phase 3 — complete bug pass + hardware verification — **NOT STARTED**
+## 6. Phase 3 — complete bug pass + hardware verification — **6a DONE; 6b NOT STARTED**
 
-### 6a. Every remaining item from §3
+### 6a. Every remaining item from §3 — **DONE**
+
+> **All eleven closed, re-verified 2026-08-04 against `8ca354d` by reading the
+> code.** S3 `central/csrf.py` (app-level dependency, plus a `POST /download`
+> beside the GET); S4 key safety no longer consults the backend —
+> `resolve_secret_key` *generates* rather than warns; S5 sign-in throttle +
+> `must_change_password`; C5 `level_pct` coerced, not bounded; C6 `next_due`
+> cleared so the alert resolves; D3 `tests/test_schema_drift.py`; D4
+> `migrations/guard.py`; O4 `queries.audit_page`; O5 five grouped aggregates
+> (measured 1002 → 5 statements); O6 `_due_deliveries(limit=BATCH_LIMIT)`;
+> O7 `central/freshness.py`. The two extras below are closed too: zero
+> `confirm()` calls now interpolate into an `on*` attribute, and
+> `central/main.py` declares `app` once.
+>
+> The text below is the brief as written, kept for its sequencing rationale.
 
 **Still open, all of it**, re-verified against `4c68f40` on 2026-08-03:
 **S3, S4, S5, C5, C6, D3, D4, O4, O5, O6, O7** — with C6's mechanism corrected in
@@ -532,12 +585,12 @@ Two of these deserve their sequencing called out:
 > by setup cost (with the two Developer-ID ones grouped last), and the exit-2
 > decision table. Everything below is the summary it expands.
 >
-> **Known documentation defect, not yet fixed:**
-> `python3 scripts/ipp_bisect.py --contract` — the form given below and in both
-> `deploy/` docs — **exits 2 and prints usage**. argparse declares `subject`,
-> `donor` and `--oracle` as required and evaluates them before the `--contract`
-> early return. Pass placeholders:
-> `python3 scripts/ipp_bisect.py x y --oracle z --contract`.
+> **Fixed 2026-08-04:** `python3 scripts/ipp_bisect.py --contract` — the bare
+> form given below and in both `deploy/` docs — used to exit 2 and print usage,
+> because argparse enforces required arguments before the `--contract` early
+> return. The three arguments are now enforced by hand after it. The bare form
+> works; the placeholder form still works; a run missing an argument still fails
+> exactly as before.
 
 **Windows IPP attribute search.** `scripts/ipp_bisect.py` is built, unit-tested
 and has **never been run**. Read `deploy/WINDOWS-IPP-BISECT-PROMPT.md` and
@@ -570,13 +623,23 @@ uninstall/reinstall preserving the machine GUID.
 — eight items need nothing beyond the Mac that already ran, and only two need
 the Developer ID certificate.
 
-**Also resolve the exit-2 trap**, currently documented as unresolved:
-`workstation_cli` returns exit 2 for a refused key specifically so a service
-manager will not loop — but the plist's `KeepAlive{SuccessfulExit=false}`
-restarts on any non-zero exit, so on macOS it loops anyway. **launchd cannot
-express "restart unless the exit code is 2"**, so this needs a *decision* before
-it needs a test; `deploy/HARDWARE-VERIFICATION.md` §3 lays out four options with
-what each costs, and the four observations that would prove whichever is chosen.
+**The exit-2 trap is DECIDED (2026-08-04) and half-closed.** `workstation_cli`
+returned exit 2 for a refused key so a service manager would not loop, but the
+plist's `KeepAlive{SuccessfulExit=false}` restarts on any non-zero exit and
+**launchd cannot express "restart unless the exit code is 2"** — so the comment
+described a behaviour that did not occur. Resolved with a **refused-key
+sentinel** (option 3 of the four in `deploy/HARDWARE-VERIFICATION.md` Part 3),
+refined so its one documented cost — a state file an operator must know to
+delete — is designed out: it keys on a SHA-256 of the key, so re-minting clears
+it, and it expires after 6h so an un-revoked key is not poisoned by an unchanged
+fingerprint. The first refusal still exits 2 truthfully; only the pointless
+repeat exits 0. Eight unit tests in `tests/test_workstation_service.py`.
+
+**What is NOT closed is launchd's half.** Nothing here asserts that
+`SuccessfulExit=false` really stops after one restart — that is exactly the shape
+of proxy this codebase has mistaken for proof four times. The four observations
+are now a checklist in `deploy/MACOS-CLIENT-TESTING.md`, and a restart is
+**counted, not inferred**.
 
 **The one sufficient check is a printed page.** Every proxy for "it works" has now
 failed at least once, four times in this codebase. A queue that exists, lists and

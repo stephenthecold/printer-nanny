@@ -378,9 +378,22 @@ def make_test(oracle: str, journal: Journal, *, retries: int = 2, log=print):
 
 def main(argv: "list[str] | None" = None) -> int:
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
-    ap.add_argument("subject", help="capture from the failing device (brother.ipp)")
-    ap.add_argument("donor", help="capture from a working device (good.ipp)")
-    ap.add_argument("--oracle", required=True, help="command that runs one trial")
+    # `subject`, `donor` and `--oracle` are all REQUIRED for a run, but they are
+    # declared optional here and enforced below by hand. The reason is
+    # `--contract`: argparse evaluates required-ness during parse_args, i.e.
+    # *before* any early return we could write, so declaring them the obvious way
+    # makes `--contract` exit 2 with a usage message instead of printing the
+    # contract. That is exactly what happened -- the bare form is documented in
+    # deploy/WINDOWS-IPP-BISECT-PROMPT.md, deploy/WINDOWS-MSI-TESTING.md and
+    # deploy/HARDWARE-VERIFICATION.md, and none of them worked. `--contract` is
+    # an informational flag like `--help`; an operator reaching for it is asking
+    # what to build BEFORE they have captures or an oracle to name, so demanding
+    # three placeholder arguments to read the spec is backwards.
+    ap.add_argument("subject", nargs="?",
+                    help="capture from the failing device (brother.ipp)")
+    ap.add_argument("donor", nargs="?",
+                    help="capture from a working device (good.ipp)")
+    ap.add_argument("--oracle", help="command that runs one trial")
     ap.add_argument("--journal", default=None, help="resume/record file")
     ap.add_argument("--retries", type=int, default=2,
                     help="extra attempts before an inconclusive trial aborts")
@@ -390,6 +403,18 @@ def main(argv: "list[str] | None" = None) -> int:
     if args.contract:
         print(ORACLE_CONTRACT)
         return 0
+
+    # Enforced here rather than by argparse, per the note above. `ap.error` is
+    # used so the exit code (2) and the usage line stay identical to what
+    # argparse would have produced -- an operator who omits an argument sees no
+    # difference, and only `--contract` behaves better than it did.
+    missing = [
+        name for name, value in (
+            ("subject", args.subject), ("donor", args.donor), ("--oracle", args.oracle)
+        ) if not value
+    ]
+    if missing:
+        ap.error("the following arguments are required: " + ", ".join(missing))
 
     donor_raw = pathlib.Path(args.donor).read_bytes()
     candidates = candidate_attributes(donor_raw)

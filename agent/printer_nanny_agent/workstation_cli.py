@@ -123,22 +123,47 @@ def main(argv: Optional[list] = None) -> int:
 
     from printer_nanny_agent import workstation_service as svc
 
+    state_dir = args.state_dir or cfg.get("state_dir") or None
     kwargs = dict(
         interval=interval,
-        state_dir=args.state_dir or cfg.get("state_dir") or None,
+        state_dir=state_dir,
         verify_tls=verify_tls,
         once=args.once,
     )
     if prefix is not None:
         kwargs["prefix"] = prefix
 
+    # A key this machine already tried and had refused. Exit 0 so launchd's
+    # KeepAlive{SuccessfulExit=false} stops restarting us -- it cannot express
+    # "restart unless the exit code is 2", so the exit 2 below buys nothing on
+    # the second and subsequent attempts and costs a respawn every interval.
+    # See workstation_service's sentinel block for why this is safe to clear
+    # itself. Skipped for --once, which is a diagnostic run: a technician asking
+    # "what happens if I run it now" must get the real answer, not a cached one.
+    if not args.once:
+        blocked = svc.refusal_blocks_start(enroll_key, state_dir=state_dir)
+        if blocked is not None:
+            log.error(
+                "not starting: %s. This key was already refused; re-mint one on "
+                "the Machines page and reinstall, or wait for the retry window.",
+                blocked,
+            )
+            return 0
+
     try:
         report = svc.run(server, enroll_key, **kwargs)
     except svc.ServiceError as exc:
         # Enrollment refused is terminal and worth a distinct exit code: under a
         # service manager, restarting on a bad key just retries forever and
-        # buries the reason in a restart loop.
+        # buries the reason in a restart loop. This exit code stays truthful --
+        # the sentinel above is what actually stops launchd, on the next start.
         log.error("%s", exc)
+        # Only a refused KEY gets a sentinel. Every ServiceError is terminal and
+        # earns the exit code, but the sentinel is keyed on the enrollment key,
+        # so recording one for an unrelated terminal failure would suppress a
+        # key that was never the problem.
+        if not args.once and isinstance(exc, svc.EnrollmentRefused):
+            svc.record_refusal(enroll_key, str(exc), state_dir=state_dir)
         return 2
     except KeyboardInterrupt:  # pragma: no cover - interactive only
         return 0

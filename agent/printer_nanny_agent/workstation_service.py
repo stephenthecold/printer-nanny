@@ -83,6 +83,20 @@ class ServiceError(RuntimeError):
     """Enrollment or configuration failed in a way retrying will not fix."""
 
 
+class EnrollmentRefused(ServiceError):
+    """Central rejected the enrollment key itself.
+
+    A subclass rather than a bare ``ServiceError`` because the refused-key
+    sentinel keys on *the enrollment key*, and suppressing a start is only right
+    when the key is what was wrong. Today this is the sole ``ServiceError`` in
+    the module, so catching the parent would behave identically -- which is
+    exactly the trap: the next terminal-but-unrelated failure to be raised as a
+    ``ServiceError`` would start poisoning a perfectly good key for six hours.
+    The CLI still catches ``ServiceError`` for its exit code, so a new sibling
+    keeps the terminal exit and simply does not record a refusal.
+    """
+
+
 class DefaultPrinterError(RuntimeError):
     """The default could not be set or could not be verified. Never fatal --
     the queues are already provisioned; only the default is in question.
@@ -208,6 +222,117 @@ def save_state(state: dict, state_dir: Optional[str] = None) -> None:
     _write_json_atomic(
         os.path.join(state_dir or default_state_dir(), "machine.json"), state
     )
+
+
+# --------------------------------------------------------------------------- #
+# The refused-key sentinel
+# --------------------------------------------------------------------------- #
+# WHY THIS EXISTS
+# ---------------
+# ``workstation_cli`` returns exit 2 for a refused enrollment key, so that a
+# service manager will not loop on a terminal error. **launchd cannot honour
+# that.** The LaunchDaemon sets ``KeepAlive{SuccessfulExit=false}``, which
+# restarts on ANY non-zero exit, and launchd has no way to express "restart
+# unless the exit code is 2". So the comment on that exit code described a
+# behaviour that did not happen, and one revoked key meant a respawn every 60s
+# for as long as nobody looked. The measured cost of the last respawn loop on
+# this daemon was 9.8 MB/day of log.
+#
+# The four options considered are recorded in deploy/HARDWARE-VERIFICATION.md
+# Part 3. This is the sentinel option, with the cost that document assigns to it
+# -- "adds a state file an operator must know to delete" -- designed out:
+#
+#   * The sentinel records a **fingerprint of the key that was refused**, never
+#     the key. Re-minting a key changes the fingerprint, so the very act that
+#     fixes the problem clears the sentinel. No operator has to know it exists.
+#   * It also records **when**. A key that central un-revokes server-side does
+#     not change, so a fingerprint alone would stay poisoned forever; after
+#     REFUSAL_RETRY_SECONDS the next start tries again regardless.
+#   * The first refusal still exits **2**, truthfully. Only a *second* start
+#     carrying the same key exits 0. launchd therefore restarts exactly once and
+#     then stops, and anything reading the exit code of a real refusal is still
+#     told the truth.
+#
+# What this does NOT do is remove the need to watch launchd actually behave this
+# way on a Mac -- see the checklist in that document. A restart count is
+# observed, never inferred.
+
+#: Filename of the sentinel, alongside ``machine.json`` in the state dir. That
+#: directory is already 0700 and root-owned, which is why a fingerprint may live
+#: there; the key itself still never does.
+REFUSAL_FILENAME = "enroll-refused.json"
+
+#: How long a refusal suppresses a restart. Long enough that a fleet-wide key
+#: revocation cannot produce a respawn storm, short enough that un-revoking a
+#: key server-side is picked up by the next reboot rather than needing a visit.
+REFUSAL_RETRY_SECONDS = 6 * 3600
+
+
+def _key_fingerprint(enroll_key: str) -> str:
+    """SHA-256 of the key. A fingerprint identifies it without storing it."""
+    return hashlib.sha256(enroll_key.encode("utf-8")).hexdigest()
+
+
+def _refusal_path(state_dir: Optional[str] = None) -> str:
+    return os.path.join(state_dir or default_state_dir(), REFUSAL_FILENAME)
+
+
+def record_refusal(
+    enroll_key: str, reason: str, state_dir: Optional[str] = None
+) -> None:
+    """Note that this key was refused, so the next start need not find out again."""
+    _write_json_atomic(
+        _refusal_path(state_dir),
+        {"key_sha256": _key_fingerprint(enroll_key), "at": time.time(), "reason": reason},
+    )
+
+
+def clear_refusal(state_dir: Optional[str] = None) -> None:
+    """Forget any recorded refusal. Safe when there is none."""
+    try:
+        os.remove(_refusal_path(state_dir))
+    except OSError:
+        pass
+
+
+def refusal_blocks_start(
+    enroll_key: str, state_dir: Optional[str] = None, now: Optional[float] = None
+) -> Optional[str]:
+    """The recorded reason if starting again is pointless, else ``None``.
+
+    Deliberately has a side effect: a sentinel that does **not** apply -- a
+    different key, or one older than ``REFUSAL_RETRY_SECONDS`` -- is deleted
+    here. That is what makes the mechanism self-healing rather than a state file
+    someone has to remember. It is done on the read rather than on a successful
+    enrollment because a blocked start never reaches enrollment to clear it.
+
+    An unreadable or malformed sentinel blocks nothing and is removed. Failing
+    open is right for a file whose only job is to suppress work: the cost of
+    ignoring it is one more refusal, and the cost of trusting a corrupt one is a
+    machine that never enrolls again.
+    """
+    path = _refusal_path(state_dir)
+    if not os.path.exists(path):
+        return None
+    try:
+        with open(path, "r", encoding="utf-8") as fp:
+            data = json.load(fp)
+        recorded = str(data["key_sha256"])
+        at = float(data["at"])
+    except (OSError, ValueError, KeyError, TypeError):
+        log.warning("refusal sentinel at %s is unreadable; ignoring it", path)
+        clear_refusal(state_dir)
+        return None
+
+    if recorded != _key_fingerprint(enroll_key):
+        # A new key. Whatever was wrong with the old one is not this one's
+        # problem, and this is the common path back to service.
+        clear_refusal(state_dir)
+        return None
+    if (now if now is not None else time.time()) - at >= REFUSAL_RETRY_SECONDS:
+        clear_refusal(state_dir)
+        return None
+    return str(data.get("reason") or "enrollment was refused")
 
 
 def machine_uid(state_dir: Optional[str] = None) -> str:
@@ -873,7 +998,7 @@ class WorkstationClient:
         if resp.status_code == 401:
             # Central deliberately does not say whether the key is unknown or
             # revoked, so neither can this.
-            raise ServiceError("enrollment refused: the key is not valid")
+            raise EnrollmentRefused("enrollment refused: the key is not valid")
         resp.raise_for_status()
         return resp.json()
 

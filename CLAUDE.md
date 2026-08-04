@@ -1135,10 +1135,22 @@ no network. An unresolvable central killed the process, launchd respawned it eve
 60s, and the log grew **9.8 MB/day** of tracebacks naming no reason. Moving the
 call inside the loop costs nothing (once enrolled it makes no request) and drops
 that to ~44 KB/day of one stated line per interval. A refused *key* still
-re-raises, because terminal is not transient. Note the trap left behind:
+re-raises, because terminal is not transient. That left a trap, now **closed**:
 `workstation_cli` returns exit 2 for a refused key specifically so a service
 manager will not loop — but the plist's `KeepAlive{SuccessfulExit=false}` restarts
-on any non-zero exit, so on macOS it loops anyway.
+on any non-zero exit, and launchd cannot express "restart unless the exit code is
+2", so the comment described a behaviour that did not happen. Resolved with a
+**refused-key sentinel** rather than by weakening the exit code: the first
+refusal still exits 2 and records a SHA-256 of the key (never the key) beside
+`machine.json`; a second start carrying that same key logs the reason and exits
+0, so launchd restarts exactly once and stops. It clears itself when the key
+changes — re-minting is the actual fix, so the fix is the reset and no operator
+need know the file exists — and expires after 6h so a key central *un-revokes*
+server-side is not permanently poisoned by an unchanged fingerprint. A corrupt
+sentinel fails open, and `--once` neither reads nor writes it, because a
+diagnostic run must give the real answer rather than a cached one. Our half is
+unit-tested; **launchd's half is not, and needs the Mac** — a restart gets
+counted, not inferred (`deploy/HARDWARE-VERIFICATION.md` Part 3).
 
 **And a page came out**, which is the one item nothing else substitutes for: a
 Brother MFC-L8900CDW, on a queue the root daemon provisioned, with a PPD CUPS

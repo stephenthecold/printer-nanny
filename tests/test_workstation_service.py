@@ -17,6 +17,7 @@ from __future__ import annotations
 import json
 import os
 import stat
+import time
 
 import pytest
 
@@ -641,3 +642,131 @@ def test_setting_a_default_off_windows_reports_rather_than_raising():
 def test_an_empty_default_name_is_refused():
     with pytest.raises(svc.DefaultPrinterError):
         svc.set_default_printer("")
+
+
+# --------------------------------------------------------------------------- #
+# The refused-key sentinel
+# --------------------------------------------------------------------------- #
+# The contradiction this resolves: workstation_cli returns exit 2 for a refused
+# enrollment key so a service manager will not loop, but the LaunchDaemon sets
+# KeepAlive{SuccessfulExit=false}, which restarts on ANY non-zero exit. launchd
+# cannot express "restart unless the exit code is 2", so the exit code was
+# documenting a behaviour that did not occur. These tests pin the mechanism that
+# does occur. They do NOT prove launchd's side of it -- that needs a Mac and a
+# counted restart, per deploy/HARDWARE-VERIFICATION.md Part 3.
+def test_a_refused_key_does_not_block_the_first_start(tmp_path):
+    """Nothing recorded yet means nothing suppressed. The first refusal is real
+    work that has to happen before anything can be cached about it."""
+    assert svc.refusal_blocks_start("pnw_k", state_dir=str(tmp_path)) is None
+
+
+def test_the_same_refused_key_blocks_the_next_start(tmp_path):
+    svc.record_refusal("pnw_k", "enrollment refused: the key is not valid",
+                       state_dir=str(tmp_path))
+    blocked = svc.refusal_blocks_start("pnw_k", state_dir=str(tmp_path))
+    assert blocked is not None
+    assert "not valid" in blocked, "the reason must survive, or the loop is quiet AND mute"
+
+
+def test_the_sentinel_never_stores_the_key(tmp_path):
+    """It sits next to machine.json; a second copy of a live credential on disk
+    is a second thing to leak. A fingerprint identifies the key without being it."""
+    svc.record_refusal("pnw_supersecret", "nope", state_dir=str(tmp_path))
+    raw = (tmp_path / svc.REFUSAL_FILENAME).read_text(encoding="utf-8")
+    assert "pnw_supersecret" not in raw
+    assert json.loads(raw)["key_sha256"] != "pnw_supersecret"
+
+
+def test_a_new_key_clears_the_sentinel(tmp_path):
+    """This is what removes the documented cost of the sentinel option -- that an
+    operator must know to delete a state file. Re-minting the key IS the fix, so
+    the fix clears it, and nobody has to be told the file exists."""
+    svc.record_refusal("pnw_old", "revoked", state_dir=str(tmp_path))
+    assert svc.refusal_blocks_start("pnw_new", state_dir=str(tmp_path)) is None
+    assert not (tmp_path / svc.REFUSAL_FILENAME).exists(), "stale sentinel must be removed"
+
+
+def test_the_sentinel_expires_so_an_un_revoked_key_recovers(tmp_path):
+    """A key central un-revokes server-side does not change, so a fingerprint
+    alone would keep this machine dead forever. The window is what stops the
+    mechanism becoming permanent poison."""
+    svc.record_refusal("pnw_k", "revoked", state_dir=str(tmp_path))
+    just_inside = svc.REFUSAL_RETRY_SECONDS - 60
+    assert svc.refusal_blocks_start(
+        "pnw_k", state_dir=str(tmp_path), now=time.time() + just_inside
+    ) is not None
+    assert svc.refusal_blocks_start(
+        "pnw_k", state_dir=str(tmp_path), now=time.time() + svc.REFUSAL_RETRY_SECONDS + 1
+    ) is None
+
+
+def test_a_corrupt_sentinel_fails_open(tmp_path):
+    """Same call as the state file next to it: the cost of ignoring a corrupt
+    sentinel is one more refusal, the cost of trusting one is a machine that
+    never enrolls again. So it blocks nothing and is removed."""
+    (tmp_path / svc.REFUSAL_FILENAME).write_text("{not json", encoding="utf-8")
+    assert svc.refusal_blocks_start("pnw_k", state_dir=str(tmp_path)) is None
+    assert not (tmp_path / svc.REFUSAL_FILENAME).exists()
+
+
+def test_a_sentinel_missing_its_fields_fails_open(tmp_path):
+    (tmp_path / svc.REFUSAL_FILENAME).write_text('{"at": 1}', encoding="utf-8")
+    assert svc.refusal_blocks_start("pnw_k", state_dir=str(tmp_path)) is None
+
+
+def test_clearing_a_refusal_that_is_not_there_is_not_an_error(tmp_path):
+    svc.clear_refusal(state_dir=str(tmp_path))
+
+
+def test_only_a_refused_key_records_a_sentinel(tmp_path, monkeypatch):
+    """The sentinel is keyed on the enrollment key, so only a refusal OF THAT KEY
+    may write one. A sibling ServiceError is terminal too -- it still earns exit
+    2 -- but suppressing the next start would blame a key that was never wrong.
+    """
+    from printer_nanny_agent import workstation_cli
+    from printer_nanny_agent import workstation_service as service
+
+    common = ["--server", "https://c.example", "--enroll-key", "pnw_k",
+              "--state-dir", str(tmp_path)]
+
+    def raise_unrelated(*a, **k):
+        raise service.ServiceError("config is wrong in some terminal way")
+
+    monkeypatch.setattr(service, "run", raise_unrelated)
+    assert workstation_cli.main(common) == 2, "still terminal, still exit 2"
+    assert not (tmp_path / service.REFUSAL_FILENAME).exists()
+
+    def raise_refused(*a, **k):
+        raise service.EnrollmentRefused("enrollment refused: the key is not valid")
+
+    monkeypatch.setattr(service, "run", raise_refused)
+    assert workstation_cli.main(common) == 2, "the FIRST refusal exits truthfully"
+    assert (tmp_path / service.REFUSAL_FILENAME).exists()
+
+    # ...and the second start with that same key is the one that goes quiet, so
+    # launchd's KeepAlive{SuccessfulExit=false} stops after exactly one restart.
+    called = []
+    monkeypatch.setattr(service, "run", lambda *a, **k: called.append(1))
+    assert workstation_cli.main(common) == 0
+    assert called == [], "a blocked start must not reach the service at all"
+
+
+def test_once_neither_reads_nor_writes_the_sentinel(tmp_path, monkeypatch):
+    """A diagnostic run must answer "what happens if I run it now", not replay a
+    cached refusal -- and must not leave state that silences the service."""
+    from printer_nanny_agent import workstation_cli
+    from printer_nanny_agent import workstation_service as service
+
+    common = ["--server", "https://c.example", "--enroll-key", "pnw_k",
+              "--state-dir", str(tmp_path), "--once"]
+
+    def raise_refused(*a, **k):
+        raise service.EnrollmentRefused("enrollment refused: the key is not valid")
+
+    monkeypatch.setattr(service, "run", raise_refused)
+    assert workstation_cli.main(common) == 2
+    assert not (tmp_path / service.REFUSAL_FILENAME).exists(), "--once wrote a sentinel"
+
+    # A sentinel left by the service must not change what --once reports.
+    service.record_refusal("pnw_k", "revoked", state_dir=str(tmp_path))
+    assert workstation_cli.main(common) == 2, "--once must still really try"

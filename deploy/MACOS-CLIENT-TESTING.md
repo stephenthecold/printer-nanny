@@ -204,13 +204,31 @@ retried forever. After the fix, the same unreachable central produces one
 `cycle failed, will retry in 300s: …` line per interval and no traceback —
 ~44 KB/day, a ~230× reduction, verified by running it.
 
-**A related trap, not yet resolved.** `workstation_cli` returns exit **2** for a
-refused key, commented "restarting on a bad key just retries forever and buries
-the reason in a restart loop". On macOS the plist defeats that:
+**A related trap — decided 2026-08-04.** `workstation_cli` returns exit **2** for
+a refused key, commented "restarting on a bad key just retries forever and buries
+the reason in a restart loop". On macOS the plist defeated that:
 `KeepAlive{SuccessfulExit=false}` restarts on *any* non-zero exit, so exit 2
-loops too — just with one line instead of a traceback. launchd cannot express
-"restart unless the exit code is 2". Worth deciding deliberately rather than
-leaving the comment describing something that does not happen.
+looped too — just with one line instead of a traceback, because launchd cannot
+express "restart unless the exit code is 2".
+
+Resolved with a **refused-key sentinel**, not by weakening the exit code. The
+first refusal still exits 2 and writes a SHA-256 of the key — never the key —
+beside `machine.json`; a second start carrying that same key logs the reason and
+exits **0**, so launchd restarts exactly once and then stops. It clears itself
+on a key change, since re-minting is what actually fixes a revoked key, and
+expires after 6h so an un-revoked (therefore unchanged) key is not poisoned
+forever. Corrupt sentinel fails open; `--once` ignores it entirely.
+
+**Still to confirm on the Mac** — our side is unit-tested, launchd's is not:
+
+- [ ] Install with a **deliberately revoked** key; `launchctl print
+      system/com.printernanny.workstation` over ~5 minutes shows exactly **one**
+      restart and then a stopped job. Count restarts; do not infer them.
+- [ ] The refusal reason appears in the log **once**, legibly.
+- [ ] Log growth stays near the ~44 KB/day baseline, not the 9.8 MB/day the
+      old respawn loop produced.
+- [ ] Re-mint a key, reinstall, and confirm the daemon enrolls without anyone
+      deleting a file by hand.
 
 Log rotation was considered and **not** shipped: `StandardOutPath` means launchd
 opens the file and the process inherits the descriptor, so a `newsyslog` rename

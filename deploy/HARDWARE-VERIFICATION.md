@@ -11,7 +11,7 @@ build container does not have:
 |---|---|
 | Windows IPP attribute search | A Brother MFC-L8900CDW, a Windows 11 / Server 2022+ box, a second host to serve replays, and **~38 sheets of paper that a human looks at** |
 | macOS checklist (31 items) | A Mac console session, a second local account, a reboot, an MDM tenant, a directory-bound Mac, an Apple Developer ID certificate |
-| The macOS exit-2 trap | A decision, then a real `launchctl` to prove the decision took |
+| The macOS exit-2 trap | **Decided** (Part 3); still needs a real `launchctl` to prove launchd agrees |
 
 The standing rule this repo has now paid for **four** times applies to all of it:
 a queue that exists, lists and converges is not a queue that prints. Every proxy
@@ -173,15 +173,20 @@ The oracle command is run once per trial.
 To print that from the tool itself:
 
 ```bash
-python3 scripts/ipp_bisect.py <subject> <donor> --oracle <cmd> --contract
+python3 scripts/ipp_bisect.py --contract
 ```
 
-> **Documentation defect found while writing this brief, not yet fixed.**
-> `WINDOWS-IPP-BISECT-PROMPT.md` (Step 3) and `WINDOWS-MSI-TESTING.md` both
-> document this as bare `python3 scripts/ipp_bisect.py --contract`. That form
-> **fails with exit 2 and prints usage**: argparse declares `subject`, `donor`
-> and `--oracle` as required and evaluates them before the `--contract` early
-> return. Pass three placeholders as above; nothing is read from them.
+> **Fixed 2026-08-04.** This brief previously told you to pass three
+> placeholders, because the bare form — the one `WINDOWS-IPP-BISECT-PROMPT.md`
+> (Step 3) and `WINDOWS-MSI-TESTING.md` both document — exited 2 and printed
+> usage: argparse evaluates required-ness *during* `parse_args`, before the
+> `--contract` early return could be reached. The three arguments are now
+> enforced by hand after that return, so the bare form works and a real run
+> still fails identically (exit 2, same usage line) when one is missing.
+> `--contract` tells you what to build the oracle to *do*, so needing an oracle
+> to read it was backwards. The placeholder form still works, so anything
+> written against the old workaround is unaffected.
+> Covered by `tests/test_ipp_bisect.py`.
 
 ### What the oracle must do, per trial
 
@@ -472,7 +477,7 @@ was being tested wrong.)*
 
 ---
 
-# Part 3 — The macOS exit-2 trap (unresolved; needs a decision, then a rig)
+# Part 3 — The macOS exit-2 trap (decided; needs a rig to confirm launchd agrees)
 
 This is not a checklist item. It is a contradiction between two files that ship
 together, and it is currently documented as unresolved.
@@ -495,8 +500,41 @@ handler — an unresolvable central killed the process, launchd respawned it eve
 refused *key* still re-raises, because terminal is not transient — and that is
 exactly the path this trap sits on.
 
-**This needs a decision before it needs a test.** The options, with what each
-costs:
+**DECIDED 2026-08-04: the sentinel, with its documented cost designed out.**
+The four options are kept below for the reasoning. What shipped is option 3,
+refined so that no operator ever has to know a state file exists:
+
+- The first refusal still exits **2**, truthfully, and records a sentinel in the
+  state dir next to `machine.json`.
+- A *second* start carrying the same key finds the sentinel, logs the reason, and
+  exits **0** — so launchd restarts exactly **once** and then stops. Anything
+  reading the exit code of a real refusal is still told the truth; only the
+  pointless repeat is quiet.
+- The sentinel stores a **SHA-256 of the key, never the key** — a second copy of
+  a live credential on disk is a second thing to leak.
+- **Re-minting the key clears it**, because the fingerprint no longer matches.
+  That is the action which actually fixes the problem, so the fix is the reset
+  and the "operator must know to delete it" cost disappears.
+- It also **expires** after `REFUSAL_RETRY_SECONDS` (6h). A key that central
+  *un-revokes* server-side does not change, so a fingerprint alone would keep the
+  machine dead forever; the window bounds that without reopening the loop.
+- A corrupt or truncated sentinel **fails open** and is removed — the same call
+  the state file next to it already makes, for the same reason: ignoring it costs
+  one more refusal, trusting it costs a machine that never enrolls again.
+- `--once` neither reads nor writes it. A technician asking "what happens if I
+  run this now" must get the real answer, not a cached one.
+
+`agent/printer_nanny_agent/workstation_service.py` (`refusal_blocks_start`,
+`record_refusal`, `clear_refusal`) and `workstation_cli.py`. Eight unit tests in
+`tests/test_workstation_service.py` pin the mechanism.
+
+**This does not close the item.** Everything above is our side of the contract.
+launchd's side — that `SuccessfulExit=false` really does stop after one restart
+when we exit 0 — is asserted by nothing here, and this codebase's whole history
+is proxies for "it works" that were not. The checklist below still has to run on
+a Mac, and a restart is **counted, not inferred**.
+
+The options as they stood, with what each costs:
 
 | Option | What it costs |
 |---|---|

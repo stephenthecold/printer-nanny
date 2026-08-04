@@ -488,6 +488,51 @@ def test_cli_refuses_rather_than_tracebacks_on_an_inconclusive_premise(tmp_path)
     assert ib.main(argv + ["--retries", "0"]) == 3
 
 
+# --- --contract is readable before you have anything to run ------------------
+# These need no shell: --contract returns before the oracle is ever built, which
+# is the whole point of it.
+def test_contract_prints_without_captures_or_an_oracle(capsys):
+    """The bare form is what three deploy/ docs tell an operator to type.
+
+    It exited 2 with a usage message for as long as it existed. argparse
+    evaluates required-ness *during* parse_args, so the `if args.contract` early
+    return below it could never be reached without supplying the very arguments
+    the flag exists to help you construct: it tells you what to build the oracle
+    to do, and it was unreadable until you had already built one.
+    """
+    assert ib.main(["--contract"]) == 0
+    out = capsys.readouterr().out
+    assert "stdin" in out and "VERDICT" in out
+
+
+def test_contract_still_works_with_the_placeholder_form(capsys):
+    """The workaround the playbook documented must not become wrong in turn."""
+    assert ib.main(["x", "y", "--oracle", "z", "--contract"]) == 0
+    assert "VERDICT" in capsys.readouterr().out
+
+
+@pytest.mark.parametrize(
+    "argv, missing",
+    [
+        ([], ["subject", "donor", "--oracle"]),
+        (["subj.ipp"], ["donor", "--oracle"]),
+        (["subj.ipp", "donor.ipp"], ["--oracle"]),
+    ],
+)
+def test_a_real_run_still_requires_all_three(argv, missing, capsys):
+    """Making them optional for --contract must not make them optional to run.
+
+    They are enforced by hand now, so this asserts the exit code and the message
+    stayed exactly what argparse produced -- an operator who forgets an argument
+    should see no difference, and only --contract should behave better.
+    """
+    with pytest.raises(SystemExit) as exc:
+        ib.main(argv)
+    assert exc.value.code == 2
+    assert "the following arguments are required: " + ", ".join(missing) \
+        in capsys.readouterr().err
+
+
 # --- partitioning ------------------------------------------------------------
 def test_partition_covers_everything_without_overlap():
     items = [f"a{i}" for i in range(17)]
