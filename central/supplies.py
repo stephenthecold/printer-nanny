@@ -41,7 +41,7 @@ catcher. Those come back with a generic type and an explicit
 
 from __future__ import annotations
 
-from typing import Optional
+from typing import List, Optional, Sequence
 
 from central import models as m
 from central.snmp_parse import (
@@ -51,14 +51,63 @@ from central.snmp_parse import (
 )
 
 __all__ = [
+    "REFILL_TOLERANCE_PCT",
     "SUPPLY_CLASS_CONSUMED",
     "SUPPLY_CLASS_OTHER",
     "SUPPLY_CLASS_RECEPTACLE",
     "is_receptacle",
     "level_label",
     "receptacle_supply_types",
+    "refill_boundaries",
     "remaining_pct",
 ]
+
+#: How far a level has to CLIMB before we call it a fresh cartridge rather than
+#: measurement noise. Devices round, some report in 5% or 10% buckets, and a
+#: toner cartridge shaken by a passing technician genuinely reads a point or two
+#: higher for a poll or two. 5 points is the value the depletion forecast has
+#: always used; it lives here now so the yield measurement cannot pick a
+#: different one -- see ``refill_boundaries``.
+REFILL_TOLERANCE_PCT = 5.0
+
+
+def refill_boundaries(
+    levels: "Sequence[Optional[float]]",
+    refill_tolerance: float = REFILL_TOLERANCE_PCT,
+) -> "List[int]":
+    """Indices at which a fresh cartridge was fitted, in a level series.
+
+    ``levels`` is one supply slot's ``level_pct`` readings in observation order.
+    An index ``i`` is returned when ``levels[i]`` is more than
+    ``refill_tolerance`` points ABOVE ``levels[i-1]``: consumables do not refill
+    themselves, so a rise that large is somebody putting a new cartridge in.
+    This is LibreNMS's cheap trick, and it is the only cartridge-change signal
+    this system has -- devices do not report "replaced".
+
+    **One rule, two callers, deliberately.** The depletion forecast
+    (``worker.jobs._fit_depleting_segment``) needs the LAST boundary, so it does
+    not average a spent cartridge's slope against its replacement's;
+    ``central.supply_yield`` needs EVERY boundary, because the interval between
+    two of them is exactly the interval whose pages it divides. Those must never
+    be able to disagree about what a replacement is -- a forecast that has reset
+    its baseline while the yield measurement is still accumulating pages from the
+    previous cartridge would produce a number that is wrong in a way nothing
+    reports.
+
+    ``None`` levels are skipped rather than treated as a value: a poll that
+    reported no level is silence, and a level of ``None`` between 4% and 100%
+    must not read as two separate steps. Skipping means the comparison is always
+    against the last level actually observed.
+    """
+    out: List[int] = []
+    prev: Optional[float] = None
+    for i, level in enumerate(levels):
+        if level is None:
+            continue
+        if prev is not None and level > prev + refill_tolerance:
+            out.append(i)
+        prev = level
+    return out
 
 # Supply types that ARE receptacles when the device did not say. See the module
 # docstring: every path that produces ``waste`` produces it from a container.

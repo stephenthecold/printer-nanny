@@ -85,6 +85,12 @@
       than the day-to-day inbox. client_readonly sees the same recommendations
       in their portal, scoped to their own fleet. -#}
   {%- set _ = g_admin.append({'href': '/supplies/reorder', 'label': 'Supplies'}) -%}
+  {#- Cartridge yield. Its own entry rather than a tab on Supplies: one page
+      answers "what do I order this week", the other "is what we ordered
+      delivering what it should", and they are read months apart. Active
+      marking is longest-prefix, so /supplies/yield lights this and not
+      Supplies. -#}
+  {%- set _ = g_admin.append({'href': '/supplies/yield', 'label': 'Yield'}) -%}
   {%- set _ = g_admin.append({'href': '/security/posture', 'label': 'Security'}) -%}
 {%- endif -%}
 {%- if user.role.value == 'admin' -%}

@@ -973,6 +973,133 @@ class ReadingRollup(Base):
     )
 
 
+class SupplyCycle(Base):
+    """One cartridge's life in one slot: fitted here, replaced there, N pages between.
+
+    **This is the measurement half of yield-gap detection** (``central.supply_yield``);
+    the verdict is computed on read and stored nowhere, exactly as the reorder
+    recommendation is. What is persisted is what cannot be recomputed cheaply: a
+    cartridge can last a year, and the raw readings behind it are only kept
+    ``retention.raw_days`` (90). Rolling this up as it happens is what lets a
+    twelve-month drum be measured at all.
+
+    A "cycle" is bounded by two replacements, detected by
+    ``supplies.refill_boundaries`` -- a level that RISES by more than the
+    tolerance, which is the only cartridge-change signal a printer gives us. It
+    follows that the first cycle we ever see for a slot is **left-truncated**: we
+    joined partway through some cartridge's life, so its pages are not its yield.
+    That is why ``start_level_pct`` is recorded rather than assumed to be 100,
+    and why the yield calculation normalises by the level actually consumed and
+    refuses a cycle that consumed too little to say anything.
+
+    **Both ends of every measure are stored, and the direction of error matters.**
+    ``pages`` accumulates POSITIVE deltas only (a meter reset contributes 0, per
+    ``queries.positive_delta``), so a replaced formatter board cannot manufacture
+    a huge yield. ``min_level_pct`` rather than ``end_level_pct`` is what the
+    consumed fraction is measured against, because a cartridge that read 2% and
+    then blipped back to 4% before it was swapped consumed 98 points, not 96.
+    Understating consumption OVERSTATES yield, which fails towards "no finding" --
+    the safe direction when the finding is an accusation.
+    """
+
+    __tablename__ = "supply_cycles"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    printer_id: Mapped[int] = mapped_column(
+        ForeignKey("printers.id", ondelete="CASCADE"), index=True
+    )
+    # The slot, spelled as the device reports it in ``supply_snapshot``. Stored
+    # as plain strings rather than a FK to ``supplies.id`` because the slot
+    # outlives the row: a Supply row is (printer, type, color) and is rewritten
+    # by ingest, while "the black toner slot on printer 7" is what a cartridge
+    # history is about. ``color`` is "" and never NULL so the lookup is a plain
+    # equality on every dialect -- NULLs compare distinct in SQL, which would
+    # silently open a second cycle for the same slot on a device that reports no
+    # colour.
+    supply_type: Mapped[str] = mapped_column(String(40))
+    color: Mapped[str] = mapped_column(String(40), default="")
+
+    started_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    # The newest observation folded into this cycle. Doubles as the scan
+    # watermark: the next pass reads strictly after it, so a poll is never
+    # counted twice and the history is never re-walked.
+    last_ts: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    # When the replacement that ENDED this cycle was observed. NULL == still the
+    # cartridge in the machine.
+    ended_at: Mapped[Optional[datetime]] = mapped_column(
+        DateTime(timezone=True), default=None
+    )
+
+    start_level_pct: Mapped[float] = mapped_column(Float)
+    end_level_pct: Mapped[float] = mapped_column(Float)
+    min_level_pct: Mapped[float] = mapped_column(Float)
+
+    start_page_count: Mapped[Optional[int]] = mapped_column(Integer, default=None)
+    end_page_count: Mapped[Optional[int]] = mapped_column(Integer, default=None)
+    #: Positive meter deltas summed across the cycle. Not
+    #: ``end_page_count - start_page_count``: that reads a meter reset as a
+    #: negative cartridge.
+    pages: Mapped[int] = mapped_column(Integer, default=0)
+    readings_count: Mapped[int] = mapped_column(Integer, default=1)
+    #: True once a replacement closed it. An open cycle is a measurement in
+    #: progress and is never yield evidence -- a cartridge half used is not a
+    #: cartridge that under-delivered.
+    complete: Mapped[bool] = mapped_column(Boolean, default=False)
+
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+
+    printer: Mapped[Printer] = relationship()
+
+    __table_args__ = (
+        # Every read is "this printer's cycles for this slot" -- the scan looks
+        # up the open one, the report aggregates the complete ones.
+        Index("ix_supply_cycles_printer_slot", "printer_id", "supply_type", "color"),
+        # ...except the replacement log, which is "the fleet's, newest first".
+        Index("ix_supply_cycles_ended", "ended_at"),
+    )
+
+
+class SupplyYieldExpectation(Base):
+    """What a cartridge for this model is SUPPOSED to yield, entered by an operator.
+
+    Deliberately global (no ``client_id``): a cartridge's rated yield is a
+    property of the hardware, not of the customer who owns it, and scoping it per
+    tenant would mean re-typing the same datasheet number for every client with
+    the same printer.
+
+    ``model_tag`` is a case-insensitive SUBSTRING of ``printers.model``, matched
+    by the same rule as a driver package: at least 3 characters, longest tag
+    wins, and an exact tie is REFUSED rather than guessed. SNMP model strings
+    vary between firmware revisions ("Brother MFC-L8900CDW series"), so a
+    substring is the only workable match -- and a coin flip between two
+    equally-specific numbers would produce a yield gap that is an artefact of row
+    order.
+
+    ``color`` is "" for "any colour of this supply type", which is the common
+    case (one rated yield for a colour set). A row naming a specific colour is
+    more specific and wins.
+    """
+
+    __tablename__ = "supply_yield_expectations"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    model_tag: Mapped[str] = mapped_column(String(200))
+    supply_type: Mapped[str] = mapped_column(String(40))
+    color: Mapped[str] = mapped_column(String(40), default="")
+    #: Rated pages per cartridge, e.g. 3000 for a standard-yield black toner.
+    expected_pages: Mapped[int] = mapped_column(Integer)
+    note: Mapped[Optional[str]] = mapped_column(String(300), default=None)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+
+    __table_args__ = (
+        UniqueConstraint(
+            "model_tag", "supply_type", "color", name="uq_supply_yield_expectation"
+        ),
+    )
+
+
 class PrinterEvent(Base):
     __tablename__ = "printer_events"
 

@@ -14,6 +14,12 @@ env/
 *.db
 .env
 .env.local
+# The SECRET_KEY central generates when the environment supplies none
+# (central/config.py:resolve_secret_key). It lands beside the SQLite database,
+# which for the default DATABASE_URL is the repository root -- so any local
+# `alembic`, `seed` or `uvicorn` run drops a live credential into the checkout.
+# Untracked AND unignored is the dangerous combination: `git add -A` commits it.
+.printer-nanny-secret-key
 
 # Local compose customisation. Deliberately untracked so `install.sh --update`
 # can fast-forward docker-compose.yml underneath it without ever colliding.

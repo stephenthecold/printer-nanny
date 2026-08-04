@@ -224,6 +224,62 @@ SPECS: List[Spec] = [
          "The worker cycles every 60s; a recommendation is a daily-grade "
          "decision, so publishing every cycle would be a firehose of the same "
          "facts. Each event carries a stable dedupe key regardless."),
+    # Supplies (yield) — pages actually delivered per cartridge, against what a
+    # cartridge is supposed to deliver (central.supply_yield). A persistent
+    # shortfall is the non-OEM / refill signal, and that is an ACCUSATION: it
+    # tells an MSP their customer is buying grey-market consumables. Every
+    # default here is therefore set so that saying nothing is the easy outcome
+    # and saying something takes real evidence.
+    Spec("yield.enabled", "bool", "Supplies (yield)",
+         "Measure pages per cartridge", True,
+         "Records a cartridge cycle each time a supply level RISES (the only "
+         "replacement signal a printer gives) and counts the pages printed "
+         "between one replacement and the next. Off means no cycles are "
+         "recorded and the yield report stays empty — it does not hide "
+         "measurements already taken."),
+    Spec("yield.scan_interval_min", "int", "Supplies (yield)",
+         "Scan for cartridge changes every (minutes)", 360,
+         "A cartridge change is a monthly-grade event, so this does not belong "
+         "on the 60-second worker cycle. Each pass reads only what arrived "
+         "since the last one, so a longer interval costs nothing in accuracy."),
+    Spec("yield.min_cycles", "int", "Supplies (yield)",
+         "Minimum completed cartridges before reporting", 3,
+         "One short cartridge is not evidence — it is a heavy month, a "
+         "duplex-off print run, or somebody swapping a cartridge early. Below "
+         "this count the report shows the measurement and states INSUFFICIENT "
+         "DATA rather than a verdict. Minimum 2; 1 would report a single "
+         "sample as a finding."),
+    Spec("yield.min_consumed_pct", "float", "Supplies (yield)",
+         "Ignore a cartridge that used less than (% of its level)", 60.0,
+         "A cartridge pulled at 70% remaining says nothing about its yield. "
+         "Cycles below this are recorded but excluded from the calculation. "
+         "Observed yield is scaled to a full cartridge by the level actually "
+         "consumed, so this is the point below which that scaling stops being "
+         "trustworthy."),
+    Spec("yield.shortfall_pct", "float", "Supplies (yield)",
+         "Flag when yield is below expected by (%)", 30.0,
+         "Deliberately conservative. A false positive here tells an MSP their "
+         "customer is buying grey-market cartridges, so the default only fires "
+         "on a shortfall too large to be page coverage or a heavy month. "
+         "Lower it only if you are prepared to check each finding by hand."),
+    Spec("yield.baseline_min_cycles", "int", "Supplies (yield)",
+         "Fleet baseline needs at least (cartridges)", 5,
+         "With no operator-entered expected yield, the expectation is the "
+         "MEDIAN pages-per-cartridge of the same model and supply across the "
+         "rest of the fleet. Below this many samples there is no baseline and "
+         "the report says so — it never falls back to a guess."),
+    Spec("yield.baseline_min_printers", "int", "Supplies (yield)",
+         "…from at least (other printers)", 3,
+         "Samples from one device are that device's habits, not a baseline. "
+         "The subject printer's own cartridges are always excluded from its "
+         "own baseline, or a printer running non-OEM would calibrate the "
+         "expectation to itself and never be flagged."),
+    Spec("yield.emit_events", "bool", "Supplies (yield)",
+         "Publish supply.replaced and supply.yield_below_expected events", False,
+         "Sends a typed event to the outbound event bus when a cartridge is "
+         "replaced, and when a slot's measured yield falls short. Off by "
+         "default: the report works without a bus, and publishing a customer's "
+         "consumable habits to an external system is an opt-in decision."),
     # ESG / Sustainability — turn page-count history into estimated print
     # footprint (paper, CO2e, energy, trees). Every factor is operator-tunable
     # so a customer can plug in their own paper stock / grid figures. Defaults
@@ -541,7 +597,8 @@ SETTINGS_GROUPS: "Dict[str, tuple]" = {
          "Event bus"],
     ),
     "alerts": ("Alerts & Reports",
-               ["Alerts", "Supplies (reorder)", "Reports", "ESG / Sustainability"]),
+               ["Alerts", "Supplies (reorder)", "Supplies (yield)", "Reports",
+                "ESG / Sustainability"]),
     # Retention lives here because it is the other half of polling: how often we
     # ask, and how long we keep what comes back.
     # "Dashboard" is here because it is the third half of the same question:

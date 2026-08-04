@@ -52,6 +52,13 @@ JOBS = (
     # one's. Interval-gated internally (reorder.emit_interval_min) and off by
     # default, so on most installs and most cycles it is a settings read.
     jobs.publish_reorder_recommendations,
+    # Fold new readings into cartridge cycles (central.supply_yield), which is
+    # what makes pages-per-cartridge measurable at all. Interval-gated
+    # internally (yield.scan_interval_min, default 6h), so on almost every cycle
+    # this is one settings read and a marker comparison. After forecast_supplies
+    # because both walk the same reading history and the forecast is the one an
+    # operator is waiting on.
+    jobs.scan_supply_cycles,
     # Interval-gated internally (directory.sync_interval_min); a no-op on most
     # cycles. After the alert path so a slow directory never delays alerting.
     jobs.sync_directories,

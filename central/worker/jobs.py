@@ -5,6 +5,7 @@ returns a small summary dict so the worker loop (and tests) can assert on it.
 
 from __future__ import annotations
 
+import logging
 from datetime import datetime, timedelta, timezone
 from typing import Optional
 
@@ -14,6 +15,7 @@ from sqlalchemy.orm import Session
 from central import models as m
 from central import queries
 from central import supplies as supplies_lib
+from central.supplies import REFILL_TOLERANCE_PCT, refill_boundaries
 from central.channels import (
     Notification,
     routable_channels,
@@ -36,6 +38,8 @@ from central.events.emit import (
     emit_printer_offline,
 )
 from central.runtime import load_settings
+
+log = logging.getLogger("central.worker.jobs")
 
 # Alert states that still represent an outstanding condition. An ACKNOWLEDGED
 # alert is "seen but not fixed", so a cleared condition must resolve it too --
@@ -1284,7 +1288,7 @@ FORECAST_MIN_PAGES_SPAN = 50.0
 
 
 def _fit_depleting_segment(
-    points: list, min_span: float, refill_tolerance: float = 5.0
+    points: list, min_span: float, refill_tolerance: float = REFILL_TOLERANCE_PCT
 ) -> Optional[tuple]:
     """Least-squares fit of supply level against an increasing axis.
 
@@ -1303,14 +1307,17 @@ def _fit_depleting_segment(
 
     A jump UP of more than ``refill_tolerance`` points is a fresh cartridge, and
     resets the baseline to that index, so a spent cartridge's slope is never
-    averaged against its replacement's.
+    averaged against its replacement's. That test lives in
+    ``central.supplies.refill_boundaries`` -- shared with the yield measurement,
+    which needs every boundary rather than only the last one, and which must not
+    be able to disagree with the forecast about what a replacement is.
     """
     if len(points) < FORECAST_MIN_POINTS:
         return None
-    start = 0
-    for i in range(1, len(points)):
-        if points[i][1] > points[i - 1][1] + refill_tolerance:
-            start = i  # refill detected — baseline resets here
+    boundaries = refill_boundaries(
+        [lvl for _, lvl in points], refill_tolerance=refill_tolerance
+    )
+    start = boundaries[-1] if boundaries else 0
     seg = points[start:]
     if len(seg) < FORECAST_MIN_POINTS:
         return None
@@ -1342,7 +1349,7 @@ def _fit_depleting_segment(
 
 
 def forecast_days_to_empty(
-    readings: list[tuple[datetime, float]], refill_tolerance: float = 5.0
+    readings: list[tuple[datetime, float]], refill_tolerance: float = REFILL_TOLERANCE_PCT
 ) -> Optional[float]:
     """Days until level→0, from a least-squares fit over the recent depleting segment.
 
@@ -1381,7 +1388,7 @@ def forecast_days_to_empty(
 
 
 def forecast_pages_to_empty(
-    readings: list, refill_tolerance: float = 5.0
+    readings: list, refill_tolerance: float = REFILL_TOLERANCE_PCT
 ) -> Optional[float]:
     """Pages until level→0, fitting supply level against the printer's page meter.
 
@@ -1768,6 +1775,154 @@ def publish_reorder_recommendations(
             last_raw.value = now.isoformat()
         db.commit()
     return {"reorder_events": result.as_dict()}
+
+
+# --------------------------------------------------------------------------- #
+# Cartridge cycles: the measurement behind yield-gap detection
+# --------------------------------------------------------------------------- #
+# Machine state, not operator config -- a plain app_settings row, like the
+# reorder emit marker above and the report send markers in central.reports.
+# load_settings ignores non-Spec keys, so it never surfaces in the Settings UI.
+YIELD_SCAN_MARKER = "yield.last_scan_at"
+
+
+def scan_supply_cycles(db: Session, now: Optional[datetime] = None) -> dict:
+    """Fold new readings into cartridge cycles, and report yield shortfalls.
+
+    Interval-gated (``yield.scan_interval_min``, default 6 hours) off a marker
+    row. A cartridge change is a monthly-grade event and each pass reads only
+    what arrived since the last one, so running this on the 60-second cycle
+    would buy nothing and cost a query per printer per minute.
+
+    **Per printer, committed per printer.** A malformed snapshot on one device
+    must not cost the rest of the fleet its cartridge history, and a cycle
+    half-written is worse than one not written -- the next pass would resume from
+    a watermark whose pages had already been counted.
+
+    Events are opt-in (``yield.emit_events``, default off) and are emitted only
+    for cartridges this pass actually closed, plus the standing shortfalls, so a
+    consumer sees each replacement exactly once. With the bus uninstalled or the
+    setting off, nothing is transmitted and the result says so rather than
+    reporting a send that did not happen.
+    """
+    from central import supply_yield as _yield
+
+    settings = load_settings(db)
+    thresholds = _yield.YieldThresholds.from_runtime(settings)
+    if not thresholds.enabled:
+        return {"supply_cycles": "disabled"}
+
+    now = _aware(now) or _now()
+    marker = db.get(m.AppSetting, YIELD_SCAN_MARKER)
+    if marker is not None and marker.value:
+        try:
+            last = _aware(datetime.fromisoformat(marker.value))
+        except ValueError:
+            last = None  # hand-edited/corrupt marker: scan rather than wedge
+        if last is not None and last > now - timedelta(
+            minutes=thresholds.scan_interval_min
+        ):
+            return {}
+
+    totals = {"points": 0, "extended": 0, "opened": 0, "closed": 0}
+    closed_ids: list = []
+    scanned = 0
+    for printer in db.scalars(
+        select(m.Printer).where(
+            m.Printer.discovery_state == m.DiscoveryState.approved
+        )
+    ):
+        try:
+            scan = _yield.scan_printer(db, printer, now=now, runtime=settings)
+            db.commit()
+            # Read AFTER the commit: the ids only exist once the INSERTs have
+            # run, and a scan whose transaction failed must contribute no
+            # replacements to announce.
+            closed_ids.extend(cycle.id for cycle in scan.closed)
+        except Exception:  # noqa: BLE001 -- one printer must not stop the fleet
+            db.rollback()
+            log.exception("supply-cycle scan failed for printer %s", printer.id)
+            continue
+        scanned += 1
+        counts = scan.counts
+        for key in totals:
+            totals[key] += counts[key]
+
+    if marker is None:
+        db.add(m.AppSetting(key=YIELD_SCAN_MARKER, value=now.isoformat()))
+    else:
+        marker.value = now.isoformat()
+    db.commit()
+
+    result = {
+        "printers": scanned,
+        "cartridges_replaced": totals["closed"],
+        "cycles_opened": totals["opened"],
+        "readings": totals["points"],
+    }
+    events = _publish_yield_events(
+        db, thresholds, closed_ids=closed_ids, now=now
+    )
+    if events:
+        result["events"] = events
+    return {"supply_cycles": result}
+
+
+def _publish_yield_events(
+    db: Session,
+    thresholds,
+    *,
+    closed_ids: list,
+    now: datetime,
+) -> dict:
+    """Emit ``supply.replaced`` / ``supply.yield_below_expected``, or say why not.
+
+    Separate from the scan so the measurement is never contingent on the bus:
+    with events off (the default) the cartridge history is still recorded, which
+    is what the report reads. Reported as ``{"published": 0, "reason": ...}``
+    rather than as a silent success -- the ``ChannelResult.sent`` rule.
+    """
+    from central import supply_yield as _yield
+    from central.events.emit import (
+        emit_supply_replaced,
+        emit_supply_yield_below_expected,
+    )
+
+    if not thresholds.emit_events:
+        return {"published": 0, "reason": "yield.emit_events is off"}
+
+    published = 0
+    failed = 0
+    for cycle_id in closed_ids:
+        cycle = db.get(m.SupplyCycle, cycle_id)
+        if cycle is None or cycle.printer is None:
+            continue
+        try:
+            if emit_supply_replaced(db, cycle.printer, cycle) is not None:
+                published += 1
+        except Exception:  # noqa: BLE001 -- one bad row must not stop the rest
+            failed += 1
+            log.exception("emitting supply.replaced for cycle %s failed", cycle_id)
+
+    for row in _yield.assessments(db, thresholds=thresholds):
+        if not row.is_below:
+            continue
+        printer = db.get(m.Printer, row.printer_id)
+        if printer is None:
+            continue
+        try:
+            if emit_supply_yield_below_expected(
+                db, printer, row, threshold_pct=thresholds.shortfall_pct,
+                period=now.date().isoformat(),
+            ) is not None:
+                published += 1
+        except Exception:  # noqa: BLE001
+            failed += 1
+            log.exception(
+                "emitting supply.yield_below_expected for %s failed", row.dedupe_key
+            )
+    db.commit()
+    return {"published": published, "failed": failed}
 
 
 def prune_login_attempts(db: Session, now: Optional[datetime] = None) -> dict:

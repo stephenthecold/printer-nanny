@@ -26,10 +26,10 @@ single operator-followable brief for that part.
 | | State |
 |---|---|
 | Phase 1 (§4) | **DONE**, all six items, plus one found while doing them |
-| Phase 2 (§5) | **F1–F7, F9, F10, F11 DONE. F8 and F12 NOT BUILT.** |
+| Phase 2 (§5) | **F1–F11 DONE. F12 NOT BUILT.** |
 | Phase 3 (§6a) | **NOT STARTED.** Every item re-checked against code below |
 | Phase 3 (§6b) | **NOT STARTED**, and not startable here — see `deploy/HARDWARE-VERIFICATION.md` |
-| Version | central **0.30.0** / agent **0.17.0**. Not 1.0.0 — §6c is unreached |
+| Version | central **0.32.0** / agent **0.17.0**. Not 1.0.0 — §6c is unreached |
 
 ### Errors in this document, corrected below
 
@@ -94,7 +94,7 @@ finding rather than fixed, because this pass was documentation-only.
 | Retention | Raw readings 90 days, then one rollup row per printer per day, kept forever |
 | PSA integration | **Dropped.** FreeScout remains the ticket path |
 | Compliance (SIEM/FIPS/KMS) | **Deferred entirely.** ~~SCIM~~ — **correction:** SCIM 2.0 already shipped (`b608c55`, `central/api/scim.py`), so it was never deferrable. SIEM, FIPS and KMS remain deferred |
-| Version at completion | **1.0.0** *(not reached — currently central 0.30.0 / agent 0.17.0)* |
+| Version at completion | **1.0.0** *(not reached — currently central 0.32.0 / agent 0.17.0)* |
 
 ### On the single-PR decision
 
@@ -241,7 +241,7 @@ Everything else in §3 explicitly waits.
 
 ---
 
-## 5. Phase 2 — the feature program — **F1–F7, F9, F10, F11 DONE; F8 and F12 NOT BUILT**
+## 5. Phase 2 — the feature program — **F1–F11 DONE; F12 NOT BUILT**
 
 | | Feature | State |
 |---|---|---|
@@ -252,7 +252,7 @@ Everything else in §3 explicitly waits.
 | F5 | Occurrence-rate alerting | **DONE** — `AlertConditionType.occurrence_rate` + `/manage/alert-rules`, migration 0037 |
 | F6 | Device security-posture report | **DONE**, but **not the work this document described** — see below |
 | F7 | Fleet-wide printer search | **DONE** — `/printers`, tenant-scoped in the WHERE, no index by design |
-| F8 | Yield-gap / non-OEM detection | **NOT BUILT.** No code, no tests, no migration. Still open |
+| F8 | Yield-gap / non-OEM detection | **DONE** — `central/supply_yield.py`, `supply_cycles` + `supply_yield_expectations`, `/supplies/yield`, migration 0043 |
 | F9 | Per-client white-label | **DONE** — `central/branding.py`, migration 0038 |
 | F10 | Server-pushed device definitions | **DONE** — `central/device_definitions.py` + the agent's vendored copy, migration 0039 |
 | F11 | Collector redundancy | **DONE** — `central/collector.py`, migration 0040 |
@@ -405,20 +405,42 @@ rather than lossy.
 operational gap: search by IP, serial, asset tag, hostname, model and display
 name across all tenants for staff, scoped for `client_readonly`.
 
-### F8 — Yield-gap and non-OEM detection *(M–L)* — **NOT BUILT; still open**
+### F8 — Yield-gap and non-OEM detection *(M–L)* — **DONE**
 
-Confirmed absent 2026-08-03: no module, no route, no migration, no test.
+`central/supply_yield.py`, `supply_cycles` + `supply_yield_expectations`,
+`/supplies/yield` (staff only), worker job `scan_supply_cycles`, migration 0043,
+59 tests. LibreNMS's trick is what it is built on: a level that **rises** is the
+cartridge-change signal, and that test is `supplies.refill_boundaries`, extracted
+from the depletion forecast rather than copied beside it — the forecast wants the
+last boundary, this wants every one, and two implementations that disagreed would
+credit a cartridge's pages to its predecessor with nothing reporting it.
 
-Gated on F1, which is now done, so the blocker is gone. Compares observed
-pages-per-cartridge against expected yield; a persistent gap is the
-non-OEM/refill signal. LibreNMS's cheap trick is worth copying: log *"Toner X was
-replaced"* when a level **rises**, which is what makes yield measurable at all.
+Both things F1 asked of it are honoured, and one of them is where the only real
+defect was. The series is rollups below `retention.effective_raw_days` and raw
+readings above it — **plus raw readings below it for days no rollup covers**,
+because deletion ships OFF and the rollup pass works forward from a watermark a
+bounded number of printer-days per cycle, so a real install has old raw rows with
+no rollup. Reading only rollups there discarded that history in silence: the
+cartridges with the most history were measured over the least of it. Every unit
+test passed over it; the required end-to-end smoke against a seeded DB is what
+found it.
 
-Two things F1 changed that this now has to honour: the daily rollup carries
-per-supply levels (deliberately, for exactly this class of use), and
-`retention.raw_days` has a floor computed from the forecast's own window rather
-than a literal — so a yield calculation reaching further back than 90 days must
-read rollups, not raw readings.
+**Expected yield is BOTH sources, with the source stated on every row.** An
+operator-entered datasheet figure per model tag (matched as a case-insensitive
+substring, longest wins, exact tie refused — the driver-package rule) beats a
+fleet-derived MEDIAN across *other* printers of the same model. The subject is
+excluded from its own baseline, or a printer running non-OEM calibrates the
+expectation to itself; and the baseline's real weakness — a fleet where every
+unit of a model runs non-OEM calibrates to non-OEM and finds nothing — is stated
+in the UI rather than buried.
+
+**Minimum confidence: 3 completed cartridges**, each having consumed ≥60% of its
+level, before any verdict; below that the row reads *insufficient data* and shows
+the measurement without a conclusion. A missing expectation reads *no expected
+yield*, never *within expected* — the same correction §5's F6 needed, applied
+before it could be made. The flag is presented as "yield below expected" at a
+conservative default 30% shortfall, operator-settable, with the non-OEM reading
+offered as an interpretation beside the things that equally explain it.
 
 ### F9 — Per-client white-label *(M)*
 
@@ -562,7 +584,7 @@ converges is not a queue that prints.
 
 ### 6c. Version — **not reached**
 
-Currently **central 0.30.0 / agent 0.17.0**. 1.0.0 is gated on §6a and §6b, and
+Currently **central 0.32.0 / agent 0.17.0**. 1.0.0 is gated on §6a and §6b, and
 D4 in particular ("must be fixed before any 1.0 claim") is still open.
 
 **1.0.0** for central. Agent to 1.0.0 only if `agent/` changed during the program

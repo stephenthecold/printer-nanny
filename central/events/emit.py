@@ -402,3 +402,108 @@ def emit_supply_reorder_recommended(
         client_id=printer.client_id,
         idempotency_key="supply.reorder_recommended:supply:%s:%s" % (supply.id, window),
     )
+
+
+def emit_supply_replaced(
+    db: Session, printer: m.Printer, cycle: m.SupplyCycle
+) -> Optional[m.OutboundEvent]:
+    """``supply.replaced`` -- a cartridge came out, and here is what it delivered.
+
+    LibreNMS logs "Toner X was replaced" off a rising level; this is the same
+    fact, typed, with the measurement attached. That measurement is the point: a
+    replacement on its own tells a consumer nothing they could not see, while
+    "this cartridge delivered 1,180 pages over 96 points of level" is what an ERP
+    can price, trend or reconcile against a purchase.
+
+    Keyed on the CYCLE id, which is unique and permanent, so a re-run of the scan
+    or a replayed worker cycle cannot emit the same replacement twice.
+    """
+    from central.supply_yield import consumed_pct, observed_yield
+
+    ctx = _context(db, printer)
+    data = dict(ctx)
+    data["supply"] = {
+        "type": _text(cycle.supply_type, 40),
+        "color": _text(cycle.color, 40),
+    }
+    data["cycle"] = {
+        "id": cycle.id,
+        "started_at": _iso(cycle.started_at),
+        "ended_at": _iso(cycle.ended_at),
+        "pages": cycle.pages or 0,
+        "start_level_pct": cycle.start_level_pct,
+        "min_level_pct": cycle.min_level_pct,
+        "consumed_pct": round(consumed_pct(cycle), 1),
+        # Scaled to a full cartridge. ``None`` when the meter never moved --
+        # which is not a yield of zero, it is a device we could not measure.
+        "observed_yield_pages": (
+            round(observed_yield(cycle)) if observed_yield(cycle) is not None else None
+        ),
+        "complete": bool(cycle.complete),
+    }
+    return emit(
+        db,
+        "supply.replaced",
+        data=data,
+        client_id=printer.client_id,
+        idempotency_key="supply.replaced:cycle:%s" % (cycle.id,),
+        occurred_at=cycle.ended_at,
+    )
+
+
+def emit_supply_yield_below_expected(
+    db: Session,
+    printer: m.Printer,
+    assessment: Any,
+    *,
+    threshold_pct: float,
+    period: Optional[str] = None,
+) -> Optional[m.OutboundEvent]:
+    """``supply.yield_below_expected`` -- measured short, with its provenance.
+
+    ``assessment`` is a ``supply_yield.SlotAssessment``; it is typed loosely here
+    so this module keeps depending on nothing but models and the catalogue.
+
+    ``expected_source`` travels with the numbers because the two sources are not
+    equally strong evidence: an operator's datasheet figure is a fact about the
+    hardware, a fleet median is a comparison against peers -- and a fleet all
+    running the same non-OEM cartridge calibrates to it. A consumer that cannot
+    tell them apart cannot weigh the finding, and this finding is one an MSP may
+    put in front of a customer.
+
+    ``period`` scopes the idempotency key so a standing shortfall is re-stated
+    once a day rather than on every scan; it defaults to the UTC date. The slot
+    is the subject, not the cartridge, because the claim is about the slot's
+    history rather than about any one cartridge in it.
+    """
+    ctx = _context(db, printer)
+    data = dict(ctx)
+    data["supply"] = {
+        "type": _text(assessment.supply_type, 40),
+        "color": _text(assessment.color, 40),
+    }
+    expected = assessment.expected
+    data["yield"] = {
+        "observed_pages": (
+            round(assessment.observed_pages)
+            if assessment.observed_pages is not None else None
+        ),
+        "expected_pages": round(expected.pages) if expected.pages else None,
+        "expected_source": _text(expected.source, 40),
+        "expected_detail": _text(expected.detail),
+        "shortfall_pct": (
+            round(assessment.shortfall_pct, 1)
+            if assessment.shortfall_pct is not None else None
+        ),
+        "threshold_pct": threshold_pct,
+        "cycles_counted": assessment.cycles_counted,
+        "last_replaced_at": _iso(assessment.last_replaced_at),
+    }
+    window = period or _now().date().isoformat()
+    return emit(
+        db,
+        "supply.yield_below_expected",
+        data=data,
+        client_id=printer.client_id,
+        idempotency_key="%s:%s" % (assessment.dedupe_key, window),
+    )
