@@ -30,9 +30,15 @@ from central.branding import branding_for
 from central.dashboard import _keystore
 from central.dashboard.templating import templates
 from central.db import get_db
+from central.deps import session_user
 from central.health import worker_banner
 from central.runtime import load_settings
-from central.security import generate_api_key, hash_api_key, hash_password
+from central.security import (
+    MIN_PASSWORD_LENGTH,
+    generate_api_key,
+    hash_api_key,
+    hash_password,
+)
 
 
 def _split_tags(raw: str) -> Optional[list[str]]:
@@ -49,11 +55,7 @@ _MANAGER_ROLES = {m.UserRole.admin, m.UserRole.tech}
 
 
 def _user(request: Request, db: Session) -> Optional[m.User]:
-    uid = request.session.get("user_id")
-    user = db.get(m.User, uid) if uid else None
-    # A deactivated (SCIM-deprovisioned) account is treated as logged out so a
-    # live cookie stops working on its next request, not just at next login.
-    return user if (user is not None and user.active) else None
+    return session_user(request, db)
 
 
 def _manager(request: Request, db: Session) -> Optional[m.User]:
@@ -2264,6 +2266,14 @@ def user_create(
     if role_enum == m.UserRole.client_readonly and pinned_client_id is None:
         _flash(request, "client_readonly users must be assigned to a client.")
         return _redirect("/manage/users")
+    # The same floor the reset and self-service paths already enforce. Without it
+    # this route -- the one that can mint an ADMIN -- was the only way into the
+    # system with a one-character password. An empty password is still allowed
+    # and means "SSO-only account", which is why this tests the length rather
+    # than truthiness.
+    if password and len(password) < MIN_PASSWORD_LENGTH:
+        _flash(request, f"Password must be at least {MIN_PASSWORD_LENGTH} characters.")
+        return _redirect("/manage/users")
     new_user = m.User(
         username=username,
         email=email.strip() or None,
@@ -2330,15 +2340,26 @@ def user_reset_password(
     target = db.get(m.User, user_id)
     if target is None:
         return _redirect("/manage/users")
-    if len(new_password) < 8:
-        _flash(request, "Password must be at least 8 characters.")
+    if len(new_password) < MIN_PASSWORD_LENGTH:
+        _flash(request, f"Password must be at least {MIN_PASSWORD_LENGTH} characters.")
         return _redirect(f"/manage/users/{user_id}/edit")
     target.password_hash = hash_password(new_password)
     target.auth_provider = "local"  # they can now sign in locally
+    # An admin-chosen password reached its owner through chat, a phone call or a
+    # ticket, and stays readable there. Forcing the rotation makes that handoff
+    # channel stop being a live credential the moment they sign in -- which is
+    # exactly the reasoning the bootstrap password already follows.
+    target.must_change_password = True
+    # Every session the target already holds is now backed by a password nobody
+    # uses any more. An admin resetting somebody's password is usually reacting
+    # to a suspected compromise, so leaving those live for up to 12h defeats the
+    # point of the reset.
+    target.session_epoch = (target.session_epoch or 0) + 1
     record(db, request, _admin(request, db), "user.reset_password",
            target=f"user:{target.username}")
     db.commit()
-    _flash(request, f"Password reset for '{target.username}'.")
+    _flash(request, f"Password reset for '{target.username}'. "
+                    "They must choose a new one at next sign-in.")
     return _redirect("/manage/users")
 
 

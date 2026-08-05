@@ -12,6 +12,11 @@ from passlib.context import CryptContext
 # 72-byte limit, and dependable across platforms/Python versions.
 _pwd = CryptContext(schemes=["pbkdf2_sha256"], deprecated="auto")
 
+#: The floor every password-setting path must apply. Named once because it was
+#: spelled `< 8` in three places and enforced in only two -- admin user creation,
+#: the route that can mint an ADMIN, had no check at all.
+MIN_PASSWORD_LENGTH = 8
+
 
 # --- Dashboard user passwords ------------------------------------------------
 def hash_password(password: str) -> str:

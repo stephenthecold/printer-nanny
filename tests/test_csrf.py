@@ -422,7 +422,7 @@ def _source_forms():
     """(template, method, tag, body-after-tag) for every <form> in the templates."""
     for path in sorted(TEMPLATE_DIR.glob("*.html")):
         # Blanked rather than removed so offsets stay meaningful.
-        src = _JINJA_COMMENT.sub(lambda mo: " " * len(mo.group(0)), path.read_text())
+        src = _JINJA_COMMENT.sub(lambda mo: " " * len(mo.group(0)), path.read_text(encoding="utf-8"))
         for mo in _FORM_OPEN.finditer(src):
             end = _tag_end(src, mo.start())
             tag = src[mo.start():end + 1]

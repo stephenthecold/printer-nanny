@@ -1602,6 +1602,21 @@ class User(Base):
     must_change_password: Mapped[bool] = mapped_column(
         Boolean, default=False, server_default=false()
     )
+    # Bumped whenever every existing session for this user must stop working.
+    # Sessions are signed cookies with no server-side store, so `session.clear()`
+    # only asks the browser to drop one -- the signed value it already holds keeps
+    # verifying for the full max_age. Measured: after logout, after a
+    # self-service password change and after an admin reset, a captured cookie
+    # still reached /manage/users. Role changes and deactivation were already
+    # safe, because those are re-read per request; the credential-rotation
+    # actions were not, which is the wrong way round.
+    #
+    # The counter is stamped into the session at login and compared on every
+    # request. That costs nothing: both places that resolve a session to a user
+    # already load the row.
+    session_epoch: Mapped[int] = mapped_column(
+        Integer, default=0, server_default=text("0"), nullable=False
+    )
     # For client_readonly users: restrict visibility to this client.
     client_id: Mapped[Optional[int]] = mapped_column(
         ForeignKey("clients.id", ondelete="SET NULL"), default=None

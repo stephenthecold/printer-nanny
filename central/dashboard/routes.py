@@ -17,8 +17,9 @@ from central.branding import branding_for
 from central.csrf import rotate_token
 from central.dashboard.templating import templates
 from central.db import get_db
+from central.deps import SESSION_EPOCH_KEY, session_user
 from central.health import worker_banner
-from central.security import hash_password, verify_password
+from central.security import MIN_PASSWORD_LENGTH, hash_password, verify_password
 
 router = APIRouter(tags=["dashboard"])
 # One shared Jinja environment (central/dashboard/templating.py): it carries
@@ -27,11 +28,7 @@ _templates = templates
 
 
 def _user(request: Request, db: Session):
-    uid = request.session.get("user_id")
-    user = db.get(m.User, uid) if uid else None
-    # A deactivated (SCIM-deprovisioned) account is treated as logged out so a
-    # live cookie stops working on its next request, not just at next login.
-    return user if (user is not None and user.active) else None
+    return session_user(request, db)
 
 
 def _login_redirect() -> RedirectResponse:
@@ -287,6 +284,7 @@ def login(
     # SSO path and missing here, which is the worst arrangement of the two.
     rotate_token(request.session)
     request.session["user_id"] = user.id
+    request.session[SESSION_EPOCH_KEY] = user.session_epoch or 0
     if user.must_change_password:
         request.session[FORCE_PASSWORD_CHANGE_KEY] = True
     record(db, request, user, "login")
@@ -302,6 +300,12 @@ def logout(request: Request, db: Session = Depends(get_db)):
 
     user = _user(request, db)
     if user is not None:
+        # session.clear() only asks the BROWSER to drop the cookie; the signed
+        # value it already holds keeps verifying for the full max_age. Bumping
+        # the epoch is what makes "log out" mean the session is spent -- which
+        # matters most on the shared or borrowed machine where someone clicks it
+        # precisely because they do not trust what happens next.
+        user.session_epoch = (user.session_epoch or 0) + 1
         record(db, request, user, "logout")
         db.commit()
     request.session.clear()
@@ -1006,7 +1010,7 @@ def account_change_password(
     if not verify_password(current_password, user.password_hash):
         request.session["account_error"] = "Current password is incorrect."
         return RedirectResponse("/account", status_code=303)
-    if len(new_password) < 8:
+    if len(new_password) < MIN_PASSWORD_LENGTH:
         request.session["account_error"] = "New password must be at least 8 characters."
         return RedirectResponse("/account", status_code=303)
     if new_password != confirm_password:
@@ -1025,6 +1029,13 @@ def account_change_password(
     was_forced = bool(user.must_change_password)
     user.must_change_password = False
     request.session.pop(FORCE_PASSWORD_CHANGE_KEY, None)
+    # Changing a password is the thing you do when you think somebody else has
+    # it, so every other session for this account has to stop -- otherwise the
+    # attacker's cookie outlives the credential it came from by up to 12h. This
+    # session is re-stamped below rather than revoked, so the person doing the
+    # rotation is not logged out by their own action.
+    user.session_epoch = (user.session_epoch or 0) + 1
+    request.session[SESSION_EPOCH_KEY] = user.session_epoch
     record(db, request, user, "account.password_change",
            detail="forced rotation of a generated password" if was_forced else "")
     db.commit()

@@ -60,6 +60,62 @@ def authenticated_machine(
     return machine
 
 
+#: Session key holding the ``User.session_epoch`` this session was minted under.
+#: Compared on every request; a mismatch means the user rotated a credential or
+#: logged out, so the cookie is spent even though its signature still verifies.
+SESSION_EPOCH_KEY = "epoch"
+
+
+def session_is_current(request_session, user) -> bool:
+    """Has this session survived the user's credential rotations?
+
+    Sessions here are signed cookies with no server-side store, so nothing can
+    delete one -- ``session.clear()`` asks the *browser* to drop it and the
+    signed value keeps verifying for the full max_age. Comparing an epoch is how
+    a logout, a password change or an admin reset actually revokes.
+
+    A session minted before the column existed carries no epoch. Treating that
+    as current is deliberate: the alternative logs out every operator on upgrade
+    to fix a problem none of them has yet, and the first rotation after upgrade
+    stamps it properly.
+    """
+    stamped = request_session.get(SESSION_EPOCH_KEY)
+    return stamped is None or int(stamped) == int(user.session_epoch or 0)
+
+
+def session_user(request: Request, db: Session) -> Optional[m.User]:
+    """Resolve a signed session to a live user, or ``None``. THE one place.
+
+    Every dashboard module used to spell this itself -- seven copies of
+    ``session.get("user_id")`` -> ``db.get`` -> maybe check ``active``. They had
+    already drifted (``auth_oauth_smtp`` never checked ``active`` at all, so a
+    deactivated admin could still run the SMTP consent flow), and adding the
+    epoch check to two of them left the other five accepting a revoked cookie --
+    which is how the first attempt at this fix passed its own logout test and
+    failed on ``/manage/users``.
+
+    Three conditions, and they are not negotiable per call site:
+
+    * the session names a user,
+    * that user is ``active`` -- so an off-boarding lands on the next request
+      rather than at the next login,
+    * and the session was minted at the user's current ``session_epoch`` -- so
+      logout, a password change and an admin reset actually revoke.
+
+    Role checks stay with the caller: they differ per module and are not a
+    property of "is this session valid".
+    """
+    uid = request.session.get("user_id")
+    if not uid:
+        return None
+    user = db.get(m.User, uid)
+    if user is None or not user.active:
+        return None
+    if not session_is_current(request.session, user):
+        return None
+    return user
+
+
 def current_user(request: Request, db: Session = Depends(get_db)) -> Optional[m.User]:
     """Return the logged-in dashboard user from the signed session, or None.
 
@@ -68,13 +124,7 @@ def current_user(request: Request, db: Session = Depends(get_db)) -> Optional[m.
     deprovisioned (e.g. via SCIM PATCH ``active=false``) stops working on its
     very next request, not just at the next login attempt.
     """
-    uid = request.session.get("user_id")
-    if not uid:
-        return None
-    user = db.get(m.User, uid)
-    if user is None or not user.active:
-        return None
-    return user
+    return session_user(request, db)
 
 
 def require_user(user: Optional[m.User] = Depends(current_user)) -> m.User:

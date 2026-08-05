@@ -17,6 +17,7 @@ from central import models as m
 from central import runtime
 from central.dashboard.templating import templates
 from central.db import get_db
+from central.deps import session_user
 from central.health import worker_banner
 
 router = APIRouter(tags=["settings"])
@@ -33,9 +34,8 @@ LOGO_ALLOWED_TYPES = set(branding.ALLOWED_LOGO_TYPES)
 
 
 def _admin(request: Request, db: Session) -> Optional[m.User]:
-    uid = request.session.get("user_id")
-    user = db.get(m.User, uid) if uid else None
-    if user is None or not user.active or user.role != m.UserRole.admin:
+    user = session_user(request, db)
+    if user is None or user.role != m.UserRole.admin:
         return None
     return user
 
@@ -236,9 +236,8 @@ def serve_client_logo(client_id: int, request: Request, db: Session = Depends(ge
     """
     if not sa_inspect(db.get_bind()).has_table(m.AppAsset.__tablename__):
         return Response(status_code=404)
-    uid = request.session.get("user_id")
-    user = db.get(m.User, uid) if uid else None
-    if user is None or not user.active:
+    user = session_user(request, db)
+    if user is None:
         return Response(status_code=404)
     if user.role == m.UserRole.client_readonly and user.client_id != client_id:
         return Response(status_code=404)

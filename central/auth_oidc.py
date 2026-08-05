@@ -24,6 +24,8 @@ from central import models as m
 from central import runtime
 from central.csrf import rotate_token
 from central.db import get_db
+from central.deps import SESSION_EPOCH_KEY
+from central.middleware import FORCE_PASSWORD_CHANGE_KEY
 
 log = logging.getLogger(__name__)
 
@@ -127,9 +129,19 @@ async def sso_callback(
     if user is None:
         return _err("not_provisioned")
     request.session["user_id"] = user.id
+    request.session[SESSION_EPOCH_KEY] = user.session_epoch or 0
     # Same rule as the local login: a CSRF token issued before authentication is
     # not this user's secret, so it does not survive becoming their session.
     rotate_token(request.session)
+    # ...and the same rule for forced rotation. The middleware gates on a SESSION
+    # key, which the local login sets and this path did not -- so signing in
+    # through SSO walked straight past it into the whole dashboard, and the flag
+    # was never cleared, so the password printed to the container log at
+    # bootstrap stayed live indefinitely. Cheap to set here; the alternative is a
+    # DB read on every request the middleware sees.
+    if user.must_change_password:
+        request.session[FORCE_PASSWORD_CHANGE_KEY] = True
+        return RedirectResponse("/account", status_code=303)
     return RedirectResponse("/", status_code=303)
 
 

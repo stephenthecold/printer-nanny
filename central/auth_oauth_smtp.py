@@ -24,6 +24,7 @@ from sqlalchemy.orm import Session
 from central import models as m
 from central import runtime
 from central.db import get_db
+from central.deps import session_user
 
 router = APIRouter(tags=["auth-smtp"])
 
@@ -151,8 +152,10 @@ def refresh_access_token(db: Session, settings: Optional[Dict[str, Any]] = None)
 
 # --- Consent flow ----------------------------------------------------------- #
 def _admin(request: Request, db: Session) -> Optional[m.User]:
-    uid = request.session.get("user_id")
-    user = db.get(m.User, uid) if uid else None
+    # This one never checked ``active``, so a deactivated admin could still run
+    # the SMTP consent flow and mint tokens. session_user checks it for every
+    # caller, which is the point of there being one.
+    user = session_user(request, db)
     if user is None or user.role != m.UserRole.admin:
         return None
     return user
