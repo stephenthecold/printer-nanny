@@ -59,6 +59,54 @@ this codebase has learned four times not to infer — a queue that exists, lists
 and converges is not a queue that prints. Treat the version as provisional until
 §6b runs, or re-cut it afterwards.
 
+### The 2026-08-04 security audit — what it found after §6a was "done"
+
+Ten parallel read-only agents audited the finished branch: tenancy/authz,
+device-input injection, secrets, remote hands + driver staging, auth/session/CSRF,
+an adversarial re-verification of §6a, migrations, test-suite honesty, docs, and
+supply chain / CI / deployment. Every finding below was re-verified by hand
+before it was fixed, and each has a regression test.
+
+**This section exists because §6a being complete did not mean the product was
+secure.** Every item here sat underneath work that was correctly marked done.
+
+**The one that mattered most: SSO and SCIM composed into an admin takeover.**
+Neither half looked like a vulnerability alone. `_match_or_provision` matched an
+IdP email against `email OR username` and returned whatever it found, with no
+check of what kind of account that was, *before* the `auto_provision` gate --
+so an address the IdP would issue (guest or self-service sign-up, ordinary
+features) was enough to become the bootstrap admin. Meanwhile a SCIM token could
+rewrite any local account's **email**, which chose the address SSO would then
+match. Both halves are closed and neither can be re-opened silently, because
+four tests asserted the old behaviour and now assert the new rule.
+
+| Area | Found | Now |
+|---|---|---|
+| SSO / SCIM | Account takeover, no password, no throttle | Refused unless an operator opts in; SCIM manages only what it provisioned |
+| Sessions | Logout, password change and admin reset left a captured cookie live 12h | `User.session_epoch`, compared per request |
+| Session resolution | **Seven** copies of the lookup; one never checked `active` | One `deps.session_user` |
+| Windows agent | `%PROGRAMDATA%\PrinterNanny` had no ACL -- `os.chmod` writes no DACL there | SYSTEM + Administrators, granted by SID; verified by observation |
+| macOS drivers | A bad `driver_ref` ran `installer -pkg` as root **every poll, forever** | Shape-checked before anything executes; the install is marked |
+| Driver cache | A cache hit was decided by a marker's existence, never its recorded digest | Digest compared |
+| Tenancy | A printer could be re-homed to another client's site, exposing its SNMP community to that client's agent while billing stayed put | Refused on both doors |
+| Reorder events | The publisher resolved to nothing; the toggle published **nothing, forever** | Wired, with the resolution itself tested |
+| HTTP | `/openapi.json` public; no frame-busting; `/api/v1` CRUD wrote no audit rows | Closed, headers added, audited |
+| Schema | Three columns differed on upgraded installs; nine docstrings named the wrong parent | Fixed, both guarded by tests |
+| Supply chain | The live `SECRET_KEY` was baked into every image layer | `.dockerignore` |
+
+**Two patterns are worth carrying forward, because both are about the shape of
+the code rather than any one bug:**
+
+1. **Duplication defeats a security fix.** The session-epoch change passed its own
+   logout test and did not work, because five of the seven session resolvers had
+   not been touched. The fix was consolidation, and consolidating immediately
+   surfaced a second bug nobody was looking for.
+2. **A test can assert that a feature is broken.** `test_supply_reorder.py`
+   asserted `_resolve_publisher() is None` -- with a comment saying to rewire it
+   when the event bus arrived. The bus arrived under a different name, nothing
+   failed, and nobody read the comment. Every other test injected a fake
+   publisher, so they exercised the loop and never the wiring.
+
 ### Errors in this document, corrected below
 
 This plan was written to stop a third round of planning from stale docs. Checking

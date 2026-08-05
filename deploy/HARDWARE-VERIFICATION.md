@@ -10,8 +10,28 @@ build container does not have:
 | Task | What it needs that no CI runner has |
 |---|---|
 | Windows IPP attribute search | A Brother MFC-L8900CDW, a Windows 11 / Server 2022+ box, a second host to serve replays, and **~38 sheets of paper that a human looks at** |
-| macOS checklist (31 items) | A Mac console session, a second local account, a reboot, an MDM tenant, a directory-bound Mac, an Apple Developer ID certificate |
+| macOS checklist (35 items) | A Mac console session, a second local account, a reboot, an MDM tenant, a directory-bound Mac, an Apple Developer ID certificate |
 | The macOS exit-2 trap | **Decided** (Part 3); still needs a real `launchctl` to prove launchd agrees |
+
+> **Added by the 2026-08-04 security audit — two things to check while you are on
+> the hardware anyway.** Both were fixed against real evidence, and neither is
+> yet proven in the context where it actually runs:
+>
+> - **The Windows agent's state-directory ACL.** `os.chmod` writes no DACL on
+>   Windows, so `%PROGRAMDATA%\PrinterNanny` inherited `BUILTIN\Users:(I)(RX)`
+>   and any logged-in user could read `machine.json` — the machine's live bearer
+>   credential. Now locked to SYSTEM + Administrators, granted by SID. Verified
+>   by observation on a Windows 11 desktop, **not yet under the MSI as
+>   LocalSystem**, which is the context that matters. After installing:
+>   `icacls "%PROGRAMDATA%\PrinterNanny"` should list exactly those two with no
+>   `(I)`, and the service must still start — LocalSystem has to read its own
+>   config, which is why SYSTEM is on the list and not Administrators alone.
+> - **The macOS vendor-`pkg` install marker.** A `driver_ref` this Mac could not
+>   resolve used to run `installer -pkg` as root on *every poll, forever*.
+>   Confirm with a deliberately wrong path that the installer runs **zero**
+>   times, and with a correct one that it runs **once** across at least three
+>   polls. Count the runs in `/var/log/install.log`; do not infer them from the
+>   queue's state.
 
 The standing rule this repo has now paid for **four** times applies to all of it:
 a queue that exists, lists and converges is not a queue that prints. Every proxy
