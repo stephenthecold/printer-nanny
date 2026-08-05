@@ -12,7 +12,7 @@ from sqlalchemy.orm import Session
 from starlette.middleware.sessions import SessionMiddleware
 from uvicorn.middleware.proxy_headers import ProxyHeadersMiddleware
 
-from central import auth_oauth_smtp, auth_oidc
+from central import auth_oauth_smtp, auth_oidc, schema_check
 from central.api import (
     enrollment,
     exports,
@@ -72,7 +72,7 @@ log = logging.getLogger("central.main")
 # cookie" is the trigger rather than a path allowlist.
 app = FastAPI(
     title="Printer Nanny",
-    version="1.0.0",
+    version="1.1.0",
     dependencies=[Depends(csrf_protect)],
     # /docs, /redoc and /openapi.json are FastAPI defaults and were UNAUTHENTICATED
     # -- 198 KB of schema describing every SCIM, agent-ingest, workstation-enroll
@@ -380,6 +380,14 @@ def _startup() -> None:
     # the schema, but create_all is a harmless no-op if they've already run.
     if settings.is_sqlite:
         create_all()
+    # Report-only, and deliberately NOT a wait: this process is the one that
+    # just ran `alembic upgrade head` (see the api container's command), so by
+    # here the schema is either complete or something is wrong that waiting
+    # cannot fix -- an api started without its migrations, most likely. The
+    # worker is the one that races them and the one that waits.
+    _drift = schema_check.check()
+    if _drift is not None and not _drift.ok:
+        log.error("api started against an incomplete schema. %s", _drift.describe())
     # One-shot lazy migration: encrypt any plaintext secret rows left over
     # from before encryption-at-rest shipped. Idempotent; guarded so a stack
     # mid-migration (app_settings table not created yet) doesn't fail boot.

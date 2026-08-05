@@ -115,6 +115,21 @@ enforced; none of them is optional.
   - `branding.py` — per-client white-label resolution and its two sinks.
   - `csv_safe.py` — CSV formula neutralisation, shared by every export.
   - `logging_config.py` — the single `configure_logging()` both processes call.
+  - `schema_check.py` — does the live database have the schema this build
+    expects? It compares **columns, never `alembic_version`**, because the
+    version answers a different question: `docker compose up -d` starts api and
+    worker in parallel and only the api runs `alembic upgrade head`, so the
+    worker can query a schema that is still being built while the version is
+    already moving. That happened in production 2026-08-05 — fifteen revisions
+    over 2.4M readings, seven jobs lost to `UndefinedColumn`/`UndefinedTable` in
+    the worker's first cycle, every cycle after it clean. The worker now
+    `wait_for_schema()`s before its first cycle (bounded, then proceeds loudly —
+    an un-migrated install must still boot, because the dashboard is how it gets
+    fixed); the api only reports, since it is the process that just migrated.
+    `install.sh` runs the CLI and **fails** on drift, replacing a line that
+    printed "Migrations … ran on container start" having checked nothing.
+    Exit codes are 0 clean / 1 drifted / **2 could not check**, and 2 is not
+    success — an unreachable database is not a migrated one.
   - `dashboard/` — HTMX/Jinja:
     - `routes.py` — overview / client / printer drill-downs, approvals, alerts,
       account, **fleet-wide printer search**, security posture, reorder,
