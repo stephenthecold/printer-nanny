@@ -788,13 +788,26 @@ def test_the_state_directory_is_restricted_to_its_owner(tmp_path):
     svc._secure_state_dir(str(d))
 
     if os.name == "nt":
-        out = subprocess.run(["icacls", str(d)], capture_output=True, text=True).stdout
-        # SIDs resolve to localised names in icacls OUTPUT, so assert on the
-        # thing that is stable: nobody else is on the list, and inheritance is
-        # broken. A surviving "(I)" means /inheritance:r did not take.
-        assert "(I)" not in out, f"inheritance was not broken:\n{out}"
-        entries = [ln for ln in out.splitlines()[:20] if ":(" in ln]
-        assert len(entries) == 2, f"expected exactly SYSTEM + Administrators:\n{out}"
+        try:
+            out = subprocess.run(
+                ["icacls", str(d)], capture_output=True, text=True
+            ).stdout
+            # SIDs resolve to localised names in icacls OUTPUT, so assert on what
+            # is stable: nobody else is on the list, and inheritance is broken.
+            # A surviving "(I)" means /inheritance:r did not take.
+            assert "(I)" not in out, f"inheritance was not broken:\n{out}"
+            entries = [ln for ln in out.splitlines()[:20] if ":(" in ln]
+            assert len(entries) == 2, (
+                f"expected exactly SYSTEM + Administrators:\n{out}"
+            )
+        finally:
+            # Hand it back, or pytest's tmp cleanup cannot remove the directory:
+            # the ACL this test just proved works also locks out the test runner,
+            # which is a real (if mild) demonstration that it took effect.
+            subprocess.run(
+                ["icacls", str(d), "/reset", "/T", "/C", "/Q"],
+                capture_output=True, text=True,
+            )
     else:
         assert stat.S_IMODE(os.stat(d).st_mode) == 0o700
 

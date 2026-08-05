@@ -529,8 +529,22 @@ def _resolve_in_package(unpacked: str, ref: str) -> str:
     return target
 
 
-def _resolve_system_ppd(ref: str) -> str:
-    """Validate an operator-supplied absolute PPD path on this Mac."""
+def _validate_system_ppd_path(ref: str) -> str:
+    """The operator-supplied path, checked for SHAPE only. Returns the realpath.
+
+    Split out from ``_resolve_system_ppd`` because the two failures it used to
+    merge are not the same kind of thing, and treating them alike is what made a
+    vendor package reinstall as root every five minutes forever:
+
+    * a path that is relative, or resolves outside the directories PPDs live in,
+      is a **configuration error**. No amount of installing will fix it.
+    * a path that is well-formed but absent may simply mean the package has not
+      been installed yet.
+
+    ``_ppd_present`` answered "no" to both, so a bad ``ref`` read as "not
+    installed", the root installer ran, and the strict check raised immediately
+    afterwards -- with nothing recording that the install had happened.
+    """
     ref = (ref or "").strip()
     if not ref.startswith("/"):
         raise DriverStagingError(
@@ -544,6 +558,12 @@ def _resolve_system_ppd(ref: str) -> str:
             f"{target!r} is not under a directory PPDs live in; "
             "expected one of " + ", ".join(_SYSTEM_PPD_ROOTS)
         )
+    return target
+
+
+def _resolve_system_ppd(ref: str) -> str:
+    """Validate an operator-supplied absolute PPD path on this Mac, and require it."""
+    target = _validate_system_ppd_path(ref)
     if not os.path.isfile(target):
         raise DriverStagingError(f"no PPD at {target!r}; is the MDM payload installed?")
     return target
@@ -744,26 +764,50 @@ def stage_driver(spec: dict) -> str:
         # already-installed PPD and differ only in who installed it. That keeps
         # one operator field instead of two, and the installer itself is found in
         # the archive rather than named:
-        if _ppd_present(ref):
+        # Shape-check the ref BEFORE running anything as root. A ref this Mac
+        # can never resolve is an operator typo, and discovering that by
+        # executing a vendor installer -- once per poll, indefinitely -- is the
+        # opposite of the convergence rule everything else here follows.
+        target = _validate_system_ppd_path(ref)
+        if os.path.isfile(target):
             # Already installed: a rerun after a failed queue bind, or simply the
             # next poll. Skipping the install is what makes this convergent --
             # otherwise a vendor package is reinstalled as root every 5 minutes.
-            log.info("vendor package already installed; PPD present at %s", ref)
+            log.info("vendor package already installed; PPD present at %s", target)
+        elif os.path.exists(os.path.join(unpacked, _PKG_INSTALLED_MARKER)):
+            # We ran the installer for THIS package (the cache directory is keyed
+            # by digest) and the PPD still is not where the operator said it
+            # would be. Re-running as root would not change that. Stated, once.
+            raise DriverStagingError(
+                f"the vendor package was installed but no PPD appeared at "
+                f"{target!r} -- check the path against the package's payload"
+            )
         else:
             install_pkg(_sole_installer_in(unpacked))
+            # Recorded whether or not the PPD turned up, because the thing worth
+            # not repeating is the ROOT EXECUTION, not the success.
+            _mark_pkg_installed(unpacked)
         return _resolve_system_ppd(ref)
 
     raise DriverStagingError(f"unknown driver kind {kind!r}")
 
 
-def _ppd_present(ref: str) -> bool:
-    """Whether the PPD this package installs is already there. Validation
-    failures count as absent, so a bad path leads to the strict check's stated
-    error rather than being read as "installed"."""
+#: Written beside the unpacked payload once ``installer -pkg`` has been run for
+#: it. The cache directory is keyed by the package's SHA-256, so a new package
+#: version gets a fresh directory and installs again -- this suppresses the
+#: repeat, not the upgrade.
+_PKG_INSTALLED_MARKER = ".pn-pkg-installed"
+
+
+def _mark_pkg_installed(unpacked: str) -> None:
     try:
-        return os.path.isfile(_resolve_system_ppd(ref))
-    except DriverStagingError:
-        return False
+        with open(os.path.join(unpacked, _PKG_INSTALLED_MARKER), "w",
+                  encoding="utf-8") as fp:
+            fp.write("installed\n")
+    except OSError as exc:
+        # Not fatal -- the queue may still bind. But say so, because the cost of
+        # losing this marker is a root installer that runs again next poll.
+        log.warning("could not record that the vendor package was installed: %s", exc)
 
 
 def _sole_installer_in(unpacked: str) -> str:

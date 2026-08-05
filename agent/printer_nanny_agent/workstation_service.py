@@ -79,6 +79,12 @@ MANAGED_PREFIX = "PN "
 _NAME_BANNED = set('\\/,!"')
 
 
+#: Ceiling on what one driver package may unpack to. Generous -- vendor print
+#: drivers are genuinely large -- but finite, which is the property that was
+#: missing: the only size bound anywhere was on the COMPRESSED upload.
+_MAX_UNPACKED_BYTES = 2 * 1024 * 1024 * 1024
+
+
 class ServiceError(RuntimeError):
     """Enrollment or configuration failed in a way retrying will not fix."""
 
@@ -687,6 +693,7 @@ def _safe_extract(archive: str, dest: str) -> None:
     reason: each is a different spelling of "write somewhere I was not given".
     """
     root = os.path.realpath(dest)
+    total = 0
     with zipfile.ZipFile(archive) as zf:
         for member in zf.infolist():
             name = member.filename
@@ -700,6 +707,19 @@ def _safe_extract(archive: str, dest: str) -> None:
             # Mode bits carry the symlink flag on zips written by unix tools.
             if (member.external_attr >> 16) & 0o170000 == 0o120000:
                 raise DriverError(f"archive contains a symlink: {name!r}")
+            total += member.file_size
+            if total > _MAX_UNPACKED_BYTES:
+                # Declared sizes, so this refuses BEFORE writing anything. The
+                # only bound that existed was on the COMPRESSED upload, and a
+                # few-KB zip expands to terabytes -- into %PROGRAMDATA% as
+                # SYSTEM. Upload is manager-only and already grants fleet-wide
+                # code execution, so this is not the sharpest edge here; it is a
+                # missing guard in a function whose own docstring calls its input
+                # attacker-shaped.
+                raise DriverError(
+                    "archive unpacks to more than "
+                    f"{_MAX_UNPACKED_BYTES // (1024 * 1024)} MB"
+                )
         zf.extractall(root)
 
 
@@ -726,14 +746,27 @@ def fetch_driver(
     The digest is checked BEFORE the archive is opened. Verifying after
     unpacking would mean a hostile archive had already been written to disk.
     """
-    sha = str(driver.get("sha256") or "")
-    if len(sha) != 64:
+    sha = str(driver.get("sha256") or "").lower()
+    # Length AND charset. `sha` becomes a path component below, and the download
+    # lands on disk BEFORE the digest is compared -- so a 64-character value of
+    # "../" * 21 + "x" writes attacker-supplied bytes wherever it points, as
+    # LocalSystem or root, before anything has been verified. Extraction is
+    # still refused by the mismatch, but by then the file exists. Central only
+    # ever writes a real hexdigest here; a compromised central, or an install
+    # running with `verify_tls = false`, is the reachable path.
+    if len(sha) != 64 or any(c not in "0123456789abcdef" for c in sha):
         raise DriverError("driver package has no usable checksum")
 
     unpacked = os.path.join(cache_dir, sha)
     marker = os.path.join(unpacked, ".pn-ok")
-    if os.path.exists(marker):
+    if os.path.exists(marker) and _marker_matches(marker, sha):
         return unpacked
+    # A marker that does not name this digest is not ours to trust. It used to be
+    # enough that the file EXISTED -- so anyone who could write into the cache
+    # (see _secure_state_dir for why that was possible on Windows) could plant a
+    # directory, a `.pn-ok` and their own .inf, and the whole verify-then-unpack
+    # path was skipped on the way to `pnputil /add-driver` as LocalSystem.
+    shutil.rmtree(unpacked, ignore_errors=True)
 
     os.makedirs(cache_dir, exist_ok=True)
     # Same reason as the state file: this tree is under %PROGRAMDATA%, whose
@@ -769,6 +802,25 @@ def fetch_driver(
     with open(marker, "w", encoding="utf-8") as fp:
         fp.write(sha)
     return unpacked
+
+
+def _marker_matches(marker: str, sha: str) -> bool:
+    """Does the cache marker name the digest we are being asked for?
+
+    The marker has always RECORDED the digest; nothing ever read it back. So a
+    cache hit was decided by the file merely existing, and the verify-then-unpack
+    path -- the whole point of the digest -- was skipped on the strength of a
+    zero-byte file anyone able to write into the cache could create.
+
+    An unreadable or mismatched marker means "not cached", so the package is
+    re-fetched and re-verified. Failing that way costs one download; failing the
+    other way installs an unverified driver as LocalSystem.
+    """
+    try:
+        with open(marker, "r", encoding="utf-8") as fp:
+            return fp.read(200).strip().lower() == sha
+    except OSError:
+        return False
 
 
 def _sha256_file(path: str) -> str:

@@ -685,7 +685,17 @@ async def upload_driver_package(
         if kind != "system" and package is None:
             _flash(request, "That macOS driver kind needs a package file.")
             return _redirect(f"/manage/machines?client_id={client.id}")
-        if kind == "system" and (ref.startswith("..") or not ref.startswith("/")):
+        # `pkg` as well as `system`: for both, `ref` is the path of the PPD that
+        # ends up INSTALLED on the Mac, and the client validates it the same way.
+        # Only `system` was checked here, so a `pkg` row could be saved with a
+        # relative ref -- which the client could never resolve, which read to it
+        # as "not installed yet", which ran the vendor installer as root and then
+        # failed. Every poll. The client refuses that shape now too; this stops
+        # it being savable in the first place, where the operator can still see
+        # what they typed.
+        if kind in ("system", "pkg") and (
+            ref.startswith("..") or not ref.startswith("/")
+        ):
             _flash(request, "An installed PPD path must be absolute.")
             return _redirect(f"/manage/machines?client_id={client.id}")
     elif package is None or not inf_relpath.strip():

@@ -7,7 +7,7 @@ Thanks for your interest in Printer Nanny!
 ```bash
 python3 -m venv .venv && source .venv/bin/activate
 pip install -e ".[dev,agent]"
-python -m central.seed                 # demo data (admin/admin) — drops all tables
+python -m central.seed                 # demo data — drops all tables; prints the admin password once
 uvicorn central.main:app --reload      # http://localhost:8000
 pytest && ruff check central agent tests scripts migrations
 ```

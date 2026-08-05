@@ -128,7 +128,7 @@ unconfigured app. `central/main.py` now declares `app` exactly once.
 | Retention | Raw readings 90 days, then one rollup row per printer per day, kept forever |
 | PSA integration | **Dropped.** FreeScout remains the ticket path |
 | Compliance (SIEM/FIPS/KMS) | **Deferred entirely.** ~~SCIM~~ — **correction:** SCIM 2.0 already shipped (`b608c55`, `central/api/scim.py`), so it was never deferrable. SIEM, FIPS and KMS remain deferred |
-| Version at completion | **1.0.0** *(not reached — currently central 0.32.0 / agent 0.17.0)* |
+| Version at completion | **1.0.0** *(cut — see §0 on what half of its gate is still unmet)* |
 
 ### On the single-PR decision
 
@@ -645,10 +645,12 @@ are now a checklist in `deploy/MACOS-CLIENT-TESTING.md`, and a restart is
 failed at least once, four times in this codebase. A queue that exists, lists and
 converges is not a queue that prints.
 
-### 6c. Version — **not reached**
+### 6c. Version — **cut, on half its gate**
 
-Currently **central 0.32.0 / agent 0.17.0**. 1.0.0 is gated on §6a and §6b, and
-D4 in particular ("must be fixed before any 1.0 claim") is still open.
+Currently **central 1.0.0 / agent 1.0.1**. 1.0.0 was gated on §6a **and** §6b.
+§6a is done, D4 included -- the item named by name as blocking any 1.0 claim.
+§6b has not run, so the version is a claim about the code and not about the
+product. §0 says so plainly rather than leaving it to be discovered.
 
 **1.0.0** for central. Agent to 1.0.0 only if `agent/` changed during the program
 (F10/F11/F12 will change it; if somehow none land, the agent keeps its 0.x line —
@@ -752,7 +754,11 @@ have one:* `tests/test_alembic_env.py`, `tests/test_channel_injection.py`,
 - **F12 is the only blast-radius widener.** If the program has to be cut short,
   cut F12 first: everything before it leaves the product strictly read-only, which
   is the posture the audit called strategically safe.
-  *Outcome: F12 was in fact not built, so the product is in exactly that
-  read-only posture. That is the plan's cut rule having been followed, not a
-  gap that was overlooked — but it does mean "complete everything" (§1) is not
-  yet true, and F8 is unbuilt too.*
+  *Outcome (corrected 2026-08-04): **F12 WAS built** — `central/remote.py`,
+  `central/dashboard/remote.py`, migration `0042_remote_hands`,
+  `tests/test_remote_hands.py`. So was F8 (`central/supply_yield.py`, migration
+  `0043_supply_yield`). The paragraph that stood here said both were unbuilt and
+  that the product was therefore still read-only. It was written from the same
+  stale §0 status block this document opens by warning about, and it was the
+  LAST thing a reader saw — the failure mode committed one more time, in the
+  section about risks.*

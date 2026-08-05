@@ -1,5 +1,9 @@
 # Printer Nanny — Competitive Playbook
 
+> **HISTORICAL SNAPSHOT — not a backlog.** Written before several of the
+> features it asks for existed; roughly a third of what it lists is shipped.
+> For what is actually outstanding, read **`docs/completion-playbook.md`**.
+
 *Generated from a 12-agent analysis: 5 agents mapped the codebase internals, 5 researched
 enterprise print / MPS / RMM competitors, then synthesis + an adversarial critic distilled the
 result. This is a strategy document, not a commitment — the interview decisions at the bottom

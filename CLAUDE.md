@@ -581,12 +581,12 @@ enforced; none of them is optional.
   `tests/test_client_branding.py` asserts it. `events.html` takes the other
   valid route — `'…' + {{ s.name|tojson }} + '…'` — since Jinja's `tojson`
   emits `<`-style escapes that survive the attribute decode as data.
-  **Fourteen confirm dialogs still interpolate raw** (counted 2026-08-03:
-  `agents.html` ×6, `printer.html` ×2, and one each in `billing.html`,
-  `definitions.html`, `manage_users.html`, `suppression.html`,
-  `maintenance.html`, `alert_rules.html`) and carry operator free-text or
-  device-supplied strings — not yet fixed, and the count grew rather than shrank
-  because every new page repeated the pattern.
+  **All of these are now fixed** — zero `on*` attributes in any template
+  interpolate a Jinja expression, and `tests/test_template_js_injection.py`
+  scans for it so the count cannot grow again. (This paragraph read "fourteen
+  still interpolate raw — not yet fixed" long after they were, while a line
+  further down said "all 16 sites are now fixed". Two claims, one file,
+  opposite answers.)
 - **Escaping is per wire format; one shared `escape()` across the channels would
   be the bug, not the fix.** Every channel receives the same device-controlled
   strings (`printers.model`, `hostname`, `serial` off SNMP; portal free-text)
@@ -1342,7 +1342,8 @@ launchd *requires* the plist to be world-readable, so the key lives in a 0600
 `tests/test_macos_deployment.py` asserts that against both the reviewable plist
 and the one the installer generates, since they are two files and only one ships.
 
-**On Windows that rule is only half-applied, and the missing half undoes it.**
+**On Windows that rule was only half-applied, and the missing half undid it —
+now fixed; the paragraph below is the diagnosis, not the current state.**
 Verified on a real install 2026-07-30: the MSI lays `workstation.toml` down in
 `C:\Program Files\Printer Nanny\Workstation\` and sets **no ACL at all** — no
 `LockPermissions`, no `MsiLockPermissionsEx`, no custom action, and
