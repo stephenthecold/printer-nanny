@@ -64,6 +64,7 @@ import zipfile
 from dataclasses import dataclass, field
 from typing import Dict, List, Optional, Tuple
 
+from printer_nanny_agent import fsperm
 from printer_nanny_agent import workstation as ws
 
 log = logging.getLogger(__name__)
@@ -185,72 +186,14 @@ def _windows_state_dir() -> str:
     return os.path.join(base, "PrinterNanny")
 
 
-#: SIDs, not names. `BUILTIN\\Administrators` is `VORDEFINIERT\\Administratoren`
-#: on a German Windows and localised again on every other one, so granting by
-#: name silently fails off an English install -- the same "every string is
-#: translated" lesson the CUPS backend already paid for. S-1-5-18 is LocalSystem
-#: (the service account, which must read its own credential) and S-1-5-32-544 is
-#: Administrators.
-_WINDOWS_ACL_SIDS = ("*S-1-5-18", "*S-1-5-32-544")
-
-#: Once per process. Applying it per write would spawn icacls every poll; doing
-#: it at first use still covers the case that matters, which is a directory
-#: someone else created before us.
-_state_dir_secured: set = set()
-
-
 def _secure_state_dir(directory: str) -> None:
-    """Restrict ``directory`` to its owner, on whichever OS this is.
+    """Restrict the state directory. See ``fsperm`` for why this is not chmod.
 
-    **On Windows ``os.chmod`` writes no DACL** -- it toggles the read-only
-    attribute and nothing else. So the mode set on the state file below was
-    never a permission at all there, and `%PROGRAMDATA%\\PrinterNanny` simply
-    inherited `BUILTIN\\Users:(I)(RX)` from `C:\\ProgramData`: any logged-in user
-    could read `machine.json` and lift this machine's live bearer credential,
-    which is enough to pull the tenant's assignments and every driver package
-    its client owns. That is the identical rule CLAUDE.md records as fixed for
-    `workstation.toml` in the MSI; it was never applied to the runtime state
-    file, which holds the longer-lived secret.
-
-    `C:\\ProgramData` also grants Users *create-subdirectory* and CREATOR OWNER
-    full control by inheritance, and the MSI does not create our subdirectory --
-    the service does, at first run. So an unprivileged user who creates it first
-    owns the subtree, and everything LocalSystem later writes there inherits
-    their ACL, including the extracted driver payloads. Enforcing rather than
-    only setting-on-create is what closes that: we re-assert the ACL once per
-    process whether or not we were the one who made the directory.
-
-    Best-effort by design. A failure here must not stop a workstation
-    provisioning its queues, so it warns and continues -- but it warns, because
-    a silent failure is how this became invisible the first time.
+    Kept as a name here because this module's callers and tests use it; the
+    implementation moved out when the identical bug turned up in the site
+    agent's definition cache, so there would not be two copies to drift.
     """
-    real = os.path.abspath(directory)
-    if real in _state_dir_secured:
-        return
-    _state_dir_secured.add(real)
-    if os.name != "nt":
-        try:
-            os.chmod(real, stat.S_IRWXU)  # 0700; real permissions on POSIX
-        except OSError as exc:
-            log.warning("could not restrict %s: %s", real, exc)
-        return
-    import subprocess
-
-    # argv list, never a shell: `real` comes from %PROGRAMDATA% or --state-dir
-    # and is not ours to trust with a command line.
-    cmd = ["icacls", real, "/inheritance:r"]
-    for sid in _WINDOWS_ACL_SIDS:
-        cmd += ["/grant:r", f"{sid}:(OI)(CI)F"]
-    try:
-        proc = subprocess.run(cmd, capture_output=True, text=True, timeout=30)
-    except (OSError, subprocess.SubprocessError) as exc:
-        log.warning("could not restrict %s (icacls did not run): %s", real, exc)
-        return
-    if proc.returncode != 0:
-        log.warning(
-            "could not restrict %s: icacls exited %s: %s",
-            real, proc.returncode, (proc.stderr or proc.stdout).strip()[:300],
-        )
+    fsperm.secure_dir(directory)
 
 
 def _write_json_atomic(path: str, payload: dict) -> None:

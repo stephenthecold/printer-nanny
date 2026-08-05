@@ -16,6 +16,8 @@ from __future__ import annotations
 import copy
 
 import httpx
+import os
+
 import pytest
 
 from printer_nanny_agent import definitions as defs
@@ -516,17 +518,47 @@ async def test_a_malformed_feed_changes_nothing(tmp_path):
     assert len(provider.active()) == 1
 
 
+def _save_a_cache(tmp_path):
+    path = tmp_path / "defs.json"
+    store = provider.DefinitionStore(str(path))
+    assert store.save(_signed([ACME_DEFINITION], provider.key_fingerprint("secret")))
+    return path
+
+
+@pytest.mark.skipif(
+    os.name == "nt",
+    reason="POSIX mode bits; Windows enforces this by directory ACL instead "
+           "-- asserted by test_the_cache_directory_is_restricted_on_windows",
+)
 def test_the_cache_is_written_owner_only(tmp_path):
     """It holds no secret today, but it decides what every printer at this site
     is read with, and a world-writable one would be a way to change that."""
-    import os
     import stat
 
-    path = tmp_path / "defs.json"
-    store = provider.DefinitionStore(str(path))
-    fingerprint = provider.key_fingerprint("secret")
-    assert store.save(_signed([ACME_DEFINITION], fingerprint))
-    assert stat.S_IMODE(os.stat(path).st_mode) == 0o600
+    assert stat.S_IMODE(os.stat(_save_a_cache(tmp_path)).st_mode) == 0o600
+
+
+def test_the_cache_directory_is_restricted_on_windows(tmp_path, monkeypatch):
+    """The same property, by the mechanism that actually works off POSIX.
+
+    `os.chmod` writes no DACL on Windows, so the 0600 above protects nothing
+    there and the file inherits its parent's ACL. This test caught that: it
+    failed with `assert 438 == 384` (0666 vs 0600) on a Windows run, which is
+    how the gap was found -- the identical mistake had already been fixed for
+    the workstation client's credential store, in a different module.
+
+    Asserted on every platform by watching the call, so a Linux CI run still
+    proves the wiring; `test_workstation_service.py` asserts the ACL itself
+    where a real `icacls` is available.
+    """
+    from printer_nanny_agent import fsperm
+
+    secured = []
+    monkeypatch.setattr(fsperm, "secure_dir", lambda d: secured.append(d))
+    _save_a_cache(tmp_path)
+    assert secured == [str(tmp_path)], (
+        "the cache directory was not restricted before the file was written"
+    )
 
 
 # --------------------------------------------------------------------------- #

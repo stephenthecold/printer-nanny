@@ -58,6 +58,7 @@ import tempfile
 from typing import Dict, List, Optional, Sequence, Tuple
 
 from printer_nanny_agent import definitions as defs
+from printer_nanny_agent import fsperm
 from printer_nanny_agent.providers import PrinterProvider, enterprise_matches, record_meters, register
 from printer_nanny_agent.snmp import SnmpBackend, SnmpError, SnmpParams
 from printer_nanny_agent.snmp_parse import decode_supply_text
@@ -191,6 +192,11 @@ class DefinitionStore:
         directory = os.path.dirname(self._path) or "."
         try:
             os.makedirs(directory, exist_ok=True)
+            # The 0600 below is not a permission on Windows -- os.chmod writes no
+            # DACL there -- and this file decides how every printer at the site
+            # is read, so a writable one is a way to change that. The directory
+            # ACL is what actually enforces it off POSIX.
+            fsperm.secure_dir(directory)
             fd, tmp = tempfile.mkstemp(dir=directory, prefix=".defs-", suffix=".tmp")
             try:
                 # 0600 before anything is written. The file holds no secret
