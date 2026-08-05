@@ -439,7 +439,21 @@ def test_the_rollup_and_raw_windows_do_not_overlap(db):
 
 def test_a_hostile_supply_snapshot_cannot_break_the_scan(db):
     """``supply_snapshot`` is JSON an agent pushed, so it is attacker-shaped. A
-    scan that raises takes the worker cycle down for every other tenant."""
+    scan that raises takes the worker cycle down for every other tenant.
+
+    A level that is **not a number** (NaN, ±inf) is covered by
+    ``test_a_level_that_is_not_a_number_is_skipped_by_the_parser`` rather than
+    here, and deliberately -- do not add one back to this list. Postgres' ``json``
+    type refuses the token ``NaN`` outright, so the INSERT fails during *setup*
+    and this test never reaches the scan it exists to exercise. SQLite stores it
+    happily (Python's ``json.dumps`` emits a bare ``NaN``, which is not valid
+    JSON), so it passed here for as long as the suite ran only on SQLite and
+    failed the moment a real Postgres ran it. It is also a state ingest cannot
+    produce: ``SupplyIn._refuse_bad_level`` coerces a non-finite level to
+    ``None`` long before anything is stored. So it is asserted where it can
+    actually occur -- at the parser -- instead of through a round trip the
+    database cannot make.
+    """
     client, site = _client_site(db)
     printer = _printer(db, client, site)
     ts = NOW - timedelta(days=3)
@@ -448,7 +462,6 @@ def test_a_hostile_supply_snapshot_cannot_break_the_scan(db):
         [None, 42, "x"],
         [{"type": "toner", "level_pct": "lots"}],
         [{"type": 7, "level_pct": 50}],
-        [{"type": "toner", "level_pct": float("nan")}],
         [{"type": "toner", "color": "black", "level_pct": True}],
         [{"type": "toner", "color": "black", "level_pct": 55}],   # the only real one
     ):
@@ -461,6 +474,36 @@ def test_a_hostile_supply_snapshot_cannot_break_the_scan(db):
     cycles = _cycles(db, printer)
     assert len(cycles) == 1
     assert cycles[0].supply_type == "toner" and cycles[0].color == "black"
+
+
+def test_a_level_that_is_not_a_number_is_skipped_by_the_parser():
+    """A level that is not a number is not a level -- NaN and ±inf are skipped.
+
+    Driven straight at ``_snapshot_levels`` rather than through the database,
+    because Postgres cannot store any of these in a ``json`` column (see the
+    test above) and ingest coerces them away before storage. That leaves the
+    parser as the only place the value can actually appear: a rollup row or a
+    hand-written one, where nothing has re-validated it.
+
+    Worth keeping because the safe spelling is one keystroke from the unsafe
+    one. **Every comparison against NaN is False**, so the natural range check
+    ``if level < 0 or level > 100: skip`` passes NaN straight through, and it
+    would then propagate into the cartridge arithmetic as a silent poison --
+    every subsequent comparison against it False, so a cycle never closes and
+    nothing anywhere reports why. The parser tests ``level != level``; this is
+    what holds it there.
+    """
+    for bad in (float("nan"), float("inf"), float("-inf")):
+        assert sy._snapshot_levels([{"type": "toner", "level_pct": bad}]) == {}, bad
+
+    # ...and a real slot standing beside a poisoned one still parses, so the
+    # skip is targeted rather than "this snapshot looked odd, drop all of it".
+    assert sy._snapshot_levels(
+        [
+            {"type": "toner", "level_pct": float("nan")},
+            {"type": "toner", "color": "black", "level_pct": 55},
+        ]
+    ) == {("toner", "black"): 55.0}
 
 
 def test_a_slot_with_no_colour_stores_empty_string_not_null(db):
