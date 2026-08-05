@@ -1,7 +1,7 @@
 """Remote hands: EWS proxy requests, and per-device write capability.
 
 Revision ID: 0042_remote_hands
-Revises: 0040_collector_redundancy
+Revises: 0042_auth_hardening
 
 Two things land here.
 
@@ -106,8 +106,14 @@ def upgrade() -> None:
                 sa.ForeignKey("commands.id", ondelete="SET NULL"),
                 nullable=True,
             ),
-            sa.Column("kind", sa.String(length=16), nullable=False),
-            sa.Column("status", sa.String(length=16), nullable=False),
+            # 32, matching the model. `_enum(...)` renders VARCHAR(32), so a
+            # 16 here made the column narrower on every UPGRADED install while
+            # fresh ones (built by 0001's create_all) got 32. Nothing breaks
+            # today -- the longest value is "succeeded" -- but the next enum
+            # member over 16 chars would fail on Postgres for upgraded
+            # deployments only, which is the harder half to reproduce.
+            sa.Column("kind", sa.String(length=32), nullable=False),
+            sa.Column("status", sa.String(length=32), nullable=False),
             sa.Column("scheme", sa.String(length=8), nullable=True),
             sa.Column("port", sa.Integer(), nullable=True),
             sa.Column("path", sa.String(length=600), nullable=True),
@@ -124,11 +130,20 @@ def upgrade() -> None:
             sa.Column("content_type", sa.String(length=120), nullable=True),
             sa.Column("body", sa.Text(), nullable=True),
             sa.Column("body_bytes", sa.Integer(), nullable=True),
-            sa.Column("truncated", sa.Boolean(), nullable=True),
+            # NOT NULL, as the model declares it (Mapped[bool]).
+            sa.Column("truncated", sa.Boolean(), nullable=False,
+                      server_default=sa.false()),
             sa.Column("verified", sa.Boolean(), nullable=True),
             sa.Column("error", sa.String(length=600), nullable=True),
             sa.Column("detail", sa.JSON(), nullable=True),
-            sa.Column("created_at", sa.DateTime(timezone=True), nullable=True),
+            # NOT NULL to match the model. Inside create_table, so there are no
+            # existing rows to violate it. The ORM always supplies the value, so
+            # nothing changes at runtime -- but an UPGRADED install was missing a
+            # constraint the model documents, and the drift test cannot see that
+            # because it compares two FRESH databases, where 0001's create_all
+            # builds both.
+            sa.Column("created_at", sa.DateTime(timezone=True), nullable=False,
+                      server_default=sa.func.now()),
             sa.Column("completed_at", sa.DateTime(timezone=True), nullable=True),
         )
 

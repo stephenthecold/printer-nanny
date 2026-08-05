@@ -1,7 +1,7 @@
 """typed, signed outbound event bus
 
 Revision ID: 0035_event_bus
-Revises: 0034_readings_retention
+Revises: 0041_supply_recommendations
 Create Date: 2026-08-03
 
 Three tables: subscriptions (configuration), outbound events (facts), and one

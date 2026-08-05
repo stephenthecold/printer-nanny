@@ -1,7 +1,7 @@
 """server-pushed device/model definitions
 
 Revision ID: 0039_device_definitions
-Revises: 0038_client_branding
+Revises: 0035_event_bus
 Create Date: 2026-08-03
 
 Lets a new printer model be supported by adding a row instead of shipping an
@@ -63,8 +63,16 @@ def upgrade() -> None:
             sa.Column("spec", sa.JSON(), nullable=False),
             sa.Column("revision", sa.Integer(), nullable=False, server_default="1"),
             sa.Column("notes", sa.Text(), nullable=True),
-            sa.Column("created_at", sa.DateTime(timezone=True), nullable=True),
-            sa.Column("updated_at", sa.DateTime(timezone=True), nullable=True),
+            # NOT NULL to match the model. Inside create_table, so there are no
+            # existing rows to violate it. The ORM always supplies the value, so
+            # nothing changes at runtime -- but an UPGRADED install was missing a
+            # constraint the model documents, and the drift test cannot see that
+            # because it compares two FRESH databases, where 0001's create_all
+            # builds both.
+            sa.Column("created_at", sa.DateTime(timezone=True), nullable=False,
+                      server_default=sa.func.now()),
+            sa.Column("updated_at", sa.DateTime(timezone=True), nullable=False,
+                      server_default=sa.func.now()),
             sa.Column(
                 "created_by_user_id",
                 sa.Integer(),

@@ -1,7 +1,7 @@
 """anchor a page-driven maintenance schedule to the meter at its last service
 
 Revision ID: 0042_maintenance_page_base
-Revises: 0040_collector_redundancy
+Revises: 0042_supply_class
 Create Date: 2026-08-03
 
 ``maintenance_schedules.page_threshold`` was an absolute odometer target with

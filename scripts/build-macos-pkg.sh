@@ -233,7 +233,13 @@ if ! xcrun notarytool submit "$FINAL" "${NOTARY_ARGS[@]}"; then
   echo "Notarization failed. The log says why, and it is worth reading rather" >&2
   echo "than guessing -- the usual cause is an unsigned or unhardened binary" >&2
   echo "inside the payload:" >&2
-  echo "  xcrun notarytool log <submission-id> ${NOTARY_ARGS[*]}" >&2
+  # NOT "${NOTARY_ARGS[*]}": that array holds either --password with an
+  # app-specific password, or the App Store Connect key id and issuer. Printing
+  # it contradicts this script's own rule six lines above about never echoing
+  # the credential. GitHub would mask a registered secret; a local run, or CI
+  # anywhere else, would not.
+  echo "  xcrun notarytool log <submission-id> <the same credential flags you" >&2
+  echo "      passed above -- deliberately not echoed here>" >&2
   die "notarization failed"
 fi
 

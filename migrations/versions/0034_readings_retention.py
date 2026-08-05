@@ -1,7 +1,7 @@
 """readings retention: daily rollup table + the (printer_id, ts) index
 
 Revision ID: 0034_readings_retention
-Revises: 0033_macos_drivers
+Revises: 0038_client_branding
 Create Date: 2026-08-03
 
 ``readings`` had no retention at all -- ~52M rows/year at 500 printers on the
@@ -72,8 +72,16 @@ def upgrade() -> None:
             sa.Column(
                 "raw_pruned", sa.Boolean(), nullable=False, server_default=sa.false()
             ),
-            sa.Column("created_at", sa.DateTime(timezone=True), nullable=True),
-            sa.Column("updated_at", sa.DateTime(timezone=True), nullable=True),
+            # NOT NULL to match the model. Inside create_table, so there are no
+            # existing rows to violate it. The ORM always supplies the value, so
+            # nothing changes at runtime -- but an UPGRADED install was missing a
+            # constraint the model documents, and the drift test cannot see that
+            # because it compares two FRESH databases, where 0001's create_all
+            # builds both.
+            sa.Column("created_at", sa.DateTime(timezone=True), nullable=False,
+                      server_default=sa.func.now()),
+            sa.Column("updated_at", sa.DateTime(timezone=True), nullable=False,
+                      server_default=sa.func.now()),
             # The uniqueness IS the idempotency: rolling up (printer, day) has to
             # be safe to re-run after a crash, and a duplicate row would
             # double-count every period that summed it.

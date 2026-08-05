@@ -103,3 +103,28 @@ def test_the_chain_reaches_every_revision_without_a_cycle():
         f"walking from head reached {len(walked)} of {len(chain)} revisions; "
         f"orphaned: {sorted(missing)}"
     )
+
+
+def test_each_docstring_names_the_predecessor_its_code_actually_declares():
+    """The `Revises:` line and `down_revision` must agree.
+
+    Nine of them did not. Alembic never reads the docstring, so nothing broke --
+    but the real order after 0033 is
+    0038 -> 0034 -> 0036 -> 0037 -> 0041 -> 0035 -> 0039 -> 0040 -> ...,
+    and every one of those files claimed a different parent. Anyone reasoning
+    about ordering from the files learned the wrong order, which is precisely the
+    condition that produces an accidental branch on the next merge -- and a
+    branched chain is discovered by `alembic upgrade` refusing to run, usually on
+    someone's deployment.
+    """
+    wrong = []
+    for path in sorted(VERSIONS.glob("*.py")):
+        text = path.read_text(encoding="utf-8")
+        declared = re.search(r'^down_revision\s*=\s*["\']([^"\']+)["\']', text, re.M)
+        claimed = re.search(r"^Revises:\s*(\S+)\s*$", text, re.M)
+        if not declared or not claimed:
+            continue
+        if declared.group(1) != claimed.group(1):
+            wrong.append(f"{path.name}: docstring says {claimed.group(1)!r}, "
+                         f"code says {declared.group(1)!r}")
+    assert not wrong, "\n".join(wrong)

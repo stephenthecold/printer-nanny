@@ -1,7 +1,7 @@
 """billing rate cards + graduated volume tiers
 
 Revision ID: 0036_billing_rate_cards
-Revises: 0035_event_bus
+Revises: 0034_readings_retention
 
 Cost-per-page contract terms, per client. Two tables: the card (base mono and
 colour rates, currency, optional minimum commitment, and what to do with pages a

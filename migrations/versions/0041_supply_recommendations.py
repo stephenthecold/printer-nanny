@@ -1,7 +1,7 @@
 """supplies.pages_to_empty for reorder recommendations
 
 Revision ID: 0041_supply_recommendations
-Revises: 0040_collector_redundancy
+Revises: 0037_occurrence_alerts
 Create Date: 2026-08-03
 
 Reorder recommendations (central.reorder) trigger on supply level OR

@@ -1,7 +1,7 @@
 """login_attempts table + users.must_change_password
 
 Revision ID: 0042_auth_hardening
-Revises: 0040_collector_redundancy
+Revises: 0042_maintenance_page_base
 Create Date: 2026-08-03
 
 Two halves of the same change (see central/ratelimit.py and central/seed.py):

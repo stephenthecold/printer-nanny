@@ -1,7 +1,7 @@
 """Per-client white-label branding: name, logo and primary colour on clients
 
 Revision ID: 0038_client_branding
-Revises: 0037_occurrence_alerts
+Revises: 0033_macos_drivers
 
 Three nullable columns, because NULL is the whole feature: it means "inherit
 the global app.* setting", which is what makes the fallback total for every
