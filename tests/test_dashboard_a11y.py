@@ -37,6 +37,7 @@ CONTROL_TAGS = {"input", "select", "textarea"}
 # fixture data beyond this is covered by its own feature test.
 PAGES = [
     "/",
+    "/printers",
     "/alerts",
     "/approvals",
     "/account",
@@ -45,12 +46,23 @@ PAGES = [
     "/manage/users",
     "/manage/maintenance",
     "/manage/audit",
+    "/manage/events",
     "/manage/onboard",
+    "/manage/alert-rules",
     "/manage/suppression",
+    "/manage/billing",
+    "/supplies/reorder",
+    # Carries the "add an expected yield" form -- five controls, one of them a
+    # select whose only visible context is the column it sits in.
+    "/supplies/yield",
+    "/manage/definitions",
     "/security/posture",
     "/admin/backup",
     "/settings?group=branding",
     "/settings?group=notifications",
+    # Carries the reorder thresholds. Previously no Alerts-tab render was
+    # checked at all, so a spec added there was unlabelled-until-noticed.
+    "/settings?group=alerts",
     "/settings?group=polling",
 ]
 
@@ -148,6 +160,7 @@ def test_login_page_controls_are_labelled(db):
     "page,expected",
     [
         ("/", "/"),
+        ("/printers", "/printers"),
         ("/alerts", "/alerts"),
         ("/manage", "/manage"),
         # Longest-prefix wins: /manage/agents must mark Agents, not Manage.
@@ -190,8 +203,8 @@ def test_skip_link_and_landmarks_present(http):
 
 
 # /manage/agents is deliberately absent: with no agents enrolled it renders no
-# subnet table, so there is nothing to assert. These three always render one.
-@pytest.mark.parametrize("page", ["/manage/users", "/manage/audit", "/alerts"])
+# subnet table, so there is nothing to assert. These four always render one.
+@pytest.mark.parametrize("page", ["/manage/users", "/manage/audit", "/alerts", "/printers"])
 def test_table_scrollers_are_positioned(http, page):
     """Every table scroll container must also be a containing block.
 
@@ -215,7 +228,7 @@ def test_table_scrollers_are_positioned(http, page):
         )
 
 
-@pytest.mark.parametrize("page", ["/manage/users", "/", "/manage/people"])
+@pytest.mark.parametrize("page", ["/manage/users", "/", "/manage/people", "/printers"])
 def test_cards_can_shrink_below_their_content(http, page):
     """Cards must carry min-w-0 so a grid can shrink them.
 

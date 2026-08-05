@@ -45,6 +45,15 @@ class SubnetConfig:
     cidr: str
     community: Optional[str] = None  # overrides the global SNMP community
     version: Optional[str] = None
+    # True when central says this subnet has a standby collector, i.e. this
+    # agent's right to sweep it is a LEASE rather than a standing assignment.
+    # It then collects the subnet only while it holds a live lease (see
+    # runner.CollectorLeases) -- which matters most exactly when this value is
+    # read from a CACHED config, because central being unreachable is the case
+    # where a standby elsewhere may have been handed the subnet. Defaults False,
+    # so a subnet with no standby, and any config from a central too old to send
+    # the flag, is collected unconditionally as it always was.
+    leased: bool = False
     # Optional source IP / interface the agent should bind to when scanning
     # this subnet. Lets one agent serve multiple clients with overlapping
     # internal CIDRs (each tunnel terminates at a unique local IP).
@@ -73,6 +82,16 @@ class AgentConfig:
     def spool_path(self) -> str:
         """Filesystem path of the store-and-forward readings spool."""
         return os.path.join(self.data_dir, "readings-spool.jsonl")
+
+    def definitions_path(self) -> str:
+        """Filesystem path of the cached device/model definition feed.
+
+        Beside the spool, in the same durable data dir, for the same reason: an
+        agent that reboots with central unreachable -- which is what a freshly
+        imaged site agent does -- must come back knowing how to read its own
+        fleet.
+        """
+        return os.path.join(self.data_dir, "device-definitions.json")
 
     def snmp_for(self, subnet: SubnetConfig) -> SnmpParams:
         """SNMP params for a subnet, applying per-subnet overrides."""
@@ -118,6 +137,7 @@ def merge_remote(config: AgentConfig, remote: dict) -> AgentConfig:
             version=str(s["snmp_version"]) if s.get("snmp_version") else None,
             bind_interface=s.get("bind_interface"),
             snmp_v3=s.get("snmp_v3") or None,
+            leased=bool(s.get("leased", False)),
         )
         for s in remote.get("subnets", [])
     ]
@@ -240,6 +260,9 @@ def parse_config(data: dict) -> AgentConfig:
             version=str(s["version"]) if s.get("version") is not None else None,
             bind_interface=s.get("bind_interface"),
             snmp_v3=s.get("snmp_v3"),
+            # Deliberately not readable from the local file: whether a subnet is
+            # leased is central's decision, and a local override would be an
+            # agent declaring itself exempt from the lease it is subject to.
         )
         for s in data.get("subnets", [])
     ]

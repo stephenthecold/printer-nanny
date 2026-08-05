@@ -27,9 +27,23 @@ def sites_served_by_agent(db: Session, agent: m.Agent) -> set[int]:
     Always includes the agent's home site. Plus every site that has a Subnet
     row assigned to this agent (the multi-client pattern: one agent at HQ
     serving Beta, Gamma, ... over per-client tunnels).
+
+    Plus every site where this agent currently HOLDS a collection lease, which
+    is what lets a standby at one site cover a subnet belonging to another. Note
+    what that deliberately does not say: being *named* as a standby grants
+    nothing. A standby reaches another site's fleet only while it actually holds
+    the lease, so a configured-but-idle standby has exactly the access it had
+    before it was named -- least privilege, enforced by the same row that
+    prevents the split brain.
     """
+    from sqlalchemy import or_
+
     extra = db.scalars(
-        select(m.Subnet.site_id).where(m.Subnet.agent_id == agent.id).distinct()
+        select(m.Subnet.site_id)
+        .where(
+            or_(m.Subnet.agent_id == agent.id, m.Subnet.collector_agent_id == agent.id)
+        )
+        .distinct()
     )
     served = {agent.site_id}
     served.update(extra)
@@ -114,6 +128,12 @@ def upsert_supply(db: Session, printer: m.Printer, supply: s.SupplyIn) -> m.Supp
         existing = m.Supply(printer_id=printer.id, type=supply.type, color=supply.color)
         db.add(existing)
     existing.description = supply.description
+    # Written on every poll, including back to NULL. A device that stops
+    # reporting its class (firmware downgrade, a provider that supersedes the
+    # standard walk) must not leave a stale "receptacle" behind deciding how the
+    # new levels are read -- NULL falls back to the type, which is a rule, not a
+    # leftover.
+    existing.supply_class = supply.supply_class
     existing.level_pct = supply.level_pct
     existing.status_note = supply.status_note
     existing.current = supply.current
@@ -1169,3 +1189,138 @@ def driver_package_for(
     if len(untagged) == 1:
         return untagged[0]
     return None
+
+
+# --------------------------------------------------------------------------- #
+# Device/model definitions -- the server-pushed feed
+# --------------------------------------------------------------------------- #
+def clients_served_by_agent(db: Session, agent: m.Agent) -> set:
+    """The set of client_ids this agent collects for.
+
+    Derived from the sites it serves rather than stored, for the same reason
+    printer assignment refuses to denormalise ``client_id``: a stored copy goes
+    stale the moment a site moves between clients, and a stale tenancy value is
+    worse than a join.
+    """
+    site_ids = sites_served_by_agent(db, agent)
+    if not site_ids:
+        return set()
+    return set(
+        db.scalars(select(m.Site.client_id).where(m.Site.id.in_(site_ids)).distinct())
+    )
+
+
+def device_definition_feed(db: Session, agent: m.Agent) -> list:
+    """The definitions this agent should hold, in a stable order.
+
+    Scoping: every enabled global definition (``client_id IS NULL`` -- hardware
+    knowledge, not tenant data) plus those scoped to a client this agent
+    actually collects for. An agent never receives another tenant's custom
+    definition, which is why the scope is computed from the agent rather than
+    the feed being served wholesale.
+
+    Sorted by key so the feed digest and the signature are computed over a
+    stable sequence; an unordered query would change the version on every call
+    and make every agent re-download on every poll.
+    """
+    client_ids = clients_served_by_agent(db, agent)
+    scope = m.DeviceDefinition.client_id.is_(None)
+    if client_ids:
+        scope = scope | m.DeviceDefinition.client_id.in_(client_ids)
+    rows = db.scalars(
+        select(m.DeviceDefinition)
+        .where(m.DeviceDefinition.enabled.is_(True), scope)
+        .order_by(m.DeviceDefinition.key)
+    ).all()
+
+    # A client-scoped definition overrides a global one with the same key --
+    # that is what "scoped to this customer" has to mean, or the narrower row
+    # would be silently ignored.
+    #
+    # Two *different* clients scoping the same key is the one case that has no
+    # answer, and it is reachable: one agent at HQ collecting for several
+    # customers. Serving either is a coin flip over what that fleet reads, so
+    # the key is dropped and said out loud -- the same discipline as an
+    # ambiguous driver-package match. Global definitions are unaffected,
+    # because the partial unique index makes duplicate global keys impossible.
+    import logging
+
+    globals_by_key = {r.key: r for r in rows if r.client_id is None}
+    scoped_by_key: dict = {}
+    ambiguous = set()
+    for row in rows:
+        if row.client_id is None:
+            continue
+        if row.key in scoped_by_key:
+            ambiguous.add(row.key)
+        scoped_by_key[row.key] = row
+
+    if ambiguous:
+        logging.getLogger(__name__).warning(
+            "agent %s is served by %d client(s) that scope the same definition "
+            "key(s) %s; refusing to guess -- serving neither",
+            agent.id, len(client_ids), ", ".join(sorted(ambiguous)),
+        )
+
+    merged = dict(globals_by_key)
+    merged.update(scoped_by_key)
+    return [merged[k] for k in sorted(merged) if k not in ambiguous]
+
+
+# --------------------------------------------------------------------------- #
+# Remote hands
+# --------------------------------------------------------------------------- #
+def apply_remote_result(
+    db: Session, req: "m.RemoteRequest", result: "s.RemoteResultIn"
+) -> "m.RemoteRequest":
+    """Fold one agent-reported outcome into its request, and into capability.
+
+    CAPABILITY IS UPDATED FROM EVIDENCE, WHEREVER THE EVIDENCE COMES FROM
+    --------------------------------------------------------------------
+    A probe is not the only thing that proves writability -- a write that the
+    device accepted proves it just as well, and a write the device refused
+    disproves it. So both feed ``printers.remote_capability``, which is what
+    keeps the recorded capability from going stale between probes. A *fetch*
+    never touches it: HTTP reachability says nothing about whether SNMP writes
+    are permitted, and conflating the two is exactly the inference this feature
+    refuses to make.
+
+    A transport failure (``ok`` false with no verdict) leaves capability alone.
+    "The agent could not reach the device" is not evidence that the device is
+    read-only, and downgrading on it would mean one sleeping printer silently
+    revoking a capability that was properly proven yesterday.
+    """
+    now = _now()
+    req.completed_at = now
+    req.error = (result.error or None) and result.error[:600]
+    req.detail = result.detail if isinstance(result.detail, dict) else None
+    req.status = (
+        m.RemoteRequestStatus.succeeded if result.ok else m.RemoteRequestStatus.failed
+    )
+
+    if req.kind == m.RemoteRequestKind.fetch:
+        req.http_status = result.http_status
+        req.content_type = (result.content_type or None) and result.content_type[:120]
+        req.body = result.body
+        req.body_bytes = result.body_bytes
+        req.truncated = bool(result.truncated)
+    else:
+        req.verified = result.verified
+
+    printer = req.printer or db.get(m.Printer, req.printer_id)
+    if printer is not None and result.writable is not None:
+        printer.remote_capability = (
+            m.RemoteCapability.writable if result.writable else m.RemoteCapability.read_only
+        )
+        printer.remote_capability_at = now
+        # Written from the agent's stated reason, bounded. This string is
+        # rendered to an operator, and it originates in an SNMP error message
+        # from a device -- so it is bounded here and escaped by Jinja there,
+        # never interpolated into markup.
+        detail = result.error or (
+            "the device accepted a no-op SNMP write with the credentials we hold"
+            if result.writable
+            else "the device refused the write"
+        )
+        printer.remote_capability_detail = detail[:400]
+    return req

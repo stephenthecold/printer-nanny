@@ -1,0 +1,255 @@
+{% extends "base.html" %}
+{% from "_components.html" import badge, btn, card_cls, checkbox_field, empty_row,
+   field, note, section_title, select_field, table_cls, table_wrap, td_cls,
+   th_cls, thead_cls, tr_cls %}
+{% block title %}Event subscriptions · {{ app.name or 'Printer Nanny' }}{% endblock %}
+{% block body %}
+
+<h1 class="text-2xl font-semibold mb-1">Outbound events</h1>
+<p class="text-sm text-slate-500 mb-4">
+  Typed, versioned, HMAC-signed events POSTed to your own systems — so an ERP,
+  a procurement tool or an internal automation can act on the fleet without
+  Printer Nanny holding any commercial state. A subscription scoped to a client
+  receives <strong>only</strong> that client's events.
+</p>
+
+{% if error %}
+<div role="alert" class="mb-4 {{ note('error') }}">{{ error }}</div>
+{% endif %}
+
+{% if new_secret %}
+<div role="alert" class="mb-4 {{ note('warning') }}">
+  <p class="font-semibold">Signing secret for “{{ new_secret.name }}” — shown once.</p>
+  <p class="mt-1">Copy it into your subscriber now. It is stored encrypted and
+    cannot be read back; if you lose it, rotate it.</p>
+  <code class="block mt-2 break-all bg-white/70 rounded px-2 py-1 text-xs">{{ new_secret.secret }}</code>
+</div>
+{% endif %}
+
+{% if not settings['events.enabled'] %}
+<div class="mb-4 {{ note('warning') }}">
+  Sending is switched off (<em>Settings → Notifications → Event bus</em>). Events
+  are still recorded and queued; they go out when it is switched back on.
+</div>
+{% endif %}
+
+<div class="grid lg:grid-cols-3 gap-6">
+  <section class="{{ card_cls('none', 'lg:col-span-2') }}">
+    <div class="px-4 py-3 border-b font-semibold">Subscriptions</div>
+    <div class="{{ table_wrap() }}">
+      <table class="{{ table_cls() }}">
+        <thead class="{{ thead_cls() }}">
+          <tr>
+            <th class="{{ th_cls() }}">Name</th>
+            <th class="{{ th_cls() }}">Scope</th>
+            <th class="{{ th_cls() }}">Destination</th>
+            <th class="{{ th_cls() }}">Events</th>
+            <th class="{{ th_cls() }}">Deliveries</th>
+            <th class="{{ th_cls('right') }}"><span class="sr-only">Actions</span></th>
+          </tr>
+        </thead>
+        <tbody>
+          {% for s in subscriptions %}
+          {% set tally = counts.get(s.id, {}) %}
+          <tr class="{{ tr_cls('align-top') }} {{ 'opacity-60' if not s.enabled }}">
+            <td class="{{ td_cls() }}">
+              <div class="font-medium">{{ s.name }}</div>
+              <div class="text-[11px] text-slate-400">
+                {% if s.enabled %}{{ badge('enabled', 'ok') }}{% else %}{{ badge('disabled', 'muted') }}{% endif %}
+                {% if s.last_ok is not none %}
+                  {% if s.last_ok %}{{ badge('last ok', 'ok') }}{% else %}{{ badge('last failed', 'error') }}{% endif %}
+                {% endif %}
+              </div>
+              {% if s.last_error %}
+              <div class="text-[11px] text-red-700 mt-1 break-words">{{ s.last_error }}</div>
+              {% endif %}
+            </td>
+            <td class="{{ td_cls('left', 'text-xs') }}">
+              {% if s.client_id is none %}
+              <span class="text-slate-600">all clients</span>
+              {% else %}
+              <span class="text-slate-800">{{ scope_label[s.id] }}</span>
+              <div class="text-slate-400">tenant-scoped</div>
+              {% endif %}
+            </td>
+            <td class="{{ td_cls('left', 'text-xs break-all') }}">{{ s.url }}</td>
+            <td class="{{ td_cls('left', 'text-xs') }}">
+              {% if s.event_types %}
+                {% for t in s.event_types %}<div>{{ t }}</div>{% endfor %}
+              {% else %}
+              <span class="text-slate-500">all types</span>
+              {% endif %}
+            </td>
+            <td class="{{ td_cls('left', 'text-xs tabular-nums') }}">
+              <div>{{ tally.get('delivered', 0) }} delivered</div>
+              {% if tally.get('pending', 0) or tally.get('failed', 0) %}
+              <div class="text-amber-700">{{ (tally.get('pending', 0) + tally.get('failed', 0)) }} queued</div>
+              {% endif %}
+              {% if tally.get('dead', 0) %}
+              <div class="text-red-700">{{ tally.get('dead', 0) }} dead</div>
+              {% endif %}
+              {% if tally.get('skipped', 0) %}
+              <div class="text-slate-500">{{ tally.get('skipped', 0) }} not sent</div>
+              {% endif %}
+            </td>
+            <td class="{{ td_cls('right') }}">
+              <div class="flex flex-wrap gap-1 justify-end">
+                <form method="post" action="/manage/events/{{ s.id }}/test" class="inline">
+                  {{ csrf_field() }}
+                  <button class="{{ btn('neutral', 'sm') }}">Send test</button>
+                </form>
+                <form method="post" action="/manage/events/{{ s.id }}/toggle" class="inline">
+                  {{ csrf_field() }}
+                  <button class="{{ btn('subtle', 'sm') }}">{{ 'Disable' if s.enabled else 'Enable' }}</button>
+                </form>
+                {#- The name travels in a data- attribute and is read through
+                    `dataset`, never interpolated into the confirm() string.
+                    This previously used |tojson, which is WRONG here and was a
+                    live hole rather than a fix: tojson escapes ' but NOT ", and
+                    it emits the JSON string's own surrounding quotes, so inside
+                    a double-quoted attribute the first " ENDS the attribute. A
+                    subscription named `a" onmouseover="alert(1)` rendered a real
+                    onmouseover attribute on this form. tojson is only safe in a
+                    <script> block or a single-quoted attribute. See CLAUDE.md. -#}
+                <form method="post" action="/manage/events/{{ s.id }}/rotate" class="inline"
+                      data-name="{{ s.name }}"
+                      onsubmit="return confirm('Rotate the signing secret for ' + this.dataset.name + '? The current one stops working immediately.');">
+                  {{ csrf_field() }}
+                  <button class="{{ btn('warning', 'sm') }}">Rotate secret</button>
+                </form>
+                <form method="post" action="/manage/events/{{ s.id }}/delete" class="inline"
+                      data-name="{{ s.name }}"
+                      onsubmit="return confirm('Delete subscription ' + this.dataset.name + '? Queued deliveries go with it.');">
+                  {{ csrf_field() }}
+                  {{ csrf_field() }}
+                  <button class="{{ btn('danger', 'sm') }}">Delete</button>
+                </form>
+              </div>
+            </td>
+          </tr>
+          <tr class="border-t-0">
+            <td colspan="6" class="px-3 pb-3">
+              <details class="text-xs">
+                <summary class="cursor-pointer text-slate-500 hover:text-slate-800 rounded
+                                focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-offset-1 focus-visible:ring-sky-500">Edit “{{ s.name }}”</summary>
+                <form method="post" action="/manage/events/{{ s.id }}/update"
+                      class="mt-2 grid md:grid-cols-2 gap-3">
+                  {{ csrf_field() }}
+                  {{ field('name', 'Name for ' ~ s.name, value=s.name, required=True, size='sm') }}
+                  {{ field('url', 'Destination URL for ' ~ s.name, value=s.url, required=True, size='sm') }}
+                  {%- call select_field('client_id', 'Scope for ' ~ s.name, size='sm',
+                                        extra_cls='w-full') %}
+                  <option value="" {{ 'selected' if s.client_id is none }}>All clients (global)</option>
+                  {% for c in clients %}
+                  <option value="{{ c.id }}" {{ 'selected' if s.client_id == c.id }}>{{ c.name }}</option>
+                  {% endfor %}
+                  {%- endcall %}
+                  <fieldset class="border rounded p-2">
+                    <legend class="text-xs text-slate-500 px-1">Event types for {{ s.name }}</legend>
+                    <div class="flex flex-col gap-1">
+                      {% for t in catalogue %}
+                      {{ checkbox_field('event_types', t.name,
+                                        checked=(not s.event_types or t.name in s.event_types),
+                                        value=t.name) }}
+                      {% endfor %}
+                    </div>
+                    <p class="text-[11px] text-slate-400 mt-1">All ticked means “every type, including ones added later”.</p>
+                  </fieldset>
+                  <div class="md:col-span-2">
+                    <button class="{{ btn('accent', 'sm') }}">Save changes</button>
+                  </div>
+                </form>
+              </details>
+            </td>
+          </tr>
+          {% else %}
+          {{ empty_row(6, 'No subscriptions yet — nothing is sent anywhere.') }}
+          {% endfor %}
+        </tbody>
+      </table>
+    </div>
+  </section>
+
+  <section class="{{ card_cls() }}">
+    {{ section_title('Add a subscription') }}
+    <form method="post" action="/manage/events" class="space-y-3 text-sm">
+      {{ csrf_field() }}
+      {{ field('name', 'Name', required=True, placeholder='Acme procurement',
+               help='Just for you — it is not sent.') }}
+      {{ field('url', 'Destination URL', type='url', required=True,
+               placeholder='https://hooks.example.com/printer-nanny',
+               help='https is strongly preferred. Link-local and cloud-metadata addresses are always refused.') }}
+      {% call select_field('client_id', 'Scope',
+                           help='A client-scoped subscription never receives another tenant\'s events.') %}
+        <option value="">All clients (global)</option>
+        {% for c in clients %}<option value="{{ c.id }}">{{ c.name }}</option>{% endfor %}
+      {% endcall %}
+      <fieldset class="border rounded p-2">
+        <legend class="text-xs text-slate-500 px-1">Event types</legend>
+        <div class="flex flex-col gap-2">
+          {% for t in catalogue %}
+          {{ checkbox_field('event_types', t.name ~ ' (v' ~ t.version ~ ')',
+                            checked=True, value=t.name, help=t.summary) }}
+          {% endfor %}
+        </div>
+        <p class="text-[11px] text-slate-400 mt-1">
+          Leave all ticked for everything, including types added in later releases.
+        </p>
+      </fieldset>
+      <button class="{{ btn('accent', 'md', 'w-full') }}">Create subscription</button>
+    </form>
+    <div class="mt-3 {{ note('muted') }}">
+      <p class="font-medium">How a subscriber verifies a delivery</p>
+      <p class="mt-1">Each POST carries
+        <code>X-PrinterNanny-Signature: t=&lt;unix&gt;,v1=&lt;hex&gt;</code>.
+        Compute <code>HMAC-SHA256(secret, "&lt;t&gt;." + raw_body)</code>, compare
+        it in constant time, and <em>reject anything whose <code>t</code> is more
+        than five minutes old</em> — the timestamp is inside the signed material
+        precisely so a captured request cannot be replayed.</p>
+      <p class="mt-1">De-duplicate on <code>idempotency_key</code>: a retry
+        re-sends the same event id and the same key.</p>
+    </div>
+  </section>
+</div>
+
+<section class="{{ card_cls('none', 'mt-6') }}">
+  <div class="px-4 py-3 border-b font-semibold">Recent events</div>
+  <div class="{{ table_wrap() }}">
+    <table class="{{ table_cls() }}">
+      <thead class="{{ thead_cls() }}">
+        <tr>
+          <th class="{{ th_cls() }}">When</th>
+          <th class="{{ th_cls() }}">Type</th>
+          <th class="{{ th_cls() }}">Client</th>
+          <th class="{{ th_cls() }}">Idempotency key</th>
+          <th class="{{ th_cls() }}">Deliveries</th>
+        </tr>
+      </thead>
+      <tbody>
+        {% for e in events %}
+        <tr class="{{ tr_cls() }}">
+          <td class="{{ td_cls('left', 'text-xs tabular-nums whitespace-nowrap') }}">
+            {{ e.occurred_at.strftime('%Y-%m-%d %H:%M') if e.occurred_at else '—' }}
+          </td>
+          <td class="{{ td_cls('left', 'text-xs') }}">{{ e.type }} <span class="text-slate-400">v{{ e.version }}</span></td>
+          <td class="{{ td_cls('left', 'text-xs') }}">
+            {{ event_clients.get(e.client_id, 'no tenant') if e.client_id else 'no tenant' }}
+          </td>
+          <td class="{{ td_cls('left', 'text-xs break-all text-slate-500') }}">{{ e.idempotency_key }}</td>
+          <td class="{{ td_cls('left', 'text-xs') }}">
+            {% for d in deliveries.get(e.id, []) %}
+            {% set tone = {'delivered': 'ok', 'dead': 'error', 'failed': 'warning', 'skipped': 'muted'}.get(d.status.value, 'neutral') %}
+            {{ badge(d.status.value, tone) }}
+            {% else %}
+            <span class="text-slate-400">no subscribers</span>
+            {% endfor %}
+          </td>
+        </tr>
+        {% else %}
+        {{ empty_row(5, 'Nothing emitted yet.') }}
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+</section>
+{% endblock %}

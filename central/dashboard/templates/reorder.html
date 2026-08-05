@@ -1,0 +1,160 @@
+{% extends "base.html" %}
+{#
+  Supplies to order — RECOMMEND-ONLY.
+
+  There is deliberately no "mark as ordered" control anywhere on this page, and
+  none should be added. Printer Nanny recommends; a human orders. The moment a
+  row can be ticked off, this page owns order state, needs reconciling against
+  what was actually bought, and has become the thing the scope decision ruled
+  out. That absence is also why no table row here carries a form control.
+#}
+{% from "_components.html" import btn, card_cls, page_title, note, badge,
+                                  table_wrap, table_cls, thead_cls, th_cls,
+                                  td_cls, tr_cls, empty_row, select_field %}
+{% block title %}Supplies to order · {{ app.name or 'Printer Nanny' }}{% endblock %}
+{% block body %}
+
+{{ page_title(
+     'Supplies to order',
+     'Cartridges to order now, and why. Recommendations only — nothing here places or tracks an order.') }}
+
+<div class="grid sm:grid-cols-2 lg:grid-cols-4 gap-4 mb-5">
+  <div class="{{ card_cls('sm') }}">
+    <div class="text-2xl font-semibold text-slate-800 tabular-nums">{{ summary.total }}</div>
+    <div class="text-xs text-slate-500">cartridge(s) to order</div>
+  </div>
+  <div class="{{ card_cls('sm') }}">
+    <div class="text-2xl font-semibold tabular-nums {{ 'text-red-700' if summary.order_now else 'text-slate-800' }}">{{ summary.order_now }}</div>
+    <div class="text-xs text-slate-500">order now</div>
+  </div>
+  <div class="{{ card_cls('sm') }}">
+    <div class="text-2xl font-semibold text-slate-800 tabular-nums">{{ summary.printers }}</div>
+    <div class="text-xs text-slate-500">printer(s) affected</div>
+  </div>
+  <div class="{{ card_cls('sm') }}">
+    <div class="text-2xl font-semibold text-slate-800 tabular-nums">{{ summary.clients }}</div>
+    <div class="text-xs text-slate-500">client(s) affected</div>
+  </div>
+</div>
+
+{# The thresholds are stated on the page, not buried in Settings. A list an
+   operator cannot check the rules of is a list they end up ignoring. #}
+<div class="{{ note('muted', 'mb-5') }}">
+  Recommending a supply when its level is at or below
+  <strong class="tabular-nums">{{ '%.0f'|format(thresholds.level_pct) }}%</strong>,
+  <em>or</em> it is forecast to last
+  <strong class="tabular-nums">{{ thresholds.days_remaining }}</strong> day(s) or fewer,
+  <em>or</em> <strong class="tabular-nums">{{ '{:,}'.format(thresholds.pages_remaining) }}</strong> page(s) or fewer.
+  Anything running out inside the
+  <strong class="tabular-nums">{{ thresholds.lead_days }}</strong>-day replacement lead time is
+  <strong>order now</strong>.
+  {% if user.role.value == 'admin' %}
+  <a href="/settings?group=alerts" class="text-sky-700 hover:underline">Change these in Settings</a>.
+  {% endif %}
+</div>
+
+{% if clients|length > 1 %}
+<form method="get" action="/supplies/reorder" class="flex items-end gap-2 mb-5 flex-wrap">
+  <div class="w-64 max-w-full">
+    {% call select_field('client_id', 'Client', size='sm') %}
+      <option value="">All clients</option>
+      {% for c in clients %}
+      <option value="{{ c.id }}" {% if selected_client_id == c.id %}selected{% endif %}>{{ c.name }}</option>
+      {% endfor %}
+    {% endcall %}
+  </div>
+  <button class="{{ btn('neutral', 'sm') }}">Filter</button>
+  {% if selected_client_id %}
+  <a href="/supplies/reorder" class="{{ btn('subtle', 'sm') }}">Clear</a>
+  {% endif %}
+</form>
+{% endif %}
+
+{% for group in groups %}
+<section class="{{ card_cls('md', 'mb-5') }}">
+  <div class="flex items-baseline justify-between gap-3 flex-wrap mb-3">
+    <h2 class="font-semibold">
+      <a href="/clients/{{ group.client_id }}" class="hover:underline">{{ group.client_name }}</a>
+    </h2>
+    <div class="flex items-center gap-2">
+      {% if group.urgent_units %}{{ badge(group.urgent_units ~ ' order now', 'error') }}{% endif %}
+      {{ badge(group.total_units ~ ' to order', 'neutral') }}
+    </div>
+  </div>
+
+  {# What to put on the order: aggregated per cartridge, so an MSP orders once
+     rather than once per device. Keyed on (model, type, colour) — black toner
+     for a Brother is not black toner for an HP, and without a SKU catalogue the
+     model is the closest honest statement of "the same cartridge". #}
+  <ul class="flex flex-wrap gap-2 mb-4">
+    {% for line in group.lines %}
+    <li class="border rounded px-2.5 py-1.5 text-sm {{ 'border-red-200 bg-red-50' if line.is_urgent else 'border-slate-200 bg-slate-50' }}">
+      <span class="font-semibold tabular-nums">{{ line.quantity }}&times;</span>
+      <span>{{ line.label }}</span>
+      {% if line.model %}<span class="text-xs text-slate-500">· {{ line.model }}</span>{% endif %}
+      {% if line.is_urgent %}<span class="text-xs font-medium text-red-700">· order now</span>{% endif %}
+    </li>
+    {% endfor %}
+  </ul>
+
+  <div class="{{ table_wrap() }}">
+    <table class="{{ table_cls() }}">
+      <thead class="{{ thead_cls() }}">
+        <tr>
+          <th class="{{ th_cls() }}">Printer</th>
+          <th class="{{ th_cls() }}">Supply</th>
+          <th class="{{ th_cls('right') }}">Level</th>
+          <th class="{{ th_cls('right') }}">Days left</th>
+          <th class="{{ th_cls('right') }}">Pages left</th>
+          <th class="{{ th_cls() }}">Why</th>
+        </tr>
+      </thead>
+      <tbody>
+        {% for rec in group.recommendations %}
+        <tr class="{{ tr_cls() }}">
+          <td class="{{ td_cls() }}">
+            <a href="/printers/{{ rec.printer_id }}" class="font-medium hover:underline">{{ rec.printer_label }}</a>
+            {% if rec.site_name %}<div class="text-xs text-slate-400">{{ rec.site_name }}</div>{% endif %}
+          </td>
+          <td class="{{ td_cls() }}">
+            {{ rec.supply_label }}
+            {% if rec.urgency == urgency_now %}{{ badge('order now', 'error', 'ml-1') }}{% endif %}
+          </td>
+          <td class="{{ td_cls('right', 'tabular-nums') }}">
+            {# "5%" reads as nearly-dead for a cartridge and nearly-empty for a
+               waste box, so a receptacle says which it is rather than leaving
+               the reader to guess from the supply name. #}
+            {% if rec.level_pct is not none %}{{ '%.0f'|format(rec.level_pct) }}%{% if rec.is_receptacle %} full{% endif %}{% else %}<span class="text-slate-400">—</span>{% endif %}
+          </td>
+          <td class="{{ td_cls('right', 'tabular-nums') }}">
+            {% if rec.days_remaining is not none %}{{ '%.0f'|format(rec.days_remaining) }}{% else %}<span class="text-slate-400">—</span>{% endif %}
+          </td>
+          <td class="{{ td_cls('right', 'tabular-nums') }}">
+            {% if rec.pages_remaining is not none %}{{ '{:,.0f}'.format(rec.pages_remaining) }}{% else %}<span class="text-slate-400">—</span>{% endif %}
+          </td>
+          <td class="{{ td_cls('left', 'text-xs text-slate-500') }}">{{ rec.reasons | join('; ') }}</td>
+        </tr>
+        {% else %}
+        {{ empty_row(6, 'Nothing to order for this client.') }}
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+  {# A dash is honest, and this says what it means, once per page rather than
+     per cell: absent is "not measurable yet", never "plenty left". #}
+  <p class="text-xs text-slate-400 mt-2">
+    A dash means no trustworthy estimate yet — not that the supply is fine.
+    Forecasts need a few days of polling history per cartridge.
+  </p>
+</section>
+{% else %}
+<section class="{{ card_cls() }}">
+  <h2 class="font-semibold mb-1">Nothing to order</h2>
+  <p class="text-sm text-slate-500">
+    No supply is at or below the reorder thresholds
+    {%- if selected_client_id %} for this client{% endif %}. This list fills in as
+    cartridges deplete and the forecast builds.
+  </p>
+</section>
+{% endfor %}
+{% endblock %}

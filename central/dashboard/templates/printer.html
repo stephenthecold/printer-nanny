@@ -21,26 +21,36 @@
   {% if can_manage %}
   <div class="ml-auto flex items-center gap-2">
     <form method="post" action="/manage/printers/{{ printer.id }}/poll" class="inline">
+      {{ csrf_field() }}
       <button class="{{ btn('accent', 'sm') }}">Poll now</button>
     </form>
     <a href="/manage/printers/{{ printer.id }}/edit" class="{{ btn('primary', 'sm') }}">Edit</a>
     {% if is_pending %}
     <form method="post" action="/manage/printers/{{ printer.id }}/approve" class="inline">
+      {{ csrf_field() }}
       <button class="{{ btn('success', 'sm') }}">Approve</button>
     </form>
     {% elif not is_ignored %}
+    {# The IP came off a device on a customer LAN, so it is hostile input: it
+       travels in a data- attribute and is read via `dataset`, never
+       interpolated into the confirm() string. See CLAUDE.md. #}
     <form method="post" action="/manage/printers/{{ printer.id }}/ignore" class="inline"
-          onsubmit="return confirm('Stop monitoring {{ printer.ip }}? Agents will no longer poll it.')">
+          data-ip="{{ printer.ip }}"
+          onsubmit="return confirm('Stop monitoring ' + this.dataset.ip + '? Agents will no longer poll it.')">
+      {{ csrf_field() }}
       <button class="{{ btn('warning', 'sm') }}">Stop monitoring</button>
     </form>
     {% else %}
     <form method="post" action="/manage/printers/{{ printer.id }}/approve" class="inline">
+      {{ csrf_field() }}
       <button class="{{ btn('success', 'sm') }}">Resume monitoring</button>
     </form>
     {% endif %}
     {% if user.role.value == 'admin' %}
     <form method="post" action="/manage/printers/{{ printer.id }}/delete" class="inline"
-          onsubmit="return confirm('Delete printer {{ printer.ip }} and all its history? This cannot be undone.')">
+          data-ip="{{ printer.ip }}"
+          onsubmit="return confirm('Delete printer ' + this.dataset.ip + ' and all its history? This cannot be undone.')">
+      {{ csrf_field() }}
       <button class="{{ btn('danger', 'sm') }}">Delete</button>
     </form>
     {% endif %}
@@ -98,7 +108,7 @@
     {% set label = sup.description or (sup.type.value ~ (' (' ~ sup.color ~ ')' if sup.color else '')) %}
     <div class="flex justify-between items-center py-1 gap-2">
       <span class="text-sm truncate" title="{{ label }}">{{ label }}</span>
-      {% if sup.level_pct is not none %}{{ level_bar(sup.level_pct) }}
+      {% if sup.level_pct is not none %}{{ level_bar(sup.level_pct, sup.is_receptacle) }}
       {% elif sup.status_note %}<span class="text-xs text-slate-500 italic whitespace-nowrap">{{ sup.status_note }}</span>
       {% else %}<span class="text-xs text-slate-400">unknown</span>{% endif %}
     </div>
@@ -153,6 +163,7 @@
     {% if can_manage %}
     <form method="post" action="/manage/printers/{{ printer.id }}/driver-tier"
           class="flex items-end gap-2 shrink-0">
+      {{ csrf_field() }}
       {% call select_field('driver_tier_override', 'Pin tier', size='sm') %}
         <option value="">— use probe result —</option>
         <option value="driverless" {% if printer.driver_tier_override and printer.driver_tier_override.value == 'driverless' %}selected{% endif %}>driverless</option>
@@ -179,6 +190,8 @@
   </details>
   {% endif %}
 </section>
+
+{% if remote_enabled %}{% include "_remote_panel.html" %}{% endif %}
 
 {% if can_manage and printer.last_provider_trace %}
 <details class="{{ card_cls('none', 'mb-6') }}">

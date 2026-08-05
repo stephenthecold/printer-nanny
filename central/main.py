@@ -2,10 +2,11 @@
 
 from __future__ import annotations
 
+import logging
 from pathlib import Path
 
-from fastapi import Depends, FastAPI
-from fastapi.responses import JSONResponse
+from fastapi import Depends, FastAPI, Request
+from fastapi.responses import JSONResponse, PlainTextResponse
 from fastapi.staticfiles import StaticFiles
 from sqlalchemy.orm import Session
 from starlette.middleware.sessions import SessionMiddleware
@@ -22,32 +23,172 @@ from central.api import (
     workstations,
 )
 from central.config import settings
+from central.csrf import CSRFError, csrf_protect
 from central.dashboard import (
+    events_routes,
     backup_routes,
+    billing as billing_routes,
+    definitions,
     installer,
     machines,
     manage,
     people,
+    remote as remote_routes,
     routes as dashboard,
     settings_routes,
+    yield_routes,
 )
+from central.dashboard.templating import render_csrf_error
 from central.db import create_all, get_db
 from central.health import database_ok, worker_health
+from central.logging_config import configure_logging
+from central.middleware import (
+    ForcePasswordChangeMiddleware,
+    PeerAddressMiddleware,
+    SecurityHeadersMiddleware,
+)
 
-app = FastAPI(title="Printer Nanny", version="0.27.2")
+# `uvicorn central.main:app` gives the api container no entrypoint of ours, so
+# importing this module is the only moment we get before it serves. Until this
+# call existed the worker configured logging in its main() and the api
+# configured it NOWHERE: every log.info() in central/ was dropped on the floor
+# there, and warnings came out through logging.lastResort with no timestamp,
+# level or logger name. Safe at import time -- uvicorn applies its own
+# dictConfig in Config.__init__, i.e. before load() imports this module, and
+# that config names only the uvicorn* loggers. See central/logging_config.py.
+configure_logging()
+
+log = logging.getLogger("central.main")
+
+# MIDDLEWARE ORDER IS LOAD-BEARING. add_middleware inserts at index 0 and the
+# stack is wrapped in reverse, so the LAST one added is the OUTERMOST. Reading
+# the four below from the bottom up gives the order a request meets them.
+#
+# ``dependencies`` here is the CSRF gate, and it is declared on the app rather
+# than on each router on purpose: APIRouter.include_router prepends the app
+# router's dependencies to every route it takes in, so a router added later
+# inherits the check instead of quietly shipping without it. See central/csrf.py
+# for what it does and does not cover -- in particular why "carries a session
+# cookie" is the trigger rather than a path allowlist.
+app = FastAPI(
+    title="Printer Nanny",
+    version="1.0.0",
+    dependencies=[Depends(csrf_protect)],
+    # /docs, /redoc and /openapi.json are FastAPI defaults and were UNAUTHENTICATED
+    # -- 198 KB of schema describing every SCIM, agent-ingest, workstation-enroll
+    # and management route, served to anyone who could reach the dashboard. The
+    # Caddyfile reverse-proxies every path, so on a real deployment that is the
+    # internet. They are also the only four routes that are plain Starlette
+    # Routes rather than APIRoutes, which is why the app-level CSRF dependency
+    # never applied to them (harmless -- they are GET) and a useful reminder that
+    # "declared on the app" and "reaches everything" are not the same claim.
+    #
+    # Off by default rather than gated behind auth: an MSP running this does not
+    # need interactive API docs in production, and an operator who does can turn
+    # them on knowingly.
+    openapi_url="/openapi.json" if settings.expose_api_docs else None,
+    docs_url="/docs" if settings.expose_api_docs else None,
+    redoc_url="/redoc" if settings.expose_api_docs else None,
+)
 # Honor X-Forwarded-Proto/For from the reverse proxy so request.base_url returns
 # https:// when Caddy/Nginx terminates TLS in front of us. Without this, the
 # agent install command on /manage/agents leaks http://… to operators behind
 # their own TLS proxy. Trusts headers from any source — we already require the
-# proxy to be a trusted hop (it's the same docker network or LAN).
+# proxy to be a trusted hop (it's the same docker network or LAN). That trust is
+# fine for display and for the audit trail and is NOT fine for a rate limiter,
+# which is why PeerAddressMiddleware below captures the peer before this runs;
+# see central/net.py.
 app.add_middleware(ProxyHeadersMiddleware, trusted_hosts="*")
+
+#: Named explicitly rather than left to Starlette's default so
+#: _NoSessionRefreshOnPoll below can match on it. The two must agree; a drift
+#: would make that middleware silently stop doing anything.
+SESSION_COOKIE = "session"
+
+# Inside SessionMiddleware (added next), which is what puts scope["session"] there.
+app.add_middleware(ForcePasswordChangeMiddleware)
 app.add_middleware(
     SessionMiddleware,
     secret_key=settings.secret_key,
+    session_cookie=SESSION_COOKIE,
     max_age=60 * 60 * 12,
     https_only=settings.secure_cookies,  # Secure flag in production (TLS at the proxy)
-    same_site="lax",  # mitigates cross-site POST/CSRF on the dashboard
+    # Defence in depth, NOT the CSRF defence -- that is central/csrf.py. "lax"
+    # compares registrable domains, so a sibling host on the same domain is
+    # same-site and gets this cookie attached to its forged requests; and it
+    # permits top-level GET navigation, which is why a disclosure behind a GET
+    # (the old /admin/backup/download) was reachable despite it.
+    same_site="lax",
 )
+# Outermost: must see scope["client"] before ProxyHeadersMiddleware rewrites it.
+app.add_middleware(PeerAddressMiddleware)
+# Outside everything, so the headers land on error responses and redirects too --
+# a 303 to /login is still a framable page.
+app.add_middleware(SecurityHeadersMiddleware)
+
+
+class _NoSessionRefreshOnPoll:
+    """Stop the dashboard's auto-refresh poll from renewing the session cookie.
+
+    **Currently a no-op on the pinned Starlette, and kept anyway.** This was
+    written against a SessionMiddleware that re-signed the cookie on EVERY
+    response; 1.3.x only re-sends when ``session.modified``, so a poll never
+    rolled the expiry to begin with. Retained rather than deleted because the
+    behaviour it guards against is a dependency's implementation detail, not a
+    contract -- if it comes back, this is what stops the 12h cap disappearing as
+    a side effect of a convenience feature. The freshness test states which
+    regime it observed rather than asserting one.
+
+    SessionMiddleware re-signs and re-sends the cookie on EVERY response with a
+    non-empty session, and the signature carries a fresh timestamp, so the 12h
+    expiry is a rolling one measured from the last request. That is the right
+    behaviour for a human clicking around. It is the wrong behaviour for a
+    timer: without this, one dashboard tab left open on an unattended NOC
+    workstation would hold its session open indefinitely, because the page
+    would keep renewing its own credential with nobody present. The 12h cap
+    would become no cap at all -- a security property quietly removed as a side
+    effect of a convenience feature.
+
+    So for the poll path only, the Set-Cookie the session middleware appended is
+    dropped on the way out. The request still authenticates (the browser's
+    existing cookie is untouched and stays valid until its own Max-Age), it just
+    does not extend anything: the operator's clock keeps running from their last
+    real interaction, and when it lapses the poll gets a 286 and stops.
+
+    Written as raw ASGI rather than @app.middleware("http") on purpose --
+    BaseHTTPMiddleware wraps the whole response cycle and interferes with
+    streaming responses, and /admin/backup streams a database dump through it.
+    This only inspects one header on one path and never touches the body.
+    """
+
+    def __init__(self, app, paths) -> None:
+        self.app = app
+        self.paths = frozenset(paths)
+        self._prefix = f"{SESSION_COOKIE}=".encode("latin-1")
+
+    async def __call__(self, scope, receive, send):
+        if scope.get("type") != "http" or scope.get("path") not in self.paths:
+            await self.app(scope, receive, send)
+            return
+
+        async def send_no_session_cookie(message):
+            if message.get("type") == "http.response.start":
+                # Only OUR session cookie is dropped; anything else a response
+                # legitimately sets is passed through untouched.
+                message = dict(message)
+                message["headers"] = [
+                    (key, value)
+                    for key, value in message.get("headers", [])
+                    if not (key.lower() == b"set-cookie" and value.startswith(self._prefix))
+                ]
+            await send(message)
+
+        await self.app(scope, receive, send_no_session_cookie)
+
+
+# Added last, so it is the OUTERMOST middleware and therefore sees (and can
+# remove) the header SessionMiddleware appended further in.
+app.add_middleware(_NoSessionRefreshOnPoll, paths=[dashboard.FRESHNESS_PATH])
 
 # JSON API
 # Registered before `ingest` so /api/v1/agents/register is matched by its own
@@ -66,11 +207,58 @@ app.include_router(dashboard.router)
 app.include_router(manage.router)
 app.include_router(people.router)
 app.include_router(machines.router)
+app.include_router(billing_routes.router)
+app.include_router(events_routes.router)
+app.include_router(definitions.router)
+app.include_router(remote_routes.router)
+app.include_router(yield_routes.router)
 app.include_router(settings_routes.router)
 app.include_router(backup_routes.router)
 app.include_router(auth_oidc.router)
 app.include_router(auth_oauth_smtp.router)
 app.include_router(installer.router)
+
+
+@app.exception_handler(CSRFError)
+async def _csrf_rejected(request: Request, exc: CSRFError):
+    """Turn a refused request into something the operator can act on.
+
+    A bare 403 on a form submit is the failure mode this whole change had to
+    avoid: to an operator it is indistinguishable from the app being broken, and
+    to an htmx-driven control it is *invisible* -- htmx does not swap a non-2xx
+    response, so the button simply does nothing. So both shapes get a stated
+    reason: a rendered page for a form post, and for htmx a plain-text body that
+    base.html's ``htmx:responseError`` listener puts on screen.
+
+    Audited as ``csrf.rejected``. It is the only signal that someone is aiming
+    cross-site requests at an operator's browser, and it is written on its own
+    session because the request's DB dependency is already torn down by the time
+    an exception handler runs. Never the tokens -- only the path and which of
+    the three ways it failed.
+    """
+    try:
+        from central.audit import record_anonymous
+        from central.db import SessionLocal
+
+        with SessionLocal() as audit_db:
+            record_anonymous(
+                audit_db, request, "", "csrf.rejected",
+                target=f"{request.method} {request.url.path}"[:300],
+                detail=exc.reason,
+            )
+            audit_db.commit()
+    except Exception:  # noqa: BLE001 - a refusal must not depend on the audit landing
+        log.exception("failed to audit csrf rejection")
+
+    if request.headers.get("HX-Request", "").lower() == "true":
+        return PlainTextResponse(
+            exc.message,
+            status_code=403,
+            # htmx would not swap a 403 anyway; saying so keeps a future
+            # hx-swap-oob or global error-swap config from pasting this in.
+            headers={"HX-Reswap": "none"},
+        )
+    return render_csrf_error(request, exc.message)
 
 
 class _RevalidatingStatic(StaticFiles):
@@ -181,10 +369,13 @@ def readyz(worker: str = "check", db: Session = Depends(get_db)):
 
 @app.on_event("startup")
 def _startup() -> None:
-    import logging
-
-    # Refuse to boot a production deployment with a default/blank SECRET_KEY.
+    # Refuse to boot on a SECRET_KEY that is published in this repository —
+    # on ANY database backend. See central/config.py.
     settings.assert_secure()
+    log.info(
+        "printer nanny api %s starting (secret key: %s)",
+        app.version, settings.secret_key_source,
+    )
     # On SQLite (local dev) create tables automatically. On Postgres, migrations own
     # the schema, but create_all is a harmless no-op if they've already run.
     if settings.is_sqlite:
@@ -203,8 +394,6 @@ def _startup() -> None:
             if sa_inspect(db.get_bind()).has_table(m.AppSetting.__tablename__):
                 updated = encrypt_existing_settings(db)
                 if updated:
-                    logging.getLogger("central").info(
-                        "encrypted %d legacy plaintext secret setting(s)", updated
-                    )
+                    log.info("encrypted %d legacy plaintext secret setting(s)", updated)
     except Exception:  # noqa: BLE001 - never block boot on the sweep
-        logging.getLogger("central").exception("secret-encryption sweep failed")
+        log.exception("secret-encryption sweep failed")

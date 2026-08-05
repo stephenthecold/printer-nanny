@@ -6,8 +6,10 @@
 <p class="text-sm text-slate-500 mb-4">
   Per-printer or model-wide schedules. The worker opens a "Maintenance due"
   alert when a schedule's <em>next due</em> date passes (and the page count, when
-  set, has been reached). Logging service rolls <em>next due</em> forward and
-  auto-resolves the open alert on the next worker cycle.
+  set, has been reached). Marking it serviced rolls <em>next due</em> forward by
+  the repeat interval and moves the page target on by one threshold from the
+  meter as it reads now, then auto-resolves the open alert on the next worker
+  cycle. A schedule with neither is a one-off: it says so when you log it.
 </p>
 
 <div class="grid md:grid-cols-3 gap-6">
@@ -20,7 +22,7 @@
           <th class="px-4 py-2">Name</th>
           <th class="py-2">Scope</th>
           <th class="py-2">Every</th>
-          <th class="py-2">At page</th>
+          <th class="py-2">Due at page</th>
           <th class="py-2">Component</th>
           <th class="py-2">Next due</th>
           <th class="py-2 w-44 text-right pr-4"></th>
@@ -44,7 +46,16 @@
             {% endif %}
           </td>
           <td class="py-2 text-xs tabular-nums">{{ (s.interval_days|string ~ ' day(s)') if s.interval_days else '—' }}</td>
-          <td class="py-2 text-xs tabular-nums">{{ '{:,}'.format(s.page_threshold) if s.page_threshold else '—' }}</td>
+          {# The target moves with each logged service, so show where it is NOW
+             (meter at last service + threshold) with the repeat under it. #}
+          <td class="py-2 text-xs tabular-nums">
+            {% if s.page_threshold %}
+            {{ '{:,}'.format(s.page_target()) }}
+            {% if s.last_serviced_page_count %}
+            <div class="text-slate-400">every {{ '{:,}'.format(s.page_threshold) }}</div>
+            {% endif %}
+            {% else %}—{% endif %}
+          </td>
           <td class="py-2 text-xs">
             {% if s.component_type %}
             <span class="px-1.5 py-0.5 rounded bg-amber-100 text-amber-700">{{ s.component_type }} ≤ {{ '%g'|format(s.life_threshold) }}%</span>
@@ -52,6 +63,7 @@
           </td>
           <td class="py-2 text-xs tabular-nums">
             <form method="post" action="/manage/maintenance/schedules/{{ s.id }}" class="flex items-center gap-1">
+              {{ csrf_field() }}
               <input type="date" name="next_due" value="{{ s.next_due.strftime('%Y-%m-%d') if s.next_due else '' }}" class="border rounded px-1 py-0.5 text-xs" />
               <input type="hidden" name="interval_days" value="{{ s.interval_days or '' }}" />
               <input type="hidden" name="page_threshold" value="{{ s.page_threshold or '' }}" />
@@ -62,11 +74,14 @@
           </td>
           <td class="py-2 pr-4 text-right text-xs">
             <form method="post" action="/manage/maintenance/schedules/{{ s.id }}/log" class="inline">
+              {{ csrf_field() }}
               <input name="performed_by" placeholder="Tech name (opt)" class="border rounded px-1 py-0.5 text-xs w-24" />
               <button class="{{ btn('success', 'sm', 'ml-1') }}">Mark serviced</button>
             </form>
             <form method="post" action="/manage/maintenance/schedules/{{ s.id }}/delete" class="inline ml-1"
-                  onsubmit="return confirm('Delete schedule {{ s.name }}?')">
+                  data-name="{{ s.name }}"
+                  onsubmit="return confirm('Delete schedule ' + this.dataset.name + '?')">
+              {{ csrf_field() }}
               <button class="text-red-600 hover:underline">remove</button>
             </form>
           </td>
@@ -82,6 +97,7 @@
   <section class="{{ card_cls('md', 'h-fit') }}">
     <h2 class="font-semibold mb-3">Add schedule</h2>
     <form method="post" action="/manage/maintenance/schedules" class="space-y-2">
+      {{ csrf_field() }}
       <label class="block">
         <span class="text-xs text-slate-500">Name</span>
         <input name="name" required placeholder="Quarterly clean, Fuser kit, ..." class="w-full border rounded px-3 py-2 text-sm" />
@@ -165,6 +181,7 @@
         {% if user.role.value == 'admin' %}
         <td class="py-2 pr-4 text-right text-xs">
           <form method="post" action="/manage/maintenance/records/{{ r.id }}/delete" onsubmit="return confirm('Remove this service record?')">
+            {{ csrf_field() }}
             <button class="text-red-600 hover:underline">remove</button>
           </form>
         </td>

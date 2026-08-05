@@ -84,10 +84,18 @@ curl -fsSL .../install.sh | bash -s -- --proxy bundled \
 curl -fsSL .../install.sh | bash -s -- --proxy none --http-port 8536
 ```
 
-Log in at the URL it prints with **`admin` / `admin`** — change that password
-immediately under `/account`. The API runs migrations and bootstraps the admin
-user on every container start (idempotent), so a fresh DB is usable on first
-boot without touching a shell.
+Log in as **`admin`**. The password is **generated on first boot and printed
+once** in the api container's log — `docker compose logs api` and look for the
+boxed `password:` line. You will be required to change it at first sign-in, and
+the dashboard serves nothing else until you do, which is what retires the value
+sitting in that log.
+
+Set `PN_ADMIN_PASSWORD` in `.env` before the first boot to choose it yourself
+instead; that path skips the forced rotation, on the grounds that a password you
+picked was never printed anywhere.
+
+The API runs migrations and bootstraps the admin user on every container start
+(idempotent), so a fresh DB is usable on first boot without touching a shell.
 
 **Recommended**: also add `postgresql-client` to your api container image so
 `pg_dump` / `pg_restore` are on PATH for the Backup page.
@@ -244,7 +252,7 @@ proxy with a real cert.
 python3 -m venv .venv && source .venv/bin/activate
 pip install -e ".[dev]"
 python -m central.seed                 # tables + demo data (drops & recreates all tables)
-uvicorn central.main:app --reload      # http://localhost:8000  (admin / admin)
+uvicorn central.main:app --reload      # http://localhost:8000  (admin / see seed output)
 python -m central.worker.run --once    # evaluate alerts once
 ```
 

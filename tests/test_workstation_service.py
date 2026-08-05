@@ -17,9 +17,12 @@ from __future__ import annotations
 import json
 import os
 import stat
+import subprocess
+import time
 
 import pytest
 
+from printer_nanny_agent import fsperm
 from printer_nanny_agent import workstation as ws
 from printer_nanny_agent import workstation_service as svc
 from printer_nanny_agent.platforms import windows as windows_backend
@@ -641,3 +644,325 @@ def test_setting_a_default_off_windows_reports_rather_than_raising():
 def test_an_empty_default_name_is_refused():
     with pytest.raises(svc.DefaultPrinterError):
         svc.set_default_printer("")
+
+
+# --------------------------------------------------------------------------- #
+# The refused-key sentinel
+# --------------------------------------------------------------------------- #
+# The contradiction this resolves: workstation_cli returns exit 2 for a refused
+# enrollment key so a service manager will not loop, but the LaunchDaemon sets
+# KeepAlive{SuccessfulExit=false}, which restarts on ANY non-zero exit. launchd
+# cannot express "restart unless the exit code is 2", so the exit code was
+# documenting a behaviour that did not occur. These tests pin the mechanism that
+# does occur. They do NOT prove launchd's side of it -- that needs a Mac and a
+# counted restart, per deploy/HARDWARE-VERIFICATION.md Part 3.
+def test_a_refused_key_does_not_block_the_first_start(tmp_path):
+    """Nothing recorded yet means nothing suppressed. The first refusal is real
+    work that has to happen before anything can be cached about it."""
+    assert svc.refusal_blocks_start("pnw_k", state_dir=str(tmp_path)) is None
+
+
+def test_the_same_refused_key_blocks_the_next_start(tmp_path):
+    svc.record_refusal("pnw_k", "enrollment refused: the key is not valid",
+                       state_dir=str(tmp_path))
+    blocked = svc.refusal_blocks_start("pnw_k", state_dir=str(tmp_path))
+    assert blocked is not None
+    assert "not valid" in blocked, "the reason must survive, or the loop is quiet AND mute"
+
+
+def test_the_sentinel_never_stores_the_key(tmp_path):
+    """It sits next to machine.json; a second copy of a live credential on disk
+    is a second thing to leak. A fingerprint identifies the key without being it."""
+    svc.record_refusal("pnw_supersecret", "nope", state_dir=str(tmp_path))
+    raw = (tmp_path / svc.REFUSAL_FILENAME).read_text(encoding="utf-8")
+    assert "pnw_supersecret" not in raw
+    assert json.loads(raw)["key_sha256"] != "pnw_supersecret"
+
+
+def test_a_new_key_clears_the_sentinel(tmp_path):
+    """This is what removes the documented cost of the sentinel option -- that an
+    operator must know to delete a state file. Re-minting the key IS the fix, so
+    the fix clears it, and nobody has to be told the file exists."""
+    svc.record_refusal("pnw_old", "revoked", state_dir=str(tmp_path))
+    assert svc.refusal_blocks_start("pnw_new", state_dir=str(tmp_path)) is None
+    assert not (tmp_path / svc.REFUSAL_FILENAME).exists(), "stale sentinel must be removed"
+
+
+def test_the_sentinel_expires_so_an_un_revoked_key_recovers(tmp_path):
+    """A key central un-revokes server-side does not change, so a fingerprint
+    alone would keep this machine dead forever. The window is what stops the
+    mechanism becoming permanent poison."""
+    svc.record_refusal("pnw_k", "revoked", state_dir=str(tmp_path))
+    just_inside = svc.REFUSAL_RETRY_SECONDS - 60
+    assert svc.refusal_blocks_start(
+        "pnw_k", state_dir=str(tmp_path), now=time.time() + just_inside
+    ) is not None
+    assert svc.refusal_blocks_start(
+        "pnw_k", state_dir=str(tmp_path), now=time.time() + svc.REFUSAL_RETRY_SECONDS + 1
+    ) is None
+
+
+def test_a_corrupt_sentinel_fails_open(tmp_path):
+    """Same call as the state file next to it: the cost of ignoring a corrupt
+    sentinel is one more refusal, the cost of trusting one is a machine that
+    never enrolls again. So it blocks nothing and is removed."""
+    (tmp_path / svc.REFUSAL_FILENAME).write_text("{not json", encoding="utf-8")
+    assert svc.refusal_blocks_start("pnw_k", state_dir=str(tmp_path)) is None
+    assert not (tmp_path / svc.REFUSAL_FILENAME).exists()
+
+
+def test_a_sentinel_missing_its_fields_fails_open(tmp_path):
+    (tmp_path / svc.REFUSAL_FILENAME).write_text('{"at": 1}', encoding="utf-8")
+    assert svc.refusal_blocks_start("pnw_k", state_dir=str(tmp_path)) is None
+
+
+def test_clearing_a_refusal_that_is_not_there_is_not_an_error(tmp_path):
+    svc.clear_refusal(state_dir=str(tmp_path))
+
+
+def test_only_a_refused_key_records_a_sentinel(tmp_path, monkeypatch):
+    """The sentinel is keyed on the enrollment key, so only a refusal OF THAT KEY
+    may write one. A sibling ServiceError is terminal too -- it still earns exit
+    2 -- but suppressing the next start would blame a key that was never wrong.
+    """
+    from printer_nanny_agent import workstation_cli
+    from printer_nanny_agent import workstation_service as service
+
+    common = ["--server", "https://c.example", "--enroll-key", "pnw_k",
+              "--state-dir", str(tmp_path)]
+
+    def raise_unrelated(*a, **k):
+        raise service.ServiceError("config is wrong in some terminal way")
+
+    monkeypatch.setattr(service, "run", raise_unrelated)
+    assert workstation_cli.main(common) == 2, "still terminal, still exit 2"
+    assert not (tmp_path / service.REFUSAL_FILENAME).exists()
+
+    def raise_refused(*a, **k):
+        raise service.EnrollmentRefused("enrollment refused: the key is not valid")
+
+    monkeypatch.setattr(service, "run", raise_refused)
+    assert workstation_cli.main(common) == 2, "the FIRST refusal exits truthfully"
+    assert (tmp_path / service.REFUSAL_FILENAME).exists()
+
+    # ...and the second start with that same key is the one that goes quiet, so
+    # launchd's KeepAlive{SuccessfulExit=false} stops after exactly one restart.
+    called = []
+    monkeypatch.setattr(service, "run", lambda *a, **k: called.append(1))
+    assert workstation_cli.main(common) == 0
+    assert called == [], "a blocked start must not reach the service at all"
+
+
+def test_once_neither_reads_nor_writes_the_sentinel(tmp_path, monkeypatch):
+    """A diagnostic run must answer "what happens if I run it now", not replay a
+    cached refusal -- and must not leave state that silences the service."""
+    from printer_nanny_agent import workstation_cli
+    from printer_nanny_agent import workstation_service as service
+
+    common = ["--server", "https://c.example", "--enroll-key", "pnw_k",
+              "--state-dir", str(tmp_path), "--once"]
+
+    def raise_refused(*a, **k):
+        raise service.EnrollmentRefused("enrollment refused: the key is not valid")
+
+    monkeypatch.setattr(service, "run", raise_refused)
+    assert workstation_cli.main(common) == 2
+    assert not (tmp_path / service.REFUSAL_FILENAME).exists(), "--once wrote a sentinel"
+
+    # A sentinel left by the service must not change what --once reports.
+    service.record_refusal("pnw_k", "revoked", state_dir=str(tmp_path))
+    assert workstation_cli.main(common) == 2, "--once must still really try"
+
+
+# --------------------------------------------------------------------------- #
+# The state directory's permissions
+# --------------------------------------------------------------------------- #
+# os.chmod on Windows toggles the read-only attribute and writes NO DACL, so the
+# 0600 set on machine.json was never a permission there at all -- the file simply
+# inherited BUILTIN\Users:(I)(RX) from C:\ProgramData, and any logged-in user
+# could read this machine's live bearer credential. Verified by observation on
+# Windows 11 before the fix: the interactive user held (I)(OI)(CI)(F).
+def test_the_state_directory_is_restricted_to_its_owner(tmp_path):
+    d = tmp_path / "state"
+    d.mkdir()
+    fsperm.reset_cache_for_tests()
+    svc._secure_state_dir(str(d))
+
+    if os.name == "nt":
+        try:
+            out = subprocess.run(
+                ["icacls", str(d)], capture_output=True, text=True
+            ).stdout
+            # SIDs resolve to localised names in icacls OUTPUT, so assert the
+            # PROPERTY rather than the names or a fixed count: inheritance is
+            # broken, and the group that granted every logged-in user is gone.
+            # A surviving "(I)" means /inheritance:r did not take.
+            assert "(I)" not in out, f"inheritance was not broken:\n{out}"
+            assert "Users:" not in out, f"every logged-in user still has it:\n{out}"
+            entries = [ln for ln in out.splitlines()[:20] if ":(" in ln]
+            # SYSTEM + Administrators, plus this process's own account. That
+            # third grant is deliberate: under the service it resolves to SYSTEM
+            # and adds nothing, but for a technician running --once it is the
+            # difference between a working diagnostic and a PermissionError on a
+            # directory they had just created.
+            assert 2 <= len(entries) <= 3, (
+                f"expected SYSTEM + Administrators (+ this account):\n{out}"
+            )
+        finally:
+            # Hand it back so pytest's tmp cleanup can remove the directory.
+            subprocess.run(
+                ["icacls", str(d), "/reset", "/T", "/C", "/Q"],
+                capture_output=True, text=True,
+            )
+    else:
+        assert stat.S_IMODE(os.stat(d).st_mode) == 0o700
+
+
+def test_securing_the_state_directory_never_takes_the_service_down(tmp_path, monkeypatch):
+    """Best-effort by design: a workstation must still provision its queues if
+    the ACL cannot be set. It warns rather than raising -- but it does warn,
+    because a silent failure is how this stayed invisible."""
+    d = tmp_path / "state"
+    d.mkdir()
+    fsperm.reset_cache_for_tests()
+
+    def boom(*a, **k):
+        raise OSError("icacls is missing")
+
+    monkeypatch.setattr(os, "chmod", boom)
+    if os.name == "nt":
+        import subprocess as _sp
+        monkeypatch.setattr(_sp, "run", boom)
+    svc._secure_state_dir(str(d))  # must not raise
+
+
+def test_writing_state_secures_the_directory_it_creates(tmp_path, monkeypatch):
+    """The call has to be wired in, not merely available."""
+    seen = []
+    monkeypatch.setattr(svc, "_secure_state_dir", lambda d: seen.append(d))
+    svc.save_state({"api_key": "pnm_secret"}, str(tmp_path))
+    assert seen == [str(tmp_path)]
+
+
+# --------------------------------------------------------------------------- #
+# ...and the directory it must never lock
+# --------------------------------------------------------------------------- #
+def _perm_fingerprint(path) -> str:
+    """Everything about this directory's permissions, as text.
+
+    Compared for EQUALITY rather than inspected, because a fresh directory does
+    not look the way you would guess. Since 3.12, CPython's ``os.mkdir`` applies
+    a real DACL from its mode argument on Windows, so a just-created directory
+    already carries no inherited ``(I)`` entries at all. An oracle asking "did
+    inheritance survive" therefore answers "this is locked" for a directory
+    nobody has touched, and passes whether or not the guard works -- which is
+    exactly what it did when this was written that way first. Equality needs no
+    theory about what an untouched directory looks like.
+    """
+    if os.name == "nt":
+        proc = subprocess.run(["icacls", str(path)], capture_output=True, text=True)
+        assert proc.returncode == 0, f"icacls failed: {proc.stderr}"
+        return "\n".join(
+            ln.strip() for ln in proc.stdout.splitlines()
+            if ln.strip() and "Successfully processed" not in ln
+        )
+    return oct(stat.S_IMODE(os.stat(path).st_mode))
+
+
+def _hand_back(path) -> None:
+    """Undo a lock so pytest's tmp cleanup can remove the directory."""
+    if os.name == "nt":
+        subprocess.run(
+            ["icacls", str(path), "/reset", "/T", "/C", "/Q"],
+            capture_output=True, text=True,
+        )
+
+
+def test_the_working_directory_is_never_what_gets_locked(tmp_path, monkeypatch):
+    """Both callers compute ``os.path.dirname(path) or "."``, so a bare filename
+    hands this helper the process's own working directory -- a source checkout
+    under pytest or in CI, and for a technician running ``--once`` whatever
+    directory they were standing in. Locking that is never what "secure my state
+    directory" meant, and the damage is noticed a long way from the call.
+
+    Measured on Windows 11 without the guard: inheritance stripped from the
+    working directory and a fresh grant added. This asserts the ACL is untouched
+    rather than that a subprocess was skipped, because the harm is the ACL.
+    """
+    monkeypatch.chdir(tmp_path)
+    if os.name != "nt":
+        # NOT cosmetic. pytest hands out a tmp_path that is ALREADY 0700, so on
+        # POSIX -- which is where CI runs -- a broken guard would chmod it to
+        # 0700 and this test would pass having proven nothing. Starting from a
+        # mode the guard's failure would visibly change is the whole assertion.
+        os.chmod(tmp_path, 0o755)
+    fsperm.reset_cache_for_tests()
+
+    before = _perm_fingerprint(tmp_path)
+    try:
+        fsperm.secure_dir(os.path.dirname("machine.json") or ".")
+        assert _perm_fingerprint(tmp_path) == before, (
+            "securing a bare filename's directory rewrote the working directory"
+        )
+    finally:
+        _hand_back(tmp_path)
+
+
+def test_a_state_directory_below_the_working_directory_is_still_locked(
+    tmp_path, monkeypatch
+):
+    """The exemption is the working directory itself, never a prefix of it.
+
+    A state directory that happens to sit under where the process was started
+    still holds a live bearer credential, so the guard must not become a way to
+    opt out of the protection by choosing where you run from.
+    """
+    monkeypatch.chdir(tmp_path)
+    state = tmp_path / "state"
+    state.mkdir()
+    if os.name != "nt":
+        # Deterministic starting point: tmp_path's children inherit the runner's
+        # umask, and one of 0o077 would make this pass without securing anything.
+        os.chmod(state, 0o755)
+    fsperm.reset_cache_for_tests()
+
+    before = _perm_fingerprint(state)
+    try:
+        fsperm.secure_dir(str(state))
+        assert _perm_fingerprint(state) != before, (
+            "a state directory under the working directory was left open"
+        )
+    finally:
+        _hand_back(state)
+
+
+def test_an_unreadable_working_directory_still_secures_and_never_raises(
+    tmp_path, monkeypatch
+):
+    """``os.getcwd()`` raises once the working directory is deleted out from under
+    a long-running process. Asking it is new here, and it must not have made this
+    helper able to throw: ``secure_dir`` is best-effort by contract, and the
+    workstation client calls it while persisting a **single-use** enrollment
+    credential -- an exception there bricks the machine, where a directory left
+    open merely wants fixing. So a working directory we cannot identify falls
+    through to securing the directory we were actually asked about.
+    """
+    state = tmp_path / "state"
+    state.mkdir()
+    if os.name != "nt":
+        os.chmod(state, 0o755)
+
+    def deleted_cwd():
+        raise FileNotFoundError(2, "No such file or directory")
+
+    monkeypatch.setattr(os, "getcwd", deleted_cwd)
+    fsperm.reset_cache_for_tests()
+
+    before = _perm_fingerprint(state)
+    try:
+        fsperm.secure_dir(str(state))  # must not raise
+        assert _perm_fingerprint(state) != before, (
+            "an unreadable working directory silently disabled the protection"
+        )
+    finally:
+        _hand_back(state)

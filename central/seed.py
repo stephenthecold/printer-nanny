@@ -4,8 +4,11 @@ without a live agent. Run: ``python -m central.seed`` (drops & recreates tables)
 
 from __future__ import annotations
 
+import os
 import random
+import secrets
 from datetime import datetime, timedelta, timezone
+from typing import Tuple
 
 from central import models as m
 from central import services
@@ -13,6 +16,37 @@ from central.db import Base, SessionLocal, engine
 from central.security import generate_api_key, hash_api_key, hash_password
 
 RNG = random.Random(42)  # deterministic demo data
+
+#: Set this to choose the bootstrap password instead of having one generated.
+#: Setting it is the "explicit act" that lets an operator run on a password they
+#: picked -- including a bad one. Not setting it can no longer produce a
+#: *known* password, which is the property that matters: admin/admin was
+#: recreated on every container start, published in this repository, and needed
+#: no act at all.
+ADMIN_PASSWORD_ENV = "PN_ADMIN_PASSWORD"
+
+
+def _resolve_password() -> Tuple[str, bool]:
+    """``(password, was_generated)`` for a bootstrap account."""
+    chosen = os.environ.get(ADMIN_PASSWORD_ENV, "").strip()
+    if chosen:
+        return chosen, False
+    # ~72 bits. Long enough that the throttle in central/ratelimit.py is not
+    # what is protecting it, short enough to be retyped from a terminal once.
+    return secrets.token_urlsafe(12), True
+
+
+def _announce(password: str, generated: bool, *, accounts: str, forced: bool) -> None:
+    if not generated:
+        print(f"    {accounts}: password taken from ${ADMIN_PASSWORD_ENV}")
+        return
+    print("    " + "-" * 68)
+    print(f"    {accounts}")
+    print(f"    password: {password}")
+    if forced:
+        print("    You will be required to change it at first sign-in.")
+    print(f"    Shown once. Set ${ADMIN_PASSWORD_ENV} to choose it yourself.")
+    print("    " + "-" * 68)
 
 
 def _now() -> datetime:
@@ -76,24 +110,37 @@ def _default_alert_rules() -> list:
 def seed_init() -> None:
     """Idempotent first-run bootstrap. Safe to call on every container start.
 
-    Creates admin/tech users and default alert rules ONLY if the users table is
+    Creates ONE admin and the default alert rules, and only if the users table is
     empty. Never drops anything. Run after Alembic has brought the schema to head
     (the api service does that just before invoking this).
+
+    Three things changed here for a reason worth keeping:
+
+    * The password is **generated**, not ``admin``. This runs on every container
+      start of a production stack, so a hardcoded one was a live credential on
+      every install that never got round to changing it.
+    * It is printed **once**, to the container log, and the account is flagged
+      ``must_change_password`` -- because a password in a log file is a password
+      that stays in the log file. The forced rotation is what retires it.
+    * The second ``tech`` account is **not** created. ``tech``/``tech`` was
+      exactly the same defect as ``admin``/``admin``; an admin who wants
+      technicians makes them in the UI, with passwords nobody has published.
     """
     db = SessionLocal()
     try:
         if db.query(m.User).count() > 0:
             return  # already initialised — leave existing users/rules alone
-        print("==> first-run bootstrap: creating admin/tech users + default alert rules")
+        print("==> first-run bootstrap: creating the admin user + default alert rules")
+        password, generated = _resolve_password()
         db.add(m.User(
-            username="admin", password_hash=hash_password("admin"), role=m.UserRole.admin
-        ))
-        db.add(m.User(
-            username="tech", password_hash=hash_password("tech"), role=m.UserRole.tech
+            username="admin",
+            password_hash=hash_password(password),
+            role=m.UserRole.admin,
+            must_change_password=generated,
         ))
         db.add_all(_default_alert_rules())
         db.commit()
-        print("    login: admin / admin  (change this password immediately)")
+        _announce(password, generated, accounts="sign in as: admin", forced=generated)
     finally:
         db.close()
 
@@ -109,13 +156,16 @@ def seed_minimal() -> None:
     Base.metadata.drop_all(bind=engine)
     Base.metadata.create_all(bind=engine)
     db = SessionLocal()
-    db.add(m.User(username="admin", password_hash=hash_password("admin"), role=m.UserRole.admin))
-    db.add(m.User(username="tech", password_hash=hash_password("tech"), role=m.UserRole.tech))
+    password, generated = _resolve_password()
+    db.add(m.User(username="admin", password_hash=hash_password(password),
+                  role=m.UserRole.admin))
+    db.add(m.User(username="tech", password_hash=hash_password(password),
+                  role=m.UserRole.tech))
     db.add_all(_default_alert_rules())
     db.commit()
     db.close()
-    print("Clean slate ready. Log in as admin / admin "
-          "(Docker: http://localhost:8080, local dev: http://localhost:8000).")
+    print("Clean slate ready (Docker: http://localhost:8080, local dev: http://localhost:8000).")
+    _announce(password, generated, accounts="sign in as: admin (or tech)", forced=False)
 
 
 def seed() -> None:
@@ -126,9 +176,16 @@ def seed() -> None:
     db = SessionLocal()
     now = _now()
 
-    # Admin + a tech user.
-    db.add(m.User(username="admin", password_hash=hash_password("admin"), role=m.UserRole.admin))
-    db.add(m.User(username="tech", password_hash=hash_password("tech"), role=m.UserRole.tech))
+    # Admin + a tech user. Not forced to rotate (unlike the production bootstrap
+    # in ``seed_init``): this command drops every table, so it is by definition a
+    # throwaway database, and the password is already random-and-printed rather
+    # than known. Forcing a rotation here would only mean the printed password is
+    # stale by the second sign-in.
+    password, generated = _resolve_password()
+    db.add(m.User(username="admin", password_hash=hash_password(password),
+                  role=m.UserRole.admin))
+    db.add(m.User(username="tech", password_hash=hash_password(password),
+                  role=m.UserRole.tech))
 
     # Channels are configured in Settings; enable email to a demo address so the
     # Docker stack's MailHog catches alert mail. FreeScout stays off until creds
@@ -376,7 +433,8 @@ def seed() -> None:
     }
     db.close()
     print(f"Seeded: {counts}")
-    print("Log in as admin / admin (local dev: http://localhost:8000, Docker: http://localhost:8080)")
+    print("Local dev: http://localhost:8000, Docker: http://localhost:8080")
+    _announce(password, generated, accounts="sign in as: admin (or tech)", forced=False)
 
 
 if __name__ == "__main__":

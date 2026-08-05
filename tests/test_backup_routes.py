@@ -1,9 +1,16 @@
 """Admin DB backup & restore.
 
-The SQLite codepath is fully exercised against a real on-disk DB. The
-Postgres codepath is verified by stubbing the pg_dump/pg_restore seams --
-running real pg_* binaries in CI isn't worth the container overhead, and
-the route's logic above the subprocess call is what we own.
+The SQLite codepath is fully exercised against a real on-disk DB. The Postgres
+codepath here stubs the pg_dump/pg_restore seams, because what these tests own
+is the route's logic *above* the subprocess call -- authorization, the typed
+confirmation, the empty-upload guard, the error bounce.
+
+That stubbing used to be justified as "running real pg_* binaries in CI isn't
+worth the container overhead". It was not: below the seam, the command handed
+libpq a SQLAlchemy URL it does not understand, so pg_dump exited 1 and wrote a
+zero-byte file on every real deployment while this file stayed green. The
+binaries now run for real in tests/test_postgres_paths.py against the Postgres
+service container -- stub the seam to test the route, never to test the tool.
 """
 
 from __future__ import annotations
@@ -86,7 +93,7 @@ def test_sqlite_backup_download_streams_file(db, monkeypatch, tmp_path):
     monkeypatch.setattr(br, "_is_sqlite", lambda: True)
     monkeypatch.setattr(br, "_sqlite_path", lambda: src)
     cli = _admin(db)
-    resp = cli.get("/admin/backup/download")
+    resp = cli.post("/admin/backup/download")
     assert resp.status_code == 200
     assert resp.content == b"SQLITE-FAKE-CONTENTS"
     assert "attachment" in resp.headers["content-disposition"]
@@ -122,7 +129,7 @@ def test_postgres_download_handles_pg_dump_failure(db, monkeypatch):
 
     monkeypatch.setattr(br, "_pg_dump_to_file", boom)
     cli = _admin(db)
-    resp = cli.get("/admin/backup/download", follow_redirects=False)
+    resp = cli.post("/admin/backup/download", follow_redirects=False)
     assert resp.status_code == 303  # bounced back with an error
     assert resp.headers["location"] == "/admin/backup"
 

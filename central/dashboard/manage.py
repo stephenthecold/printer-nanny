@@ -12,22 +12,33 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import List, Optional
 
-from fastapi import APIRouter, Depends, Form, Request
+from fastapi import APIRouter, Depends, File, Form, Request, UploadFile
 from fastapi.responses import FileResponse, HTMLResponse, RedirectResponse
-from fastapi.templating import Jinja2Templates
 from sqlalchemy import func, select
+from sqlalchemy import inspect as sa_inspect
 from sqlalchemy.orm import Session
 from starlette.background import BackgroundTask
 
+from central import branding as branding_lib
 from central import models as m
+from central import queries
+from central import ratelimit
 from central import services
 from central import suppression
 from central.audit import record
+from central.branding import branding_for
 from central.dashboard import _keystore
+from central.dashboard.templating import templates
 from central.db import get_db
+from central.deps import session_user
 from central.health import worker_banner
-from central.runtime import app_branding, load_settings
-from central.security import generate_api_key, hash_api_key, hash_password
+from central.runtime import load_settings
+from central.security import (
+    MIN_PASSWORD_LENGTH,
+    generate_api_key,
+    hash_api_key,
+    hash_password,
+)
 
 
 def _split_tags(raw: str) -> Optional[list[str]]:
@@ -36,17 +47,15 @@ def _split_tags(raw: str) -> Optional[list[str]]:
     return tags or None
 
 router = APIRouter(prefix="/manage", tags=["manage"])
-_templates = Jinja2Templates(directory=str(Path(__file__).parent / "templates"))
+# One shared Jinja environment (central/dashboard/templating.py): it carries
+# the csrf_field()/csrf_token() globals every form depends on.
+_templates = templates
 
 _MANAGER_ROLES = {m.UserRole.admin, m.UserRole.tech}
 
 
 def _user(request: Request, db: Session) -> Optional[m.User]:
-    uid = request.session.get("user_id")
-    user = db.get(m.User, uid) if uid else None
-    # A deactivated (SCIM-deprovisioned) account is treated as logged out so a
-    # live cookie stops working on its next request, not just at next login.
-    return user if (user is not None and user.active) else None
+    return session_user(request, db)
 
 
 def _manager(request: Request, db: Session) -> Optional[m.User]:
@@ -69,6 +78,28 @@ def _flash(request: Request, message: str) -> None:
     request.session["flash"] = message
 
 
+def _site_belongs_to(db: Session, site_id: int, client_id: Optional[int]) -> bool:
+    """Is ``site_id`` a site of ``client_id``?
+
+    A printer's ``site_id`` and ``client_id`` are two separately-writable columns
+    that the rest of the system assumes agree, and **the ingest path keys on the
+    site, not the client**: ``/targets`` selects printers by
+    ``site_id.in_(sites_served_by_agent(...))``, and that set deliberately spans
+    clients so one agent can serve several whose networks bridge at HQ.
+
+    So a printer left pointing at another client's site is handed to that
+    client's agent -- ``snmp_community`` included -- and its readings are
+    accepted, while ``build_invoice`` still scopes by ``client_id`` and bills the
+    pages to the original tenant. Nothing in the UI shows the split. The two
+    columns are checked here rather than reconciled, because guessing which one
+    the operator meant is how a printer ends up silently re-homed.
+    """
+    if client_id is None:
+        return False
+    site = db.get(m.Site, site_id)
+    return site is not None and site.client_id == client_id
+
+
 def _pop_flash(request: Request) -> Optional[str]:
     return request.session.pop("flash", None)
 
@@ -78,10 +109,16 @@ def _tpl(request: Request, template: str, db: Session, **ctx) -> HTMLResponse:
 
     Keeps every manage template (nav, login, footer) in sync with the operator's
     Settings -> Branding values without each callsite having to remember.
+
+    ``branding_for`` resolves to the global values for admin/tech -- an
+    operator's chrome must not change identity as they move between tenants --
+    and to their own client's branding for a client_readonly user, so a
+    customer who reaches one of these pages does not see the portal's branding
+    swap back to the MSP's halfway through their session.
     """
     from central import __version__ as _central_version
 
-    ctx.setdefault("app", app_branding(db))
+    ctx.setdefault("app", branding_for(db, ctx.get("user")))
     ctx.setdefault("central_version", _central_version)
     # Conditional Approvals nav: link only renders when something is pending.
     if "nav_pending" not in ctx:
@@ -158,12 +195,27 @@ def client_manage(client_id: int, request: Request, db: Session = Depends(get_db
         db.scalars(select(m.Printer).where(m.Printer.client_id == client_id).order_by(m.Printer.ip))
     )
     runtime = load_settings(db)
+    # Whether this client has uploaded logo BYTES (as opposed to an external
+    # URL), for the preview + remove controls. Guarded on the table existing
+    # for the same reason /settings is: an operator who restarted the api
+    # before migrations ran should get a page without the logo panel, not a
+    # 500 on the client screen.
+    has_brand_logo = (
+        sa_inspect(db.get_bind()).has_table(m.AppAsset.__tablename__)
+        and db.get(m.AppAsset, branding_lib.client_logo_asset_name(client.id)) is not None
+    )
     return _tpl(
         request, "client_manage.html", db,
         user=user, client=client, sites=client.sites,
         printers=printers, flash=_pop_flash(request),
         default_tz=(runtime.get("alerts.default_timezone") or "UTC"),
         tz_choices=_timezone_choices(),
+        has_brand_logo=has_brand_logo,
+        # Sanitised here rather than in the template: the swatch renders it
+        # into a style attribute, which is the same CSS sink base.html has.
+        brand_swatch=branding_lib.safe_css_color(
+            client.brand_primary_color, fallback=""
+        ),
     )
 
 
@@ -198,16 +250,265 @@ def update_client(
     return _redirect(f"/manage/clients/{client_id}")
 
 
+@router.post("/clients/{client_id}/branding")
+def update_client_branding(
+    client_id: int, request: Request,
+    brand_name: str = Form(""),
+    brand_primary_color: str = Form(""),
+    brand_logo_url: str = Form(""),
+    db: Session = Depends(get_db),
+):
+    """Per-client white-label overrides for the customer portal.
+
+    Every field is optional and blank means "inherit the global setting", so a
+    client with nothing set renders exactly as it does today.
+
+    The colour is **validated, not escaped**: it is interpolated into a CSS
+    declaration in base.html, where escaping stops an attribute breakout but
+    not ``red; background-image: url(https://attacker/?c=)``. Anything that is
+    not ``#rgb``/``#rrggbb`` is refused with a message rather than coerced --
+    silently dropping it would leave an operator staring at an unchanged nav
+    bar wondering which of the two fields they got wrong.
+
+    The logo URL is constrained to http(s) or a site-relative path. Nothing is
+    fetched server-side, so this is not an SSRF surface; the constraint is
+    about what ends up in an ``<img src>``.
+    """
+    actor = _manager(request, db)
+    if actor is None:
+        return _redirect("/login")
+    client = db.get(m.Client, client_id)
+    if client is None:
+        return _redirect("/manage")
+
+    name = (brand_name or "").strip()[:120]
+
+    color_raw = (brand_primary_color or "").strip()
+    color = branding_lib.normalise_hex_color(color_raw) if color_raw else None
+    if color_raw and color is None:
+        _flash(request, f"'{color_raw[:40]}' is not a #RRGGBB colour — branding unchanged.")
+        record(db, request, actor, "client.branding.refused",
+               target=f"client:{client.id} {client.name}",
+               detail="primary_color rejected (not #rrggbb)")
+        db.commit()
+        return _redirect(f"/manage/clients/{client_id}")
+
+    url_raw = (brand_logo_url or "").strip()
+    # An upload points this at our own route; re-typing that path by hand is
+    # equally valid, so there is nothing to special-case here.
+    url = branding_lib.safe_logo_url(url_raw) if url_raw else None
+    if url_raw and url is None:
+        _flash(request, "Logo URL must be an https:// address or a /path — branding unchanged.")
+        record(db, request, actor, "client.branding.refused",
+               target=f"client:{client.id} {client.name}",
+               detail="logo_url rejected (scheme or length)")
+        db.commit()
+        return _redirect(f"/manage/clients/{client_id}")
+
+    before = (client.brand_name, client.brand_primary_color, client.brand_logo_url)
+    client.brand_name = name or None
+    client.brand_primary_color = color
+    client.brand_logo_url = url
+    after = (client.brand_name, client.brand_primary_color, client.brand_logo_url)
+    if before != after:
+        # Values, not just key names: a brand name, a hex colour and a logo URL
+        # are operator-visible configuration, never secrets.
+        record(db, request, actor, "client.branding.update",
+               target=f"client:{client.id} {client.name}",
+               detail="name={} color={} logo={}".format(
+                   client.brand_name or "inherit",
+                   client.brand_primary_color or "inherit",
+                   client.brand_logo_url or "inherit",
+               ))
+    db.commit()
+    _flash(request, "Portal branding saved.")
+    return _redirect(f"/manage/clients/{client_id}")
+
+
+@router.post("/clients/{client_id}/branding/logo")
+async def upload_client_branding_logo(
+    client_id: int, request: Request,
+    logo: UploadFile = File(...),
+    db: Session = Depends(get_db),
+):
+    """Upload this client's portal logo.
+
+    Deliberately the SAME uploader as Settings -> Branding: one size cap, one
+    allow-list, one magic-byte check (``central.branding.validate_logo``), and
+    the same ``app_assets`` blob store under a namespaced key. A second
+    uploader is a second set of rules to get wrong.
+
+    The uploaded filename is never used -- not as a key, not as a path, not in
+    the response -- so there is no traversal to defend against. What is stored
+    is the SNIFFED content type, and what is served is tenant-scoped.
+    """
+    actor = _manager(request, db)
+    if actor is None:
+        return _redirect("/login")
+    client = db.get(m.Client, client_id)
+    if client is None:
+        return _redirect("/manage")
+
+    data = await logo.read()
+    content_type, error = branding_lib.validate_logo(logo.content_type or "", data)
+    if error:
+        _flash(request, f"Logo upload: {error}")
+        record(db, request, actor, "client.branding.logo.refused",
+               target=f"client:{client.id} {client.name}", detail=error[:200])
+        db.commit()
+        return _redirect(f"/manage/clients/{client_id}")
+
+    key = branding_lib.client_logo_asset_name(client.id)
+    existing = db.get(m.AppAsset, key)
+    if existing is None:
+        db.add(m.AppAsset(
+            name=key, content_type=content_type, data=data,
+            updated_at=datetime.now(timezone.utc),
+        ))
+    else:
+        existing.content_type = content_type
+        existing.data = data
+        existing.updated_at = datetime.now(timezone.utc)
+    # Point the client's logo URL at the route that serves these bytes, the
+    # same way the global upload wires up app.logo_url.
+    client.brand_logo_url = branding_lib.client_logo_path(client.id)
+    record(db, request, actor, "client.branding.logo",
+           target=f"client:{client.id} {client.name}",
+           detail=f"type={content_type} bytes={len(data)}")
+    db.commit()
+    _flash(request, f"Portal logo uploaded ({len(data) // 1024} KB).")
+    return _redirect(f"/manage/clients/{client_id}")
+
+
+@router.post("/clients/{client_id}/branding/logo/delete")
+def delete_client_branding_logo(
+    client_id: int, request: Request, db: Session = Depends(get_db)
+):
+    actor = _manager(request, db)
+    if actor is None:
+        return _redirect("/login")
+    client = db.get(m.Client, client_id)
+    if client is None:
+        return _redirect("/manage")
+    key = branding_lib.client_logo_asset_name(client.id)
+    existing = db.get(m.AppAsset, key)
+    if existing is not None:
+        db.delete(existing)
+    # Clear the URL only if it pointed at the upload -- an operator who pasted
+    # an external CDN address keeps it, same rule as the global logo.
+    if (client.brand_logo_url or "") == branding_lib.client_logo_path(client.id):
+        client.brand_logo_url = None
+    record(db, request, actor, "client.branding.logo.delete",
+           target=f"client:{client.id} {client.name}")
+    db.commit()
+    _flash(request, "Portal logo removed.")
+    return _redirect(f"/manage/clients/{client_id}")
+
+
+def _printer_delete_blockers(db: Session, *, client_id=None, site_id=None):
+    """Why a client or site cannot be deleted yet, or ``None`` when it can.
+
+    Counts printers in **every** discovery state, not just approved ones. A
+    pending or ignored row is still a NOT NULL ``client_id`` that the delete
+    would try to blank, so filtering to approved would make the check pass and
+    the delete fail exactly as before -- a guard that reports safety it does not
+    have is worse than no guard.
+
+    The counts are the message: "3 printers" sends an operator looking, "3
+    printers (1 awaiting approval)" tells them where the third one is hiding,
+    which is precisely the row they would not have thought to look for.
+    """
+    stmt = select(m.Printer.discovery_state, func.count()).group_by(
+        m.Printer.discovery_state
+    )
+    if client_id is not None:
+        stmt = stmt.where(m.Printer.client_id == client_id)
+    if site_id is not None:
+        stmt = stmt.where(m.Printer.site_id == site_id)
+    by_state = {state: count for state, count in db.execute(stmt)}
+    total = sum(by_state.values())
+    if not total:
+        return None
+    parts = [
+        f"{count} {state.value}"
+        for state, count in sorted(by_state.items(), key=lambda kv: kv[0].value)
+    ]
+    return {"total": total, "breakdown": ", ".join(parts)}
+
+
+def _client_delete_blockers(db: Session, client_id: int):
+    """Flash message + audit detail for a refused client delete, or ``None``."""
+    blocked = _printer_delete_blockers(db, client_id=client_id)
+    if blocked is None:
+        return None
+    noun = "printer" if blocked["total"] == 1 else "printers"
+    return {
+        "message": (
+            f"Can't delete this client: it still has {blocked['total']} {noun} "
+            f"({blocked['breakdown']}). Deleting them also deletes their entire "
+            "reading history and page meters, which past invoices are derived "
+            "from — so remove the printers first, deliberately."
+        ),
+        "detail": f"printers={blocked['total']} ({blocked['breakdown']})",
+    }
+
+
 @router.post("/clients/{client_id}/delete")
 def delete_client(client_id: int, request: Request, db: Session = Depends(get_db)):
+    """Delete a client, REFUSING while it still owns printers.
+
+    WHY IT REFUSES RATHER THAN CASCADING. It used to do neither: ``printers``
+    carries a plain ``ForeignKey`` to ``clients`` with no ``ondelete`` and the
+    relationship declares no cascade, so SQLAlchemy issued
+    ``UPDATE printers SET client_id=NULL`` against a NOT NULL column and the
+    operator got a bare 500 (verified on both SQLite and Postgres). The fix is
+    one of two behaviours, and the choice matters:
+
+    * Cascading destroys the tenant's entire measurement history -- readings,
+      rollups and page meters. Invoices in this product are **derived on demand,
+      never stored** (see central.billing), so those rows are the only evidence
+      any past invoice ever existed. There is no undo and no backup-shaped
+      recovery that is not a whole-database restore.
+    * It also cannot be delegated to the database here. This project runs SQLite
+      for dev and the whole test suite and installs **no** ``PRAGMA
+      foreign_keys`` listener, so ``ondelete="CASCADE"`` is inert there: adding
+      it would cascade correctly on Postgres and silently orphan every reading
+      on SQLite. A correct cascade would therefore have to be re-implemented in
+      application code across a dozen tables, and every ``client_id`` column
+      added afterwards becomes a silent orphan-leak the day somebody forgets it.
+
+    Refusing has none of that surface, and it costs the operator a deliberate,
+    per-printer, individually audited act instead of one irreversible click. The
+    message names the blocker so the refusal is an instruction rather than a
+    wall -- which is the whole difference from the 500 it replaces.
+    """
     user = _manager(request, db)
     if user is None or user.role != m.UserRole.admin:
         _flash(request, "Only admins can delete clients.")
         return _redirect(f"/manage/clients/{client_id}")
     client = db.get(m.Client, client_id)
     if client:
+        blocked = _client_delete_blockers(db, client_id)
+        if blocked:
+            # Audited as a refusal, not silently dropped: an admin pressing
+            # Delete on a live tenant is worth a row either way.
+            record(db, request, user, "client.delete_refused",
+                   target=f"client:{client.id} {client.name}",
+                   detail=blocked["detail"])
+            db.commit()
+            _flash(request, blocked["message"])
+            return _redirect(f"/manage/clients/{client_id}")
         record(db, request, user, "client.delete",
                target=f"client:{client.id} {client.name}")
+        # The branding columns go with the row, but the logo BYTES live in
+        # app_assets keyed by client id and have no foreign key to cascade
+        # along. Leaving them is not merely untidy: SQLite hands out the next
+        # free rowid, so a client created after this delete can be given the
+        # same id -- and would inherit the deleted tenant's logo. Delete it
+        # with the client.
+        asset = db.get(m.AppAsset, branding_lib.client_logo_asset_name(client.id))
+        if asset is not None:
+            db.delete(asset)
         db.delete(client)
         db.commit()
         _flash(request, "Client deleted.")
@@ -236,6 +537,15 @@ def create_site(
 
 @router.post("/sites/{site_id}/delete")
 def delete_site(site_id: int, request: Request, db: Session = Depends(get_db)):
+    """Delete a site, REFUSING while it still holds printers.
+
+    The same defect as ``delete_client``, one level down and reachable from the
+    adjacent button: ``printers.site_id`` is NOT NULL with no ``ondelete`` and
+    ``Site.printers`` declares no cascade, so this raised the identical
+    IntegrityError. Fixing only the client route would have left a 500 two
+    clicks away -- and this one is worse, because deleting a client cascades to
+    its sites, so the client path reaches this failure through BOTH foreign keys.
+    """
     user = _manager(request, db)
     site = db.get(m.Site, site_id)
     if user is None or site is None:
@@ -243,12 +553,26 @@ def delete_site(site_id: int, request: Request, db: Session = Depends(get_db)):
     client_id = site.client_id
     if user.role != m.UserRole.admin:
         _flash(request, "Only admins can delete sites.")
-    else:
-        record(db, request, user, "site.delete",
-               target=f"site:{site.id} {site.name}")
-        db.delete(site)
+        return _redirect(f"/manage/clients/{client_id}")
+    blocked = _printer_delete_blockers(db, site_id=site_id)
+    if blocked:
+        noun = "printer" if blocked["total"] == 1 else "printers"
+        record(db, request, user, "site.delete_refused",
+               target=f"site:{site.id} {site.name}",
+               detail=f"printers={blocked['total']} ({blocked['breakdown']})")
         db.commit()
-        _flash(request, "Site deleted.")
+        _flash(
+            request,
+            f"Can't delete this site: it still has {blocked['total']} {noun} "
+            f"({blocked['breakdown']}). Move them to another site or delete "
+            "them first — deleting a printer also deletes its reading history."
+        )
+        return _redirect(f"/manage/clients/{client_id}")
+    record(db, request, user, "site.delete",
+           target=f"site:{site.id} {site.name}")
+    db.delete(site)
+    db.commit()
+    _flash(request, "Site deleted.")
     return _redirect(f"/manage/clients/{client_id}")
 
 
@@ -306,6 +630,9 @@ def printer_create(
 ):
     if _manager(request, db) is None:
         return _redirect("/login")
+    if not _site_belongs_to(db, site_id, client_id):
+        _flash(request, "That site does not belong to this client; printer not added.")
+        return _redirect(f"/manage/clients/{client_id}")
     printer = m.Printer(
         client_id=client_id, site_id=site_id, ip=ip.strip(),
         display_name=display_name.strip() or None,
@@ -343,6 +670,12 @@ def printer_update(
         return _redirect("/login")
     printer = db.get(m.Printer, printer_id)
     if printer:
+        if not _site_belongs_to(db, site_id, printer.client_id):
+            # Refused rather than clamped to the printer's current site: a form
+            # that silently ignores the field the operator just changed is its
+            # own kind of lie.
+            _flash(request, "That site belongs to a different client; no changes saved.")
+            return _redirect(f"/manage/printers/{printer.id}")
         printer.site_id = site_id
         printer.ip = ip.strip()
         printer.display_name = display_name.strip() or None
@@ -562,12 +895,29 @@ def agents_home(request: Request, db: Session = Depends(get_db)):
             .group_by(m.Printer.site_id)
         ).all()
     }
+    # Collector redundancy. ``collector_state`` is per subnet and says which of
+    # held / lapsed / released it is in right now -- a lapsed lease is not the
+    # same as a live one and an operator reading "collector: Agent A" would
+    # otherwise be told a dead agent is collecting.
+    from central import collector as _collector
+
+    now = datetime.now(timezone.utc)
+    collector_state = {}
+    standby_for: dict[int, list] = {}
+    for subnet in db.scalars(select(m.Subnet)):
+        collector_state[subnet.id] = _collector.holder_state(subnet, now)
+        if subnet.standby_agent_id is not None:
+            standby_for.setdefault(subnet.standby_agent_id, []).append(subnet)
+    agent_names = {a.id: a.name for a in agents}
     return _tpl(
         request, "agents.html", db,
         user=user, agents=agents, sites=sites,
         clients=clients,
         sites_by_client=sites_by_client,
         pending_by_site=pending_by_site,
+        collector_state=collector_state,
+        standby_for=standby_for,
+        agent_names=agent_names,
         new_key=_keystore.pop(request.session.pop("new_agent_key_token", None)),
         new_claim=_keystore.pop(request.session.pop("new_claim_code_token", None)),
         central_url=public_url,
@@ -1252,6 +1602,8 @@ def subnet_update(
     snmp_v3_clear: str = Form(""),
     trusted: str = Form(""),
     trusted_present: str = Form(""),
+    standby_agent_id: str = Form(""),
+    standby_present: str = Form(""),
     db: Session = Depends(get_db),
 ):
     """Edit a subnet's friendly label, SNMP creds, source-bind address, and
@@ -1270,11 +1622,18 @@ def subnet_update(
     auto-approval off. ``trusted_present`` is the "this form carried the
     checkbox" marker, so absence means "not my field" and only an actual
     unchecked box clears the flag.
+
+    ``standby_agent_id`` needs the marker for the same reason and one more: an
+    empty value is a real instruction here ("no standby"), which is
+    indistinguishable from a form that never carried the field. Clearing a
+    standby by accident would silently take a subnet's redundancy away, which
+    nobody would notice until the day it was needed.
     """
     if _manager(request, db) is None:
         return _redirect("/login")
     subnet = db.get(m.Subnet, subnet_id)
     if subnet:
+        standby_note = _apply_standby(db, request, subnet, standby_agent_id, standby_present)
         subnet.label = label.strip() or None
         if snmp_community.strip():
             subnet.snmp_community = snmp_community.strip()
@@ -1323,9 +1682,129 @@ def subnet_update(
             subnet.trusted = new_trusted
         record(db, request, _manager(request, db), "subnet.update",
                target=f"subnet:{subnet.id} {subnet.cidr}",
-               detail=trust_note.strip())
+               detail=(trust_note + " " + standby_note).strip())
         db.commit()
-        _flash(request, f"Subnet {subnet.cidr} updated.")
+        _flash(request, f"Subnet {subnet.cidr} updated." + (
+            f" {standby_note.strip()}" if standby_note else ""
+        ))
+    return _redirect("/manage/agents")
+
+
+def _apply_standby(
+    db: Session, request: Request, subnet: m.Subnet, raw: str, present: str
+) -> str:
+    """Set or clear this subnet's standby collector. Returns a note for the audit.
+
+    Refusals rather than resolutions, because a standby that is wrong is worse
+    than none: it hands a second agent this subnet's SNMP credentials and this
+    site's fleet the moment it takes over.
+
+    * **A subnet with no primary cannot have a standby.** There would be nothing
+      to stand by for and nobody to seed the lease to, so ``admits()`` would
+      refuse every reading for a subnet that looks configured.
+    * **The standby cannot be the primary.** An agent standing by for itself is
+      redundancy that reads as configured and covers nothing.
+    * **An unknown agent id is ignored**, not treated as "clear" -- a typo must
+      not silently remove redundancy.
+
+    Turning redundancy ON seeds the lease to the agent that is already
+    collecting, so there is no window in which nobody holds it and the primary's
+    own readings are refused. Turning it OFF releases the lease rather than
+    deleting it outright: the barrier that release leaves behind is what
+    guarantees the (possibly still-sweeping) holder is finished before anything
+    else touches the subnet.
+    """
+    from central import collector
+
+    if not present.strip():
+        return ""
+    raw = (raw or "").strip()
+    new_id: Optional[int] = None
+    if raw:
+        try:
+            candidate = db.get(m.Agent, int(raw))
+        except ValueError:
+            candidate = None
+        if candidate is None:
+            return ""
+        if subnet.agent_id is None:
+            _flash(request, f"Assign a collector to {subnet.cidr} before adding a standby.")
+            return ""
+        if candidate.id == subnet.agent_id:
+            _flash(request, f"{candidate.name} already collects {subnet.cidr}.")
+            return ""
+        new_id = candidate.id
+    if new_id == subnet.standby_agent_id:
+        return ""
+
+    now = datetime.now(timezone.utc)
+    ttl, _after, _auto = collector.lease_settings(load_settings(db))
+    previous = subnet.standby_agent_id
+    subnet.standby_agent_id = new_id
+    if new_id is not None and previous is None:
+        collector.seed_lease(db, subnet, now=now, ttl_seconds=ttl)
+        return f"standby=agent:{new_id} (redundancy on; lease seeded to agent:{subnet.agent_id})"
+    if new_id is None:
+        holder = subnet.collector_agent_id
+        if holder is not None:
+            # Flush BEFORE expiring. The session is ``autoflush=False``, so the
+            # pending ``standby_agent_id = None`` above is still only in memory
+            # and ``expire`` would discard it -- the subnet would keep its
+            # standby, silently, having reported that it was cleared.
+            db.flush()
+            collector.release_lease(db, subnet.id, holder_id=holder, now=now)
+            db.expire(subnet)
+        return f"standby cleared (was agent:{previous}); lease released"
+    return f"standby=agent:{new_id} (was agent:{previous})"
+
+
+@router.post("/subnets/{subnet_id}/handback")
+def subnet_handback(subnet_id: int, request: Request, db: Session = Depends(get_db)):
+    """Return a subnet to its primary collector -- the only hand-back there is.
+
+    Failover is deliberately one-way: when a primary comes back it does NOT
+    reclaim its subnets, because the standby is collecting correctly and the
+    characteristic failure of a dying collector is flapping, which automatic
+    hand-back would turn into an oscillation. So the decision is a human's, made
+    once, when they can see that the primary is actually well.
+
+    It is a **release**, not a reassignment, and that distinction is the whole
+    safety of it. Pointing the lease straight at the primary would leave the
+    standby's own deadline live -- it would keep sweeping while its replacement
+    started, which is precisely the overlap this feature exists to prevent.
+    Releasing clears the holder but keeps the expiry as a barrier, so the
+    primary picks the subnet up on the first heartbeat after the standby must
+    already have stopped. That costs a gap of at most one lease, and a gap is
+    recoverable in a way that a double-counted meter is not.
+    """
+    from central import collector
+
+    user = _manager(request, db)
+    if user is None:
+        return _redirect("/login")
+    subnet = db.get(m.Subnet, subnet_id)
+    if subnet is None:
+        return _redirect("/manage/agents")
+    holder = subnet.collector_agent_id
+    if holder is None or holder == subnet.agent_id:
+        _flash(request, f"{subnet.cidr} is already collected by its primary.")
+        return _redirect("/manage/agents")
+    if subnet.agent_id is None:
+        _flash(request, f"{subnet.cidr} has no primary agent to hand back to.")
+        return _redirect("/manage/agents")
+    collector.release_lease(db, subnet.id, holder_id=holder, now=datetime.now(timezone.utc))
+    db.expire(subnet)
+    record(db, request, user, "subnet.collector_handback",
+           target=f"subnet:{subnet.id} {subnet.cidr}",
+           detail=f"released from agent:{holder}; returns to agent:{subnet.agent_id} "
+                  f"once the released lease elapses")
+    db.commit()
+    _flash(
+        request,
+        f"{subnet.cidr} released from its standby. Its primary picks it up once the "
+        f"current lease elapses — the gap is deliberate, it is what stops both "
+        f"agents collecting at once.",
+    )
     return _redirect("/manage/agents")
 
 
@@ -1528,10 +2007,32 @@ def schedule_log_service(
     notes: str = Form(""),
     db: Session = Depends(get_db),
 ):
-    """Operator clicked 'Mark serviced': record a MaintenanceRecord and roll
-    next_due forward by interval_days (when set). The worker's reconcile pass
-    will see next_due > now on the next cycle and auto-resolve the
-    maintenance-due alert."""
+    """Operator clicked 'Mark serviced': record the service and RE-ARM the
+    schedule, then say in the flash exactly when it will next come due.
+
+    A schedule can recur three ways, and this handler must leave at least one of
+    them armed or state plainly that none is:
+
+    * ``interval_days`` -- roll ``next_due`` forward from now.
+    * ``page_threshold`` on a specific printer -- anchor the page target to the
+      meter as it reads now (``last_serviced_page_count``), so the next service
+      lands one threshold further on. ``next_due`` deliberately stays where it
+      is: the worker only reaches a page-gated schedule via ``next_due <= now``,
+      so clearing it here would disarm the page trigger permanently. The
+      resolve comes from the page gate instead -- the schedule stops being
+      counted due, and the reconcile sweep closes its alert.
+    * ``component_type`` -- driven by the part's own life percentage. Nothing to
+      roll; it keeps working either way.
+
+    When none of those can be armed the schedule genuinely cannot recur, and
+    leaving ``next_due`` in the past would hold its maintenance-due alert open
+    forever: the operator marks it serviced, is told it worked, and the alert
+    never clears. (That was the shipped behaviour -- ``next_due`` was rolled
+    ONLY for an interval schedule, and left untouched otherwise.) So
+    ``next_due`` is cleared, which resolves the alert on the next worker cycle,
+    and the flash says the schedule will not become due again rather than
+    reporting a bare success.
+    """
     from datetime import datetime as _dt
     from datetime import timedelta as _td
     from datetime import timezone as _tz
@@ -1543,25 +2044,83 @@ def schedule_log_service(
     if sched is None:
         return _redirect("/manage/maintenance")
     now = _dt.now(_tz.utc)
-    next_due = (
-        now + _td(days=sched.interval_days) if sched.interval_days else None
-    )
-    rec = m.MaintenanceRecord(
-        printer_id=sched.printer_id,
-        type=m.MaintenanceType.scheduled,
-        performed_by=performed_by.strip() or actor.username,
-        performed_at=now,
-        notes=(notes.strip() or sched.name) + f" (schedule #{sched.id})",
-        next_due=next_due,
-    )
-    db.add(rec)
-    if next_due is not None:
-        sched.next_due = next_due
+    printer = db.get(m.Printer, sched.printer_id) if sched.printer_id else None
+
+    recurs: list = []     # how it will come due again, in the operator's words
+    notices: list = []    # what could NOT be re-armed, and why
+    rolled_date = False
+    armed_on_pages = False
+
+    if sched.interval_days:
+        sched.next_due = now + _td(days=sched.interval_days)
+        rolled_date = True
+        recurs.append(f"on {sched.next_due.date().isoformat()}")
+
+    if sched.page_threshold:
+        if printer is None:
+            notices.append(
+                "Its page target could not be moved: this schedule is not tied "
+                "to one printer."
+            )
+        elif printer.page_count is None:
+            notices.append(
+                "Its page target could not be moved: this printer has never "
+                "reported a page count."
+            )
+        else:
+            sched.last_serviced_page_count = printer.page_count
+            armed_on_pages = True
+            recurs.append(
+                f"at {sched.page_target():,} pages "
+                f"(meter now {printer.page_count:,})"
+            )
+
+    if sched.component_type and sched.life_threshold is not None:
+        recurs.append(
+            f"when the {sched.component_type} reaches "
+            f"{sched.life_threshold:g}% or below"
+        )
+
+    if not rolled_date and not armed_on_pages:
+        # Nothing re-armed the date, so a next_due left in the past would keep
+        # this schedule permanently due and its alert permanently open.
+        sched.next_due = None
+
+    if printer is not None:
+        db.add(m.MaintenanceRecord(
+            printer_id=printer.id,
+            type=m.MaintenanceType.scheduled,
+            performed_by=performed_by.strip() or actor.username,
+            performed_at=now,
+            notes=(notes.strip() or sched.name) + f" (schedule #{sched.id})",
+            next_due=sched.next_due,
+        ))
+    else:
+        # maintenance_records.printer_id is NOT NULL -- a service log entry is
+        # per printer by definition, and a model-wide schedule has no single
+        # answer. Previously this inserted NULL and 500'd the whole request.
+        notices.append(
+            "No service record was written: a schedule that is not tied to one "
+            "printer has no printer to log it against."
+        )
+
+    msg = [f"Service logged for '{sched.name}'."]
+    if recurs:
+        msg.append("Next due " + " and ".join(recurs) + ".")
+    else:
+        msg.append(
+            "It will NOT become due again - give it a repeat interval "
+            "(Every N days) to make it recur."
+        )
+    msg.extend(notices)
+
     record(db, request, actor, "maintenance.log",
            target=f"sched:{sched.id} {sched.name}",
-           detail=f"by:{performed_by.strip() or actor.username}")
+           detail=f"by:{performed_by.strip() or actor.username} "
+                  f"next_due:{sched.next_due.date().isoformat() if sched.next_due else '-'} "
+                  f"page_target:{sched.page_target() or '-'}")
     db.commit()
-    _flash(request, f"Service logged for '{sched.name}'.")
+    _flash(request, " ".join(msg))
     return _redirect("/manage/maintenance")
 
 
@@ -1602,38 +2161,62 @@ def users_home(request: Request, db: Session = Depends(get_db)):
         request, "manage_users.html", db,
         user=_admin(request, db), users=users, clients=clients,
         roles=[r.value for r in m.UserRole],
+        # One grouped query for the whole table rather than one per row.
+        locked_users=ratelimit.locked_usernames(
+            db, ratelimit.Policy.from_settings(load_settings(db))
+        ),
         flash=_pop_flash(request),
     )
+
+
+@router.post("/users/{user_id}/unlock")
+def user_unlock(user_id: int, request: Request, db: Session = Depends(get_db)):
+    """Clear a sign-in throttle early.
+
+    Not a lockout release -- a throttle expires on its own inside the window, and
+    that self-expiry is what stops it being usable as a denial of service against
+    a real operator. This is for the admin who does not want to wait, and it is
+    audited because clearing an attacker's budget mid-attack is worth being able
+    to see afterwards.
+    """
+    actor = _admin(request, db)
+    if actor is None:
+        return _redirect("/login" if _user(request, db) is None else "/")
+    target = db.get(m.User, user_id)
+    if target is None:
+        return _redirect("/manage/users")
+    cleared = ratelimit.clear(db, username=target.username)
+    record(db, request, actor, "user.unlock",
+           target=f"user:{target.username}", detail=f"cleared={cleared}")
+    db.commit()
+    _flash(request, f"Sign-in throttle cleared for '{target.username}'.")
+    return _redirect("/manage/users")
 
 
 # --------------------------------------------------------------------------- #
 # Audit trail (admin only)
 # --------------------------------------------------------------------------- #
 @router.get("/audit", response_class=HTMLResponse)
-def audit_home(request: Request, q: str = "", db: Session = Depends(get_db)):
-    """Latest audit rows, newest first. ``?q=`` filters by substring across
-    action / target / username -- enough for 'what did tech2 touch last week'
-    without building a query designer."""
+def audit_home(
+    request: Request, q: str = "", page: int = 1, db: Session = Depends(get_db)
+):
+    """The audit trail, newest first, paginated. ``?q=`` filters by substring
+    across action / target / username -- enough for 'what did tech2 touch last
+    week' without building a query designer.
+
+    Paginated rather than capped: this used to be ``LIMIT 200`` with no offset,
+    so on any install with real history the overwhelming majority of the trail
+    could not be reached from anywhere in the product. Filtering happens in SQL
+    ahead of the LIMIT (see ``queries.audit_page``), so a filter searches the
+    whole trail and not just the page you were already on.
+    """
     admin = _admin(request, db)
     if admin is None:
         return _redirect("/login" if _user(request, db) is None else "/")
-    stmt = select(m.AuditLog).order_by(m.AuditLog.ts.desc()).limit(200)
-    if q.strip():
-        needle = f"%{q.strip()}%"
-        stmt = (
-            select(m.AuditLog)
-            .where(
-                m.AuditLog.action.ilike(needle)
-                | m.AuditLog.target.ilike(needle)
-                | m.AuditLog.username.ilike(needle)
-            )
-            .order_by(m.AuditLog.ts.desc())
-            .limit(200)
-        )
-    rows = list(db.scalars(stmt))
+    result = queries.audit_page(db, q=q, page=page)
     return _tpl(
         request, "audit.html", db,
-        user=admin, rows=rows, q=q.strip(),
+        user=admin, rows=result["rows"], q=result["q"], result=result,
     )
 
 
@@ -1682,6 +2265,14 @@ def user_create(
             pinned_client_id = None
     if role_enum == m.UserRole.client_readonly and pinned_client_id is None:
         _flash(request, "client_readonly users must be assigned to a client.")
+        return _redirect("/manage/users")
+    # The same floor the reset and self-service paths already enforce. Without it
+    # this route -- the one that can mint an ADMIN -- was the only way into the
+    # system with a one-character password. An empty password is still allowed
+    # and means "SSO-only account", which is why this tests the length rather
+    # than truthiness.
+    if password and len(password) < MIN_PASSWORD_LENGTH:
+        _flash(request, f"Password must be at least {MIN_PASSWORD_LENGTH} characters.")
         return _redirect("/manage/users")
     new_user = m.User(
         username=username,
@@ -1749,15 +2340,26 @@ def user_reset_password(
     target = db.get(m.User, user_id)
     if target is None:
         return _redirect("/manage/users")
-    if len(new_password) < 8:
-        _flash(request, "Password must be at least 8 characters.")
+    if len(new_password) < MIN_PASSWORD_LENGTH:
+        _flash(request, f"Password must be at least {MIN_PASSWORD_LENGTH} characters.")
         return _redirect(f"/manage/users/{user_id}/edit")
     target.password_hash = hash_password(new_password)
     target.auth_provider = "local"  # they can now sign in locally
+    # An admin-chosen password reached its owner through chat, a phone call or a
+    # ticket, and stays readable there. Forcing the rotation makes that handoff
+    # channel stop being a live credential the moment they sign in -- which is
+    # exactly the reasoning the bootstrap password already follows.
+    target.must_change_password = True
+    # Every session the target already holds is now backed by a password nobody
+    # uses any more. An admin resetting somebody's password is usually reacting
+    # to a suspected compromise, so leaving those live for up to 12h defeats the
+    # point of the reset.
+    target.session_epoch = (target.session_epoch or 0) + 1
     record(db, request, _admin(request, db), "user.reset_password",
            target=f"user:{target.username}")
     db.commit()
-    _flash(request, f"Password reset for '{target.username}'.")
+    _flash(request, f"Password reset for '{target.username}'. "
+                    "They must choose a new one at next sign-in.")
     return _redirect("/manage/users")
 
 
@@ -2065,3 +2667,255 @@ def suppression_delete(window_id: int, request: Request, db: Session = Depends(g
     db.commit()
     _flash(request, f"Window '{window.name}' deleted.")
     return _redirect("/manage/suppression")
+
+
+# --------------------------------------------------------------------------- #
+# Alert rules
+#
+# Rules existed from the beginning but had no operator surface at all: the four
+# defaults came from central.seed and per-client ones from onboarding defaults,
+# and after that the only way to change a threshold was SQL. That was tolerable
+# while every condition type was a single number an installer could pick a
+# sensible value for; occurrence_rate is not -- "ten jams a day" is three
+# operator decisions (what counts, how many, over how long) and none of them has
+# a defensible default.
+# --------------------------------------------------------------------------- #
+# What an operator may type into a rate rule's window. The evaluator clamps
+# independently (worker.jobs.OCCURRENCE_MAX_WINDOW_MINUTES) -- this is the half
+# that explains the refusal instead of silently narrowing the rule.
+_MAX_RULE_WINDOW_MINUTES = 60 * 24 * 30
+
+# Condition types an operator can create here: label, and what `threshold` means
+# for each. ``predicted_depletion`` is deliberately absent -- it is raised by the
+# forecast pass against alerts.reorder_lead_days, not by a rule, so offering it
+# would create a row that never fires.
+_CONDITION_LABELS = {
+    m.AlertConditionType.supply_below: ("Supply below (%)", "percent"),
+    m.AlertConditionType.error_severity: ("Printer error at/above severity", None),
+    m.AlertConditionType.offline_minutes: ("Agent offline (minutes)", "minutes"),
+    m.AlertConditionType.printer_offline: ("Printer offline (minutes)", "minutes"),
+    m.AlertConditionType.occurrence_rate: ("Occurrence rate (N events in a window)", "count"),
+    m.AlertConditionType.maintenance_due: ("Maintenance due", None),
+}
+
+
+def _rule_threshold_unit(rule: m.AlertRule) -> Optional[str]:
+    labelled = _CONDITION_LABELS.get(rule.condition_type)
+    return labelled[1] if labelled else None
+
+
+def _fmt_rule_window(minutes) -> str:
+    """Minutes as an operator says them (45m / 6h / 7d). Mirrors worker.jobs."""
+    if not minutes:
+        return ""
+    minutes = int(minutes)
+    if minutes % 1440 == 0:
+        return f"{minutes // 1440}d"
+    if minutes % 60 == 0:
+        return f"{minutes // 60}h"
+    return f"{minutes}m"
+
+
+def _parse_window_minutes(amount: str, unit: str) -> Optional[int]:
+    """'12' + 'hours' -> 720. None when unparseable or out of range.
+
+    Returned as None rather than clamped so the caller can refuse with a message.
+    A window the operator did not choose is a rule firing on a period nobody
+    picked, which is worse than being made to type it again.
+    """
+    try:
+        value = int((amount or "").strip())
+    except (TypeError, ValueError):
+        return None
+    per = {"minutes": 1, "hours": 60, "days": 1440}.get(unit, 60)
+    minutes = value * per
+    if minutes < 1 or minutes > _MAX_RULE_WINDOW_MINUTES:
+        return None
+    return minutes
+
+
+@router.get("/alert-rules", response_class=HTMLResponse)
+def alert_rules_home(request: Request, db: Session = Depends(get_db)):
+    """List every alert rule, with the occurrence-rate ones fully spelled out."""
+    user = _manager(request, db)
+    if user is None:
+        return _redirect("/login")
+    rules = list(db.scalars(
+        select(m.AlertRule).order_by(m.AlertRule.condition_type, m.AlertRule.id)
+    ))
+    clients = list(db.scalars(select(m.Client).order_by(m.Client.name)))
+    sites = list(db.scalars(select(m.Site).order_by(m.Site.name)))
+    printers = list(db.scalars(
+        select(m.Printer)
+        .where(m.Printer.discovery_state == m.DiscoveryState.approved)
+        .order_by(m.Printer.client_id, m.Printer.ip)
+    ))
+    runtime = load_settings(db)
+    return _tpl(
+        request, "alert_rules.html", db,
+        user=user, rules=rules, clients=clients, sites=sites, printers=printers,
+        condition_labels={k.value: v[0] for k, v in _CONDITION_LABELS.items()},
+        threshold_unit=_rule_threshold_unit,
+        fmt_window=_fmt_rule_window,
+        clear_margin_pct=float(runtime.get("alerts.occurrence_clear_margin_pct", 0) or 0),
+        flap_cooldown_min=int(runtime.get("alerts.renotify_cooldown_min", 0) or 0),
+        max_window_days=_MAX_RULE_WINDOW_MINUTES // 1440,
+        flash=_pop_flash(request),
+    )
+
+
+@router.post("/alert-rules")
+def alert_rules_create(
+    request: Request,
+    name: str = Form(...),
+    condition_type: str = Form("supply_below"),
+    scope: str = Form("global"),
+    scope_id: str = Form(""),
+    severity: str = Form("warning"),
+    threshold: str = Form(""),
+    window_amount: str = Form(""),
+    window_unit: str = Form("hours"),
+    match_code: str = Form(""),
+    match_min_severity: str = Form(""),
+    db: Session = Depends(get_db),
+):
+    """Create a rule. A half-specified one is refused, never stored.
+
+    Same rule as the suppression form next door: an alert rule that quietly
+    never matches is worse than an error message, because the operator believes
+    they are covered. For occurrence_rate that means both the count and the
+    window are mandatory -- neither has a defensible default.
+    """
+    actor = _manager(request, db)
+    if actor is None:
+        return _redirect("/login")
+    name = name.strip()
+    if not name:
+        _flash(request, "Rule name is required.")
+        return _redirect("/manage/alert-rules")
+
+    try:
+        condition = m.AlertConditionType(condition_type)
+    except ValueError:
+        condition = None
+    if condition not in _CONDITION_LABELS:
+        _flash(request, "That condition type cannot be created here.")
+        return _redirect("/manage/alert-rules")
+
+    try:
+        sev = m.EventSeverity(severity)
+    except ValueError:
+        sev = m.EventSeverity.warning
+
+    scope_enum, target = _window_scope(scope, scope_id)
+    if scope_enum is None:
+        _flash(request, "Pick a target for a client/site/printer-scoped rule.")
+        return _redirect("/manage/alert-rules")
+
+    limit: Optional[float] = None
+    raw_threshold = (threshold or "").strip()
+    if raw_threshold:
+        try:
+            limit = float(raw_threshold)
+        except ValueError:
+            _flash(request, "The threshold must be a number.")
+            return _redirect("/manage/alert-rules")
+
+    window = None
+    code = None
+    floor = None
+    if condition == m.AlertConditionType.occurrence_rate:
+        if limit is None or limit < 1:
+            _flash(request, "An occurrence-rate rule needs a count of 1 or more.")
+            return _redirect("/manage/alert-rules")
+        window = _parse_window_minutes(window_amount, window_unit)
+        if window is None:
+            _flash(request,
+                   "An occurrence-rate rule needs a window between 1 minute and "
+                   f"{_MAX_RULE_WINDOW_MINUTES // 1440} days.")
+            return _redirect("/manage/alert-rules")
+        # Free text from an operator. It reaches SQL only as a bound LIKE
+        # parameter with the metacharacters escaped (worker.jobs._like_contains)
+        # and the dashboard renders it through Jinja autoescaping, so the only
+        # reason to bound the length here is to keep an accidental paste out of
+        # a column that would truncate it silently.
+        code = (match_code or "").strip()[:80] or None
+        if match_min_severity:
+            try:
+                floor = m.EventSeverity(match_min_severity)
+            except ValueError:
+                floor = None
+    elif condition in (
+        m.AlertConditionType.supply_below,
+        m.AlertConditionType.offline_minutes,
+        m.AlertConditionType.printer_offline,
+    ):
+        if limit is None:
+            _flash(request, "That condition type needs a threshold.")
+            return _redirect("/manage/alert-rules")
+
+    rule = m.AlertRule(
+        name=name,
+        scope=scope_enum,
+        scope_id=target,
+        condition_type=condition,
+        threshold=limit,
+        severity=sev,
+        window_minutes=window,
+        match_code=code,
+        match_min_severity=floor,
+        enabled=True,
+    )
+    db.add(rule)
+    record(db, request, actor, "alert_rule.create",
+           target=f"rule:{name}",
+           detail=(f"condition={condition.value} scope={scope_enum.value}:{target or '-'} "
+                   f"threshold={limit if limit is not None else '-'} "
+                   f"severity={sev.value} window={window or '-'}min "
+                   f"match_code={code or '*'} "
+                   f"match_min_severity={floor.value if floor else '-'}"))
+    db.commit()
+    _flash(request, f"Rule '{name}' added.")
+    return _redirect("/manage/alert-rules")
+
+
+@router.post("/alert-rules/{rule_id}/toggle")
+def alert_rules_toggle(rule_id: int, request: Request, db: Session = Depends(get_db)):
+    """Enable/disable without deleting.
+
+    A disabled rule stops contributing keys to the evaluator's active set, so
+    its open alerts auto-resolve on the next cycle rather than being stranded --
+    that is _resolve_stale's existing behaviour for an orphaned key, and it is
+    what makes disabling safe to offer beside deleting.
+    """
+    actor = _manager(request, db)
+    if actor is None:
+        return _redirect("/login")
+    rule = db.get(m.AlertRule, rule_id)
+    if rule is None:
+        _flash(request, "That rule no longer exists.")
+        return _redirect("/manage/alert-rules")
+    rule.enabled = not rule.enabled
+    record(db, request, actor, "alert_rule.update",
+           target=f"rule:{rule.name}", detail=f"enabled={rule.enabled}")
+    db.commit()
+    _flash(request, f"Rule '{rule.name}' {'enabled' if rule.enabled else 'disabled'}.")
+    return _redirect("/manage/alert-rules")
+
+
+@router.post("/alert-rules/{rule_id}/delete")
+def alert_rules_delete(rule_id: int, request: Request, db: Session = Depends(get_db)):
+    actor = _manager(request, db)
+    if actor is None:
+        return _redirect("/login")
+    rule = db.get(m.AlertRule, rule_id)
+    if rule is None:
+        _flash(request, "That rule no longer exists.")
+        return _redirect("/manage/alert-rules")
+    record(db, request, actor, "alert_rule.delete",
+           target=f"rule:{rule.name}",
+           detail=f"condition={rule.condition_type.value} scope={rule.scope.value}")
+    db.delete(rule)
+    db.commit()
+    _flash(request, f"Rule '{rule.name}' deleted.")
+    return _redirect("/manage/alert-rules")

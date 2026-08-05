@@ -878,7 +878,16 @@ def test_a_pkg_driver_is_installed_when_the_setting_is_on(
     monkeypatch.setattr(
         macos, "_resolve_system_ppd", lambda ref: "/Library/Printers/a.ppd"
     )
-    monkeypatch.setattr(macos, "_ppd_present", lambda ref: False)
+    # _ppd_present is gone: it answered "no" both to "not installed yet" and to
+    # "this ref can never resolve", and merging those is what made a bad ref run
+    # the root installer on every poll forever. The decision is now
+    # _validate_system_ppd_path (shape only, raises on a bad ref) plus a plain
+    # isfile check, so "not installed" is expressed by pointing at a file that
+    # genuinely is not there.
+    monkeypatch.setattr(
+        macos, "_validate_system_ppd_path",
+        lambda ref: str(tmp_path / "not-installed-yet.ppd"),
+    )
     fake.replies[("lpoptions", "-p")] = "printer-state-reasons=none"
     blob, digest = _zip_bytes({"Acme.pkg": "not really a package"})
     payload = _assignments(
@@ -1059,6 +1068,11 @@ def test_a_pkg_already_installed_is_not_reinstalled(monkeypatch, tmp_path):
     ran = []
     monkeypatch.setattr(macos, "install_pkg", lambda p: ran.append(p))
     monkeypatch.setattr(macos, "_resolve_system_ppd", lambda ref: str(tmp_path / "a.ppd"))
+    # The shape check runs first now and is OS-specific (absolute POSIX path
+    # under a macOS PPD root), so it is stubbed here for the same reason
+    # _resolve_system_ppd is: this test is about the install decision.
+    monkeypatch.setattr(macos, "_validate_system_ppd_path",
+                        lambda ref: str(tmp_path / "a.ppd"))
     (tmp_path / "a.ppd").write_text("")
     got = macos.stage_driver({
         "driver_kind": "pkg",
@@ -1078,11 +1092,15 @@ def test_a_pkg_not_yet_installed_is_installed_once(monkeypatch, tmp_path):
 
     def resolve(ref):
         calls["n"] += 1
-        if calls["n"] == 1:
-            raise macos.DriverStagingError("not there yet")
         return "/Library/Printers/acme.ppd"
 
     monkeypatch.setattr(macos, "_resolve_system_ppd", resolve)
+    # Absence is now expressed by the path simply not existing, rather than by
+    # the resolver raising. That distinction is the fix: a resolver that raised
+    # meant BOTH "not installed yet" and "this ref can never resolve", and the
+    # second one used to run the root installer on every poll, forever.
+    monkeypatch.setattr(macos, "_validate_system_ppd_path",
+                        lambda ref: str(tmp_path / "not-there-yet.ppd"))
     got = macos.stage_driver({
         "driver_kind": "pkg",
         "driver_ref": "/Library/Printers/acme.ppd",
@@ -1249,3 +1267,53 @@ def test_platforms_current_selects_macos_on_darwin(monkeypatch):
 
     monkeypatch.setattr(platforms.sys, "platform", "darwin")
     assert platforms.current() is macos
+
+
+def test_a_pkg_with_an_unresolvable_ref_never_runs_the_installer(monkeypatch, tmp_path):
+    """The loop, and why it was one.
+
+    `_ppd_present` returned False for a ref that could NEVER resolve -- a
+    relative path, or one outside the directories PPDs live in -- so the root
+    installer ran to discover a configuration error, the strict check raised
+    immediately afterwards, and nothing recorded that the install had happened.
+    Next poll: identical. Arbitrary vendor pre/postinstall scripts as root, every
+    five minutes, on every Mac in the client, from one operator typo.
+    """
+    ran = []
+    monkeypatch.setattr(macos, "install_pkg", lambda p: ran.append(p))
+    (tmp_path / "Acme.pkg").write_text("")
+
+    with pytest.raises(macos.DriverStagingError, match="absolute"):
+        macos.stage_driver({
+            "driver_kind": "pkg",
+            "driver_ref": "Library/Printers/acme.ppd",  # relative
+            "unpacked": str(tmp_path),
+            "allow_pkg_install": True,
+        })
+    assert ran == [], "a ref that cannot resolve must not reach installer -pkg"
+
+
+def test_a_pkg_that_installed_but_left_no_ppd_is_not_reinstalled(monkeypatch, tmp_path):
+    """The other half: the install ran and the PPD still is not where the
+    operator said. Re-running as root will not change that, so it is stated once
+    rather than retried every poll."""
+    ran = []
+    monkeypatch.setattr(macos, "install_pkg", lambda p: ran.append(p))
+    monkeypatch.setattr(macos, "_validate_system_ppd_path",
+                        lambda ref: str(tmp_path / "never-appears.ppd"))
+    (tmp_path / "Acme.pkg").write_text("")
+    spec = {
+        "driver_kind": "pkg",
+        "driver_ref": "/Library/Printers/acme.ppd",
+        "unpacked": str(tmp_path),
+        "allow_pkg_install": True,
+    }
+
+    with pytest.raises(macos.DriverStagingError):
+        macos.stage_driver(spec)
+    assert len(ran) == 1
+
+    # Second poll: the marker says we already did this to this machine.
+    with pytest.raises(macos.DriverStagingError, match="no PPD appeared"):
+        macos.stage_driver(spec)
+    assert len(ran) == 1, "the root installer ran a second time"

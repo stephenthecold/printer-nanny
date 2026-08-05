@@ -1,5 +1,5 @@
 {% extends "base.html" %}
-{% from "_components.html" import btn, card_cls %}
+{% from "_components.html" import btn, card_cls, field, input_cls, section_title, textarea_field %}
 {% from "base.html" import status_badge %}
 {% block title %}{{ client.name }} · Manage · Printer Nanny{% endblock %}
 {% block body %}
@@ -23,7 +23,18 @@
               <div class="text-slate-400 text-xs">{{ s.address or '' }}{% if s.contact %} · {{ s.contact }}{% endif %}</div>
             </td>
             <td class="py-2 text-right pr-4">
-              <form method="post" action="/manage/sites/{{ s.id }}/delete" onsubmit="return confirm('Delete site {{ s.name }}?')" class="inline">
+              {#
+                The name travels in a data- attribute and is read back through
+                `dataset`, NOT interpolated into the confirm() string. HTML
+                escaping is not JS escaping: an attribute's character
+                references are decoded by the HTML parser BEFORE the value is
+                compiled as script, so a site named `x'); alert(1); //` comes
+                back through `&#39;` as a real quote and closes the string
+                literal. Read via the DOM the value is only ever data.
+              #}
+              <form method="post" action="/manage/sites/{{ s.id }}/delete" data-name="{{ s.name }}"
+                    onsubmit="return confirm('Delete site ' + this.dataset.name + '?')" class="inline">
+                {{ csrf_field() }}
                 <button class="text-xs text-red-600 hover:underline">Delete</button>
               </form>
             </td>
@@ -33,11 +44,14 @@
         {% endfor %}
         </tbody>
       </table>
+      {# Labelled with the `field` macro rather than placeholders: a placeholder
+         is not an accessible name and it vanishes on the first keystroke. #}
       <form method="post" action="/manage/sites" class="border-t p-4 grid grid-cols-2 gap-2">
+        {{ csrf_field() }}
         <input type="hidden" name="client_id" value="{{ client.id }}" />
-        <input name="name" placeholder="Site name" required class="border rounded px-3 py-2 text-sm" />
-        <input name="address" placeholder="Address (optional)" class="border rounded px-3 py-2 text-sm" />
-        <input name="contact" placeholder="Contact (optional)" class="border rounded px-3 py-2 text-sm col-span-2" />
+        {{ field('name', 'Site name', required=True) }}
+        {{ field('address', 'Address', placeholder='Optional') }}
+        <div class="col-span-2">{{ field('contact', 'Contact', placeholder='Optional') }}</div>
         <button class="{{ btn('primary', 'md', 'col-span-2') }}">Add site</button>
       </form>
     </section>
@@ -58,7 +72,10 @@
             <td class="py-2"><span class="text-xs text-slate-500">{{ p.discovery_state.value }}</span></td>
             <td class="py-2 text-right pr-4">
               <a href="/manage/printers/{{ p.id }}/edit" class="text-xs text-sky-700 hover:underline">Edit</a>
-              <form method="post" action="/manage/printers/{{ p.id }}/delete" onsubmit="return confirm('Delete printer {{ p.ip }}?')" class="inline ml-2">
+              {# Same rule, and here the value came off a device. #}
+              <form method="post" action="/manage/printers/{{ p.id }}/delete" data-name="{{ p.ip }}"
+                    onsubmit="return confirm('Delete printer ' + this.dataset.name + '?')" class="inline ml-2">
+                {{ csrf_field() }}
                 <button class="text-xs text-red-600 hover:underline">Delete</button>
               </form>
             </td>
@@ -76,12 +93,16 @@
     <section class="{{ card_cls() }}">
       <h2 class="font-semibold mb-3">Edit client</h2>
       <form method="post" action="/manage/clients/{{ client.id }}" class="space-y-2">
-        <input name="name" value="{{ client.name }}" required class="w-full border rounded px-3 py-2 text-sm" />
-        <textarea name="notes" rows="3" class="w-full border rounded px-3 py-2 text-sm" placeholder="Notes">{{ client.notes or '' }}</textarea>
-        <label class="block text-xs text-slate-500 pt-1">Timezone</label>
-        <input name="client_timezone" value="{{ client.timezone or '' }}" list="tz-options"
-               placeholder="{{ default_tz }} (inherited)"
-               class="w-full border rounded px-3 py-2 text-sm" />
+        {{ csrf_field() }}
+        {{ field('name', 'Client name', value=client.name, required=True) }}
+        {{ textarea_field('notes', 'Notes', value=client.notes or '', rows=3) }}
+        {# Hand-rolled rather than the `field` macro only because of list=:
+           the wrapping <label> is what carries the accessible name either way. #}
+        <label class="block">
+          <span class="text-xs text-slate-500">Timezone</span>
+          <input name="client_timezone" value="{{ client.timezone or '' }}" list="tz-options"
+                 placeholder="{{ default_tz }} (inherited)" class="{{ input_cls() }}" />
+        </label>
         <datalist id="tz-options">
           {% for tz in tz_choices %}<option value="{{ tz }}"></option>{% endfor %}
         </datalist>
@@ -93,10 +114,76 @@
         <button class="{{ btn('primary', 'md', 'w-full') }}">Save</button>
       </form>
     </section>
+
+    {#
+      Portal branding. Applies to what THIS customer sees at /portal and
+      nowhere else -- alert email and tickets keep the MSP's own identity,
+      because those channels are shared across tenants and a message branded
+      as the wrong customer is worse than an unbranded one. Every field blank
+      = inherit the global Settings → Branding value.
+    #}
+    <section class="{{ card_cls() }}">
+      {{ section_title('Portal branding') }}
+      <p class="text-[11px] text-slate-400 mb-3">
+        What this customer sees at <a href="/portal?client_id={{ client.id }}" class="text-sky-700 hover:underline">their portal</a>.
+        Blank fields inherit <a href="/settings?group=branding" class="text-sky-700 hover:underline">the global branding</a>.
+        Alert emails and tickets always use the global branding.
+      </p>
+      <form method="post" action="/manage/clients/{{ client.id }}/branding" class="space-y-3">
+        {{ csrf_field() }}
+        {{ field('brand_name', 'Brand name', value=client.brand_name or '',
+                 placeholder=app.name or 'Printer Nanny',
+                 help='Blank inherits ' ~ (app.name or 'Printer Nanny') ~ '.') }}
+        <div>
+          {{ field('brand_primary_color', 'Primary colour', value=client.brand_primary_color or '',
+                   placeholder=app.primary_color or '#0f172a',
+                   help='#RRGGBB only — anything else is refused, because this value is written into CSS.') }}
+          {% if brand_swatch %}
+          <div class="flex items-center gap-2 mt-1">
+            <span class="inline-block h-4 w-4 rounded border border-slate-300" style="background-color: {{ brand_swatch }};" aria-hidden="true"></span>
+            <span class="text-[11px] text-slate-400">current portal colour</span>
+          </div>
+          {% endif %}
+        </div>
+        {{ field('brand_logo_url', 'Logo URL', value=client.brand_logo_url or '',
+                 placeholder=app.logo_url or 'https://cdn.example.com/logo.png',
+                 help='An https:// address, or leave blank and upload below.') }}
+        <button class="{{ btn('primary', 'md', 'w-full') }}">Save branding</button>
+      </form>
+
+      <div class="border-t mt-4 pt-4 space-y-2">
+        {% if has_brand_logo %}
+        <img src="/branding/clients/{{ client.id }}/logo" alt="Current portal logo for {{ client.name }}"
+             class="max-h-16 max-w-full bg-slate-50 rounded p-2" />
+        {% endif %}
+        <form method="post" action="/manage/clients/{{ client.id }}/branding/logo"
+              enctype="multipart/form-data" class="space-y-2">
+          {{ csrf_field() }}
+          <label class="block">
+            <span class="text-xs text-slate-500">Portal logo image</span>
+            <input type="file" name="logo" accept="image/png,image/jpeg,image/webp,image/gif" required
+                   class="block w-full text-sm rounded focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-offset-1 focus-visible:ring-sky-500" />
+          </label>
+          <p class="text-xs text-slate-400">PNG, JPEG, GIF or WEBP up to 512 KB. SVG is refused — it can carry script.</p>
+          <button class="{{ btn('accent', 'sm') }}">Upload logo</button>
+        </form>
+        {% if has_brand_logo %}
+        <form method="post" action="/manage/clients/{{ client.id }}/branding/logo/delete"
+              data-name="{{ client.name }}"
+              onsubmit="return confirm('Remove the portal logo for ' + this.dataset.name + '?')">
+          {{ csrf_field() }}
+          <button class="text-xs text-red-600 hover:underline">Remove uploaded logo</button>
+        </form>
+        {% endif %}
+      </div>
+    </section>
+
     {% if user.role.value == 'admin' %}
     <section class="{{ card_cls() }}">
       <h2 class="font-semibold mb-2 text-red-700">Danger zone</h2>
-      <form method="post" action="/manage/clients/{{ client.id }}/delete" onsubmit="return confirm('Delete {{ client.name }} and ALL its sites/printers?')">
+      <form method="post" action="/manage/clients/{{ client.id }}/delete" data-name="{{ client.name }}"
+            onsubmit="return confirm('Delete ' + this.dataset.name + ' and ALL its sites/printers?')">
+        {{ csrf_field() }}
         <button class="w-full border border-red-300 text-red-700 rounded py-2 text-sm">Delete client</button>
       </form>
     </section>

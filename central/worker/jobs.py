@@ -5,14 +5,17 @@ returns a small summary dict so the worker loop (and tests) can assert on it.
 
 from __future__ import annotations
 
+import logging
 from datetime import datetime, timedelta, timezone
 from typing import Optional
 
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
 from central import models as m
 from central import queries
+from central import supplies as supplies_lib
+from central.supplies import REFILL_TOLERANCE_PCT, refill_boundaries
 from central.channels import (
     Notification,
     routable_channels,
@@ -28,7 +31,15 @@ from central.channels.delivery import (
 from central.channels.delivery import flush_deferred as _flush_deferred
 from central.channels.delivery import retry_due as _retry_due
 from central.channels.freescout import FreeScoutChannel
+from central.events.delivery import deliver_due as _deliver_events
+from central.events.emit import (
+    emit_alert_opened,
+    emit_alert_resolved,
+    emit_printer_offline,
+)
 from central.runtime import load_settings
+
+log = logging.getLogger("central.worker.jobs")
 
 # Alert states that still represent an outstanding condition. An ACKNOWLEDGED
 # alert is "seen but not fixed", so a cleared condition must resolve it too --
@@ -78,18 +89,160 @@ def mark_offline_agents(db: Session, now: Optional[datetime] = None) -> dict:
     return {"agents_updated": changed}
 
 
+def reassign_collectors(db: Session, now: Optional[datetime] = None) -> dict:
+    """Hand a leased subnet to its standby when the collector really has gone.
+
+    **This is the only path that moves a lease between agents.** A heartbeat can
+    renew its own and pick up one nobody holds, but it can never take one -- so
+    a takeover is always a central decision, made once, with the whole tenant in
+    view, and audited. It runs under the worker's leader lock, so two worker
+    containers cannot both perform it.
+
+    Every check below is stale by the time the write executes, which is why the
+    write is a compare-and-swap (``collector.grant_lease`` asserts the holder id
+    AND the expiry it judged). A primary that was merely slow renews between our
+    read and our write, the swap misses, and nothing moves -- that, not the
+    checks, is what guarantees a working collector is never displaced. The
+    checks exist to stop us *trying*, so the audit trail records handovers
+    rather than attempts.
+
+    Refusals, in the shape of ``services.adopt_by_name``:
+
+    * **The lease must have lapsed.** A live lease is a collector that is still
+      sweeping on its own clock; taking it would create the exact overlap the
+      lease exists to prevent.
+    * **The holder must look gone** -- ``offline``, and silent for longer than
+      ``collector.takeover_after_seconds``, which is deliberately a separate,
+      longer threshold than the offline grace. Missing one heartbeat is not
+      having stopped working.
+    * **The successor must be alive.** Moving a subnet to a second dead agent
+      changes nothing except who is blamed for the silence.
+    * **Exactly one candidate**, structurally: the other of primary/standby.
+    * A holder that is **no longer either** (an operator reassigned the subnet
+      out from under it) is not "gone", but it is not entitled either -- it
+      simply stops being able to renew, and the subnet moves to the primary once
+      its lease lapses. The lapse is what makes that safe, not the reassignment.
+
+    A primary that comes back does NOT get its subnet back. The standby is
+    collecting correctly; a second handover buys nothing and costs another
+    transition, and a flapping collector -- which is how these actually fail --
+    would oscillate, one handover per flap. Hand-back is an operator action.
+    """
+    from central import collector as _collector
+    from central.audit import record
+
+    now = now or _now()
+    rt = load_settings(db)
+    ttl, takeover_after, auto = _collector.lease_settings(rt)
+    grace = timedelta(seconds=rt.get("alerts.offline_grace_seconds", 300))
+    silent_for = timedelta(seconds=takeover_after)
+
+    subnets = list(
+        db.scalars(select(m.Subnet).where(m.Subnet.standby_agent_id.is_not(None)))
+    )
+    if not subnets:
+        return {"collector_takeovers": 0}
+
+    def _alive(agent: Optional[m.Agent]) -> bool:
+        if agent is None or agent.status != m.AgentStatus.online:
+            return False
+        last = _aware(agent.last_heartbeat)
+        return last is not None and (now - last) <= grace
+
+    def _gone(agent: Optional[m.Agent]) -> bool:
+        # A deleted agent row is gone by definition. Otherwise both conditions:
+        # marked offline by mark_offline_agents (which ran earlier this cycle),
+        # and silent for the longer takeover threshold.
+        if agent is None:
+            return True
+        if agent.status != m.AgentStatus.offline:
+            return False
+        last = _aware(agent.last_heartbeat)
+        return last is None or (now - last) > silent_for
+
+    taken = 0
+    for subnet in subnets:
+        expires = _aware(subnet.collector_lease_expires_at)
+        # A live lease is never touched, whatever anyone's status says.
+        if expires is not None and expires > now:
+            continue
+        holder_id = subnet.collector_agent_id
+        eligible = _collector.eligible_agent_ids(subnet)
+
+        if holder_id is None:
+            # Nobody holds it: a freshly-released lease past its barrier, or a
+            # subnet whose primary has never heartbeated. The primary gets it
+            # back -- this is a return to the configured owner, not a takeover,
+            # so it needs no staleness judgement, only a live candidate.
+            candidate_id = subnet.agent_id
+        elif holder_id not in eligible:
+            # The operator reassigned this subnet away from its holder. Not a
+            # failure, so no staleness test; the lapse alone makes it safe.
+            candidate_id = subnet.agent_id
+        else:
+            if not auto:
+                continue
+            candidate_id = next(iter(eligible - {holder_id}), None)
+            if not _gone(db.get(m.Agent, holder_id)):
+                continue
+
+        if candidate_id is None or candidate_id == holder_id:
+            continue
+        if not _alive(db.get(m.Agent, candidate_id)):
+            continue
+
+        if _collector.grant_lease(
+            db, subnet.id,
+            to_agent_id=candidate_id, from_agent_id=holder_id,
+            now=now, ttl_seconds=ttl,
+        ):
+            taken += 1
+            action = (
+                "subnet.collector_takeover" if holder_id is not None
+                else "subnet.collector_assign"
+            )
+            record(
+                db, None, None, action,
+                target=f"subnet:{subnet.id} {subnet.cidr}",
+                detail=(
+                    f"collector agent:{holder_id if holder_id is not None else 'none'}"
+                    f" -> agent:{candidate_id}; lease lapsed"
+                    + (
+                        f", holder silent > {int(silent_for.total_seconds())}s"
+                        if holder_id is not None and holder_id in eligible else ""
+                    )
+                ),
+            )
+    db.commit()
+    return {"collector_takeovers": taken}
+
+
 def _sites_with_a_live_agent(db: Session) -> set:
     """Site ids currently covered by at least one non-offline agent.
 
     Mirrors ``services.sites_served_by_agent`` (home site + every subnet
-    assigned to the agent) but aggregated across all agents, so a site served
-    by two agents stays covered while only one of them is down.
+    assigned to the agent, plus any whose lease it currently holds) but
+    aggregated across all agents, so a site served by two agents stays covered
+    while only one of them is down. The lease clause is what stops a site whose
+    primary died and whose standby took over from being reported as an outage:
+    it is being collected, by the other agent.
     """
+    from sqlalchemy import or_
+
     covered: set = set()
     for agent in db.scalars(select(m.Agent).where(m.Agent.status == m.AgentStatus.online)):
         covered.add(agent.site_id)
         covered.update(
-            db.scalars(select(m.Subnet.site_id).where(m.Subnet.agent_id == agent.id).distinct())
+            db.scalars(
+                select(m.Subnet.site_id)
+                .where(
+                    or_(
+                        m.Subnet.agent_id == agent.id,
+                        m.Subnet.collector_agent_id == agent.id,
+                    )
+                )
+                .distinct()
+            )
         )
     return covered
 
@@ -126,6 +279,12 @@ def mark_offline_printers(db: Session, now: Optional[datetime] = None) -> dict:
             continue
         if printer.status != m.PrinterStatus.offline:
             printer.status = m.PrinterStatus.offline
+            # Emitted on the transition, inside the same transaction as the
+            # status write -- so a rolled-back cycle tells nobody a printer went
+            # down, and a printer that flaps offline/online/offline produces two
+            # events rather than one (the key carries the last_seen it went
+            # stale from; see emit_printer_offline).
+            emit_printer_offline(db, printer, at=now)
             changed += 1
     db.commit()
     return {"printers_marked_offline": changed}
@@ -148,6 +307,132 @@ def _printers_in_scope(db: Session, rule: m.AlertRule):
     elif rule.scope == m.AlertScope.printer and rule.scope_id:
         stmt = stmt.where(m.Printer.id == rule.scope_id)
     return db.scalars(stmt)
+
+
+# An occurrence-rate rule's window is operator-typed, and an unbounded one is a
+# scan of every event ever recorded -- the trap FORECAST_HISTORY_WINDOW_DAYS
+# already had to be walked back from, on a table that is likewise append-only.
+# 30 days is well past any plausible "N per day / per shift / per hour" rule and
+# is enforced in BOTH places a window can arrive: the form, so an operator is
+# told, and the evaluator, so a hand-edited row cannot bypass it.
+OCCURRENCE_MAX_WINDOW_MINUTES = 60 * 24 * 30
+
+# LIKE metacharacters in an operator-typed match string. Left unescaped, a code
+# of "100%" silently becomes "match everything", which is a rule that reports a
+# flood the operator never asked about rather than failing visibly.
+_LIKE_ESCAPE = "\\"
+
+
+def _like_contains(needle: str) -> str:
+    """Build a case-insensitive CONTAINS pattern with metacharacters escaped."""
+    escaped = (
+        needle.replace(_LIKE_ESCAPE, _LIKE_ESCAPE * 2)
+        .replace("%", _LIKE_ESCAPE + "%")
+        .replace("_", _LIKE_ESCAPE + "_")
+    )
+    return f"%{escaped}%"
+
+
+def _severities_at_or_above(floor: m.EventSeverity) -> list:
+    return [sev for sev, rank in _SEVERITY_RANK.items() if rank >= _SEVERITY_RANK.get(floor, 0)]
+
+
+def _occurrence_window_minutes(rule: m.AlertRule) -> Optional[int]:
+    """The rule's rolling window, clamped. None when the rule cannot be evaluated.
+
+    A rule with no window (or a nonsensical one) is skipped rather than given a
+    default: the window is half the operator's statement of intent, and inventing
+    it would make a rule fire on a period nobody chose.
+    """
+    raw = rule.window_minutes
+    if raw is None:
+        return None
+    try:
+        minutes = int(raw)
+    except (TypeError, ValueError):
+        return None
+    if minutes <= 0:
+        return None
+    return min(minutes, OCCURRENCE_MAX_WINDOW_MINUTES)
+
+
+def _occurrence_counts(
+    db: Session, rule: m.AlertRule, since: datetime
+) -> dict:
+    """Matching event counts per printer in ``rule``'s scope, since ``since``.
+
+    ONE grouped query per rule, not one COUNT per printer: the printer loop
+    below already runs per rule, and a per-printer count would put a query per
+    printer per rule on every worker cycle (~1,000 on a 500-printer fleet with
+    two rate rules), which is the N+1 shape this codebase keeps having to undo.
+    The scope filter is a join onto printers rather than an ``IN (:ids)`` list
+    because the id list would overrun SQLite's 999-variable limit on a fleet
+    that size -- a failure that only appears in production.
+
+    Bounded by construction: ``since`` is always set, and both filters are
+    parameterised.
+    """
+    stmt = (
+        select(m.PrinterEvent.printer_id, func.count(m.PrinterEvent.id))
+        .join(m.Printer, m.Printer.id == m.PrinterEvent.printer_id)
+        .where(
+            m.PrinterEvent.ts >= since,
+            m.Printer.discovery_state == m.DiscoveryState.approved,
+        )
+        .group_by(m.PrinterEvent.printer_id)
+    )
+    if rule.scope == m.AlertScope.client and rule.scope_id:
+        stmt = stmt.where(m.Printer.client_id == rule.scope_id)
+    elif rule.scope == m.AlertScope.site and rule.scope_id:
+        stmt = stmt.where(m.Printer.site_id == rule.scope_id)
+    elif rule.scope == m.AlertScope.printer and rule.scope_id:
+        stmt = stmt.where(m.Printer.id == rule.scope_id)
+
+    code = (rule.match_code or "").strip()
+    if code:
+        stmt = stmt.where(
+            m.PrinterEvent.code.is_not(None),
+            m.PrinterEvent.code.ilike(_like_contains(code), escape=_LIKE_ESCAPE),
+        )
+    if rule.match_min_severity is not None:
+        stmt = stmt.where(
+            m.PrinterEvent.severity.in_(_severities_at_or_above(rule.match_min_severity))
+        )
+    return {pid: count for pid, count in db.execute(stmt)}
+
+
+def _fmt_window(minutes: Optional[int]) -> str:
+    """A window as an operator would say it: 45m, 6h, 24h, 7d."""
+    if not minutes:
+        return "0m"
+    if minutes % 1440 == 0:
+        return f"{minutes // 1440}d"
+    if minutes % 60 == 0:
+        return f"{minutes // 60}h"
+    return f"{minutes}m"
+
+
+def _occurrence_subject(rule: m.AlertRule) -> str:
+    """What the rule is counting, for an alert title."""
+    code = (rule.match_code or "").strip()
+    return f"'{code}' events" if code else "events"
+
+
+def _occurrence_criteria(rule: m.AlertRule) -> str:
+    """A one-line restatement of what was counted.
+
+    The alert has to be self-explanatory in an email that carries no link back
+    to the rule: "12 events" is unactionable without "...whose code contains
+    'jam', at warning or above".
+    """
+    code = (rule.match_code or "").strip()
+    parts = [
+        f"Counting events whose code contains '{code}'" if code
+        else "Counting every event"
+    ]
+    if rule.match_min_severity is not None:
+        parts.append(f"at {rule.match_min_severity.value} or above")
+    return ", ".join(parts) + "."
 
 
 def _external_ref_from(results, channels) -> Optional[str]:
@@ -179,12 +464,32 @@ def _find_open_alert(db: Session, dedupe_key: str) -> Optional[m.Alert]:
     )
 
 
+def _flap_cooldown_minutes(runtime: Optional[dict], cap_minutes: Optional[int]) -> int:
+    """The effective flap-cooldown window, in minutes. 0 disables folding.
+
+    ``cap_minutes`` exists for occurrence-rate rules and is the one place the
+    cooldown is allowed to be shortened. See ``_revive_flapping_alert`` for why.
+    """
+    minutes = int((runtime or {}).get("alerts.renotify_cooldown_min", 0) or 0)
+    if cap_minutes is not None:
+        minutes = min(minutes, max(0, int(cap_minutes)))
+    return minutes
+
+
+def _flap_suffix(detail: str, flap_count: int, minutes: int) -> str:
+    """Annotate a detail string with the flap bookkeeping, if it has flapped."""
+    if not flap_count:
+        return detail
+    return "%s (re-opened; flapped %d× within %dm)" % (detail, flap_count, minutes)
+
+
 def _revive_flapping_alert(
     db: Session,
     dedupe_key: str,
     detail: str,
     now: datetime,
     runtime: Optional[dict],
+    cap_minutes: Optional[int] = None,
 ) -> Optional[m.Alert]:
     """Re-open a same-condition alert that resolved inside the flap window.
 
@@ -202,10 +507,21 @@ def _revive_flapping_alert(
     its own schedule; ``last_notified_at`` is left untouched so that clock keeps
     running from the real notification rather than being reset by every flap.
 
+    ``cap_minutes`` shortens the cooldown for a single call, and exists for
+    occurrence-rate rules. Folding asserts "this is the same incident", and for
+    a rate condition that claim is only true while the two firings are counting
+    overlapping events -- i.e. within the rule's own window W. A 10-minute
+    "5 jams" rule under the default 30-minute cooldown would otherwise have a
+    genuinely NEW burst -- five fresh jams sharing not one event with the
+    previous alert -- folded in silently, with no notification: the damping
+    mechanism defeating the very feature that exists to measure repetition.
+    Capping at W makes the two cases distinguishable by the only evidence
+    available, which is whether any counted event is common to both.
+
     Returns the revived alert, or None when nothing is eligible (no recent
     resolve, or the cooldown is disabled).
     """
-    minutes = int((runtime or {}).get("alerts.renotify_cooldown_min", 0) or 0)
+    minutes = _flap_cooldown_minutes(runtime, cap_minutes)
     if minutes <= 0:
         return None
     cutoff = now - timedelta(minutes=minutes)
@@ -227,11 +543,12 @@ def _revive_flapping_alert(
     alert.state = m.AlertState.open
     alert.resolved_at = None
     alert.flap_count = (alert.flap_count or 0) + 1
-    alert.detail = "%s (re-opened; flapped %d× within %dm)" % (
-        detail,
-        alert.flap_count,
-        minutes,
-    )
+    alert.detail = _flap_suffix(detail, alert.flap_count, minutes)
+    # Damping suppresses the *notification*, not the fact. A subscriber told the
+    # condition resolved and never told it came back holds a state that is
+    # false, so the event goes out even though nobody is paged -- see
+    # events.emit.alert_key for why the key carries the flap generation.
+    emit_alert_opened(db, alert)
     return alert
 
 
@@ -381,6 +698,8 @@ def _open_alert(
     now: Optional[datetime] = None,
     runtime: Optional[dict] = None,
     stats: Optional[dict] = None,
+    cooldown_cap_min: Optional[int] = None,
+    refresh_detail: bool = False,
 ) -> Optional[m.Alert]:
     """Open an alert if one isn't already live for this dedupe_key. Returns it (or None).
 
@@ -389,11 +708,29 @@ def _open_alert(
     case did a NEW alert open, so callers must not count it as one. ``stats``, if
     given, has its ``flapped`` key incremented so the cycle summary can report
     damping that happened instead of a notification.
+
+    ``refresh_detail`` rewrites a *live* alert's detail from this pass's text
+    without notifying. It is off by default because for a state condition the
+    detail barely moves ("9%" vs "8%"), and on for occurrence-rate rules because
+    there the number IS the alert: dedupe would otherwise leave "10 jams in 24h"
+    on screen while the printer sits at sixty, which is the alert asserting
+    something untrue rather than merely stale. Silent by design -- re-notifying
+    per cycle is the noise every other mechanism here exists to stop, and
+    escalation already covers "still not fixed".
     """
-    if _find_open_alert(db, dedupe_key) is not None:
+    live = _find_open_alert(db, dedupe_key)
+    if live is not None:
+        if refresh_detail:
+            live.detail = _flap_suffix(
+                detail,
+                live.flap_count or 0,
+                _flap_cooldown_minutes(runtime, cooldown_cap_min),
+            )
         return None
     now = now or _now()
-    revived = _revive_flapping_alert(db, dedupe_key, detail, now, runtime)
+    revived = _revive_flapping_alert(
+        db, dedupe_key, detail, now, runtime, cap_minutes=cooldown_cap_min
+    )
     if revived is not None:
         if stats is not None:
             stats["flapped"] = stats.get("flapped", 0) + 1
@@ -412,6 +749,10 @@ def _open_alert(
     )
     db.add(alert)
     db.flush()  # assign alert.id
+    # Emitted before the notification dispatch, and independently of it: a
+    # suppression window silences a *person*, not an integration, and the event
+    # surface is how an MSP's own systems learn the fleet changed.
+    emit_alert_opened(db, alert, printer)
     _notify_alert(
         db,
         alert,
@@ -453,7 +794,12 @@ def _close_ticket_for(alert: m.Alert, channels) -> Optional[dict]:
         return {"external_ref": ref, "ok": False, "detail": f"unhandled: {exc}"}
 
 
-def _resolve_stale(db: Session, active_keys: set[str], channels=None) -> int:
+def _resolve_stale(
+    db: Session,
+    active_keys: set[str],
+    channels=None,
+    now: Optional[datetime] = None,
+) -> int:
     """Resolve live rule-driven alerts whose condition no longer holds this run.
 
     Covers both cleared conditions (key not re-added) and alerts orphaned by a
@@ -463,7 +809,14 @@ def _resolve_stale(db: Session, active_keys: set[str], channels=None) -> int:
     predicted-depletion alerts own their own lifecycle (check_maintenance_due /
     forecast_supplies) and are skipped; a resolved alert that opened a FreeScout
     ticket gets it auto-closed.
+
+    ``resolved_at`` is stamped from the pass's ``now``, not from a fresh
+    wall-clock read. The flap window is measured backwards from ``now`` against
+    exactly this column, so two different clocks inside one cycle make "did this
+    re-fire inside the cooldown?" depend on how long the cycle took -- and make
+    it unanswerable at all under an injected clock.
     """
+    now = now or _now()
     resolved = 0
     stmt = select(m.Alert).where(m.Alert.state.in_(_LIVE_STATES))
     for alert in db.scalars(stmt):
@@ -474,8 +827,9 @@ def _resolve_stale(db: Session, active_keys: set[str], channels=None) -> int:
             continue
         if alert.dedupe_key not in active_keys:
             alert.state = m.AlertState.resolved
-            alert.resolved_at = _now()
+            alert.resolved_at = now
             _close_ticket_for(alert, channels)
+            emit_alert_resolved(db, alert)
             resolved += 1
     return resolved
 
@@ -516,6 +870,34 @@ def evaluate_alerts(db: Session, now: Optional[datetime] = None) -> dict:
             else None
         )
 
+        # Likewise once per rule: one grouped, windowed count for every printer
+        # in scope, read out of a dict inside the loop below.
+        occurrence_window = occurrence_counts = None
+        occurrence_n = occurrence_floor = 0
+        if rule.condition_type == m.AlertConditionType.occurrence_rate:
+            occurrence_window = _occurrence_window_minutes(rule)
+            occurrence_n = int(rule.threshold or 0)
+            if occurrence_window is None or occurrence_n < 1:
+                # Unusable rule: without a window there is nothing to count
+                # over, and a count of zero is satisfied by every printer that
+                # has ever emitted nothing, forever. Skipped rather than
+                # defaulted -- both halves are the operator's statement of what
+                # "too often" means, and neither can be guessed for them.
+                continue
+            occurrence_counts = _occurrence_counts(
+                db, rule, now - timedelta(minutes=occurrence_window)
+            )
+            # Hysteresis, same philosophy as alerts.supply_deadband_pct: open at
+            # the count, but hold open until it falls a margin BELOW it. A
+            # rolling window sheds occurrences on its own as they age out, so
+            # without a margin every rate alert resolves the moment the oldest
+            # event leaves the window and re-opens on the very next one.
+            occurrence_floor = occurrence_n - (
+                occurrence_n
+                * float(runtime.get("alerts.occurrence_clear_margin_pct", 0) or 0)
+                / 100.0
+            )
+
         for printer in _printers_in_scope(db, rule):
             if rule.condition_type == m.AlertConditionType.printer_offline:
                 # Suppress while the whole site is dark -- the agent-offline
@@ -547,6 +929,16 @@ def evaluate_alerts(db: Session, now: Optional[datetime] = None) -> dict:
                 deadband = float(runtime.get("alerts.supply_deadband_pct", 0) or 0)
                 for supply in printer.supplies:
                     if supply.level_pct is None:
+                        continue
+                    # A receptacle's level is how FULL it is, so "below N%" is
+                    # the healthy end for it: an emptied waste box reading 2
+                    # opened "Low waste at 2%" against a part that had just been
+                    # serviced, and would only resolve once the box filled up
+                    # again. Skipped rather than inverted -- this rule is
+                    # "supply_below" and a nearly-full container is a different
+                    # condition, surfaced by central.reorder. See
+                    # central.supplies.
+                    if supplies_lib.is_receptacle(supply):
                         continue
                     key = f"rule:{rule.id}:printer:{printer.id}:supply:{supply.id}"
                     label = supply.color or supply.type.value
@@ -621,10 +1013,52 @@ def evaluate_alerts(db: Session, now: Optional[datetime] = None) -> dict:
                                    stats=stats):
                         opened += 1
 
+            elif rule.condition_type == m.AlertConditionType.occurrence_rate:
+                # Rate, not state: how many matching events landed inside the
+                # rolling window, versus how many the operator called too many.
+                count = (occurrence_counts or {}).get(printer.id, 0)
+                key = f"rule:{rule.id}:printer:{printer.id}:rate"
+                window_label = _fmt_window(occurrence_window)
+                subject = _occurrence_subject(rule)
+                if count >= occurrence_n:
+                    active_keys.add(key)
+                    title = f"Frequent {subject} on {_printer_label(printer)}"
+                    detail = (
+                        f"{count} matching event(s) in the last {window_label} "
+                        f"(threshold {occurrence_n}). {_occurrence_criteria(rule)}"
+                    )
+                    if _open_alert(
+                        db, rule, key, title, detail, printer=printer,
+                        candidates=candidates, now=now, runtime=runtime,
+                        stats=stats,
+                        # Two departures from the other condition types, both
+                        # because a rate alert's content IS its number. See
+                        # _open_alert and _revive_flapping_alert for the full
+                        # reasoning.
+                        cooldown_cap_min=occurrence_window,
+                        refresh_detail=True,
+                    ):
+                        opened += 1
+                elif count > occurrence_floor:
+                    live = _find_open_alert(db, key)
+                    if live is not None:
+                        # Inside the recovery margin with the alert still live:
+                        # keep the key active so the resolve pass leaves it
+                        # alone, and say on the alert that it is receding rather
+                        # than leaving the opening count on screen.
+                        active_keys.add(key)
+                        live.detail = _flap_suffix(
+                            f"{count} matching event(s) in the last {window_label} — "
+                            f"holding open until it drops below {occurrence_floor:.0f} "
+                            f"(threshold {occurrence_n}). {_occurrence_criteria(rule)}",
+                            live.flap_count or 0,
+                            _flap_cooldown_minutes(runtime, occurrence_window),
+                        )
+
     # Pass the unwrapped candidate channels so a resolved alert's FreeScout
     # ticket can be auto-closed (route metadata isn't needed to close a ticket).
     close_channels = [rc.channel for rc in candidates]
-    resolved = _resolve_stale(db, active_keys, close_channels)
+    resolved = _resolve_stale(db, active_keys, close_channels, now=now)
     # Flush the resolutions so the escalation query (run on a session with
     # autoflush off) doesn't re-notify alerts we just resolved this same pass.
     db.flush()
@@ -706,7 +1140,15 @@ def _component_schedule_printers(db: Session, sched: m.MaintenanceSchedule):
     if sched.printer_id:
         stmt = stmt.where(m.Printer.id == sched.printer_id)
     elif sched.model:
-        stmt = stmt.where(m.Printer.model.ilike(f"%{sched.model}%"))
+        # Escaped, for the same reason the comment on _LIKE_ESCAPE gives about
+        # match codes: a model of "%" is not a match-everything request, it is an
+        # operator typo, and silently widening one component schedule to the
+        # whole approved fleet produces maintenance alerts nobody asked for on
+        # printers the schedule was never about. This was the one ilike in the
+        # codebase that skipped the helper sitting directly above it.
+        stmt = stmt.where(
+            m.Printer.model.ilike(_like_contains(sched.model), escape=_LIKE_ESCAPE)
+        )
     return db.scalars(stmt)
 
 
@@ -744,6 +1186,7 @@ def check_maintenance_due(db: Session, now: Optional[datetime] = None) -> dict:
         )
         db.add(alert)
         db.flush()
+        emit_alert_opened(db, alert, printer)
         _notify_alert(
             db, alert, rule=None, printer=printer,
             candidates=candidates, now=now, runtime=runtime,
@@ -753,8 +1196,14 @@ def check_maintenance_due(db: Session, now: Optional[datetime] = None) -> dict:
     for sched in queries.maintenance_due(db, now):
         printer = db.get(m.Printer, sched.printer_id) if sched.printer_id else None
         # Page-threshold schedules also require the page count to be reached.
+        # The target moves forward with each logged service (page_target() =
+        # meter at last service + threshold), which is what both makes such a
+        # schedule recur and lets this pass RESOLVE its alert afterwards: the
+        # gate below stops adding the key to active_keys, and the resolve sweep
+        # at the bottom closes the alert.
         if sched.page_threshold and printer and printer.page_count is not None:
-            if printer.page_count < sched.page_threshold:
+            target = sched.page_target()
+            if target is not None and printer.page_count < target:
                 continue
         due_str = sched.next_due.date().isoformat() if sched.next_due else "due"
         key = f"maintenance:{sched.id}:{due_str}"
@@ -816,6 +1265,7 @@ def check_maintenance_due(db: Session, now: Optional[datetime] = None) -> dict:
             alert.state = m.AlertState.resolved
             alert.resolved_at = now
             _close_ticket_for(alert, close_channels)
+            emit_alert_resolved(db, alert, resolved_at=now)
             resolved += 1
 
     db.commit()
@@ -837,10 +1287,77 @@ FORECAST_MIN_HISTORY_DAYS = 3.0  # ...spanning at least this long (matches RUNWA
 # bound and drags alert latency down with it as a deployment ages. A month is
 # far more than the fit needs (it segments to the current cartridge anyway).
 FORECAST_HISTORY_WINDOW_DAYS = 30
+# The same confidence gate expressed on the PAGES axis. A segment spanning three
+# printed pages has a slope, and it is meaningless -- toner level readings are
+# coarse (many devices report in 1% or 10% steps), so the fit needs enough pages
+# for a real percentage change to have occurred. 50 pages is the floor at which
+# a 1% step is a plausible measurement rather than quantisation noise.
+FORECAST_MIN_PAGES_SPAN = 50.0
+
+
+def _fit_depleting_segment(
+    points: list, min_span: float, refill_tolerance: float = REFILL_TOLERANCE_PCT
+) -> Optional[tuple]:
+    """Least-squares fit of supply level against an increasing axis.
+
+    ``points`` is [(x, level_pct)] where x is any monotonically increasing
+    measure of consumption -- elapsed days for the days-to-empty forecast,
+    cumulative page count for the pages-to-empty one. The maths is identical on
+    both axes, which is exactly why it lives here once: the two forecasts must
+    never be able to disagree about what counts as a refill, a confidence floor,
+    or a depleting series.
+
+    Returns ``(rate_per_x, level_now)`` -- percent consumed per unit of x, and
+    the FITTED level at the last point -- or ``None`` when there is no
+    trustworthy estimate. ``None`` covers: too few points, a segment spanning
+    less than ``min_span``, no variation in x, and a series that is rising or
+    flat rather than depleting.
+
+    A jump UP of more than ``refill_tolerance`` points is a fresh cartridge, and
+    resets the baseline to that index, so a spent cartridge's slope is never
+    averaged against its replacement's. That test lives in
+    ``central.supplies.refill_boundaries`` -- shared with the yield measurement,
+    which needs every boundary rather than only the last one, and which must not
+    be able to disagree with the forecast about what a replacement is.
+    """
+    if len(points) < FORECAST_MIN_POINTS:
+        return None
+    boundaries = refill_boundaries(
+        [lvl for _, lvl in points], refill_tolerance=refill_tolerance
+    )
+    start = boundaries[-1] if boundaries else 0
+    seg = points[start:]
+    if len(seg) < FORECAST_MIN_POINTS:
+        return None
+
+    # x is re-based on the segment's first point. The fit is invariant to this
+    # shift, but the page-count axis carries absolute meter values (hundreds of
+    # thousands), and squaring those in var_x throws away significant digits.
+    x0 = seg[0][0]
+    xs = [x - x0 for x, _ in seg]
+    ys = [lvl for _, lvl in seg]
+    if xs[-1] - xs[0] < min_span:
+        return None  # not enough history to trust the slope yet
+
+    n = len(seg)
+    mean_x = sum(xs) / n
+    mean_y = sum(ys) / n
+    var_x = sum((x - mean_x) ** 2 for x in xs)
+    if var_x <= 0:
+        return None  # every reading at the same x — no slope
+    cov_xy = sum((x - mean_x) * (y - mean_y) for x, y in zip(xs, ys))
+    slope = cov_xy / var_x  # percent change per unit x (negative when depleting)
+    rate = -slope  # percent consumed per unit x
+    if rate <= 0:
+        return None  # not depleting (rising or flat fit)
+
+    intercept = mean_y - slope * mean_x
+    level_now = intercept + slope * xs[-1]  # fitted level at the latest reading
+    return rate, level_now
 
 
 def forecast_days_to_empty(
-    readings: list[tuple[datetime, float]], refill_tolerance: float = 5.0
+    readings: list[tuple[datetime, float]], refill_tolerance: float = REFILL_TOLERANCE_PCT
 ) -> Optional[float]:
     """Days until level→0, from a least-squares fit over the recent depleting segment.
 
@@ -861,41 +1378,74 @@ def forecast_days_to_empty(
     clean linear series, so legacy expectations are unchanged).
     """
     points = sorted([(t, lvl) for t, lvl in readings if lvl is not None], key=lambda p: p[0])
-    if len(points) < FORECAST_MIN_POINTS:
+    if not points:
         return None
-    start = 0
-    for i in range(1, len(points)):
-        if points[i][1] > points[i - 1][1] + refill_tolerance:
-            start = i  # refill detected — baseline resets here
-    seg = points[start:]
-    if len(seg) < FORECAST_MIN_POINTS:
+    t0 = points[0][0]
+    # x in days since the first reading; y in percent remaining.
+    fit = _fit_depleting_segment(
+        [((t - t0).total_seconds() / 86400.0, lvl) for t, lvl in points],
+        min_span=FORECAST_MIN_HISTORY_DAYS,
+        refill_tolerance=refill_tolerance,
+    )
+    if fit is None:
         return None
-
-    t0 = seg[0][0]
-    # x in days since the segment's first reading; y in percent remaining.
-    xs = [(t - t0).total_seconds() / 86400.0 for t, _ in seg]
-    ys = [lvl for _, lvl in seg]
-    span = xs[-1] - xs[0]
-    if span < FORECAST_MIN_HISTORY_DAYS:
-        return None  # not enough elapsed history to trust the slope yet
-
-    n = len(seg)
-    mean_x = sum(xs) / n
-    mean_y = sum(ys) / n
-    var_x = sum((x - mean_x) ** 2 for x in xs)
-    if var_x <= 0:
-        return None  # all readings at the same instant — no slope
-    cov_xy = sum((x - mean_x) * (y - mean_y) for x, y in zip(xs, ys))
-    slope = cov_xy / var_x  # percent change per day (negative when depleting)
-    rate = -slope  # percent consumed per day
-    if rate <= 0:
-        return None  # not depleting (rising or flat fit)
-
-    intercept = mean_y - slope * mean_x
-    level_now = intercept + slope * xs[-1]  # fitted level at the latest reading
+    rate, level_now = fit
     if level_now <= 0:
         return 0.0  # already projected empty
     return round(level_now / rate, 1)
+
+
+def forecast_pages_to_empty(
+    readings: list, refill_tolerance: float = REFILL_TOLERANCE_PCT
+) -> Optional[float]:
+    """Pages until level→0, fitting supply level against the printer's page meter.
+
+    ``readings`` is [(page_count, level_pct)]. This is deliberately a SEPARATE
+    measure rather than ``days_to_empty * pages_per_day``, because the two answer
+    different questions and the derived version inherits the weakness of the one
+    it is derived from. Days-remaining is volatile -- a quiet week inflates it,
+    a month-end run collapses it. Pages-remaining is a property of the cartridge:
+    "about 400 pages left" means the same thing on a busy device and an idle one,
+    it is directly comparable against the yield a cartridge is sold by, and it
+    does not move when the customer simply stops printing for a fortnight.
+
+    A page meter that goes BACKWARDS is a meter reset or a replaced formatter
+    board, not negative printing; everything before the drop is discarded rather
+    than fitted through, which would otherwise produce a confidently wrong
+    negative consumption rate.
+
+    Returns ``None`` on the same terms as ``forecast_days_to_empty``: an
+    untrustworthy estimate is no estimate. In particular a printer that has not
+    printed since the cartridge went in has no page-based rate at all (no
+    variation in x), which is correct -- not "it will last forever".
+    """
+    # Input arrives in TIME order (that is how the caller reads it), which is what
+    # makes a meter reset detectable at all: sorting by page count first would
+    # silently interleave the post-reset readings among the pre-reset ones and
+    # hide the discontinuity completely.
+    raw = [
+        (float(pages), float(lvl))
+        for pages, lvl in readings
+        if pages is not None and lvl is not None
+    ]
+    start = 0
+    for i in range(1, len(raw)):
+        if raw[i][0] < raw[i - 1][0]:
+            start = i  # meter reset — everything before this is a different series
+    points = sorted(raw[start:], key=lambda p: p[0])
+    fit = _fit_depleting_segment(
+        points,
+        min_span=FORECAST_MIN_PAGES_SPAN,
+        refill_tolerance=refill_tolerance,
+    )
+    if fit is None:
+        return None
+    rate, level_now = fit
+    if level_now <= 0:
+        return 0.0  # already projected empty
+    # Whole pages: a tenth of a page is not a thing, and the false precision
+    # would read as a measurement rather than an estimate.
+    return float(round(level_now / rate))
 
 
 def forecast_supplies(db: Session, now: Optional[datetime] = None) -> dict:
@@ -903,11 +1453,15 @@ def forecast_supplies(db: Session, now: Optional[datetime] = None) -> dict:
 
     Three things happen per approved printer, per ``(type, color)`` supply:
 
-      1. Fit ``forecast_days_to_empty`` over the supply's reading history.
-      2. Persist the result onto the matching ``Supply`` row
-         (``days_to_empty`` + ``forecast_at``) so dashboards/portal/reports read
-         it instead of re-fitting on every render. A supply with no trustworthy
-         estimate is cleared back to ``None``.
+      1. Fit ``forecast_days_to_empty`` over the supply's reading history, and
+         ``forecast_pages_to_empty`` over the same readings against the page
+         meter. The second costs no extra query: ``page_count`` is a column on
+         the Reading rows this pass is already loading.
+      2. Persist both onto the matching ``Supply`` row (``days_to_empty``,
+         ``pages_to_empty`` + ``forecast_at``) so dashboards/portal/reports and
+         the reorder recommendations read them instead of re-fitting 30 days of
+         readings on every render. A supply with no trustworthy estimate is
+         cleared back to ``None``.
       3. If the estimate is at/under the operator's reorder lead-time
          (``alerts.reorder_lead_days``), open a ``predicted_depletion`` alert
          deduped PER (printer, supply) — not per printer, so a color device
@@ -938,8 +1492,12 @@ def forecast_supplies(db: Session, now: Optional[datetime] = None) -> dict:
         for supply in printer.supplies:
             supplies_by_key[f"{supply.type.value}:{supply.color}"] = supply
 
-        # Build per-(type,color) level series from supply_snapshot history.
+        # Build per-(type,color) level series from supply_snapshot history. Two
+        # series per cartridge off the SAME rows: level against time, and level
+        # against the page meter. Both stay in reading (time) order -- the pages
+        # fit needs that to spot a meter reset.
         series: dict[str, list[tuple[datetime, float]]] = {}
+        page_series: dict[str, list] = {}
         for r in db.scalars(
             select(m.Reading)
             .where(
@@ -955,13 +1513,19 @@ def forecast_supplies(db: Session, now: Optional[datetime] = None) -> dict:
                     continue
                 key = f"{snap.get('type')}:{snap.get('color')}"
                 series.setdefault(key, []).append((_aware(r.ts), float(lvl)))
+                if r.page_count is not None:
+                    page_series.setdefault(key, []).append((r.page_count, float(lvl)))
 
         for key, pts in series.items():
             supply = supplies_by_key.get(key)
             dte = forecast_days_to_empty(pts)
+            pte = forecast_pages_to_empty(page_series.get(key) or [])
             # Persist onto the supply row (None clears a stale estimate).
             if supply is not None:
                 supply.days_to_empty = dte
+                supply.pages_to_empty = pte
+                # forecast_at continues to stamp the DAYS estimate specifically,
+                # which is what every existing reader of it means by it.
                 supply.forecast_at = now if dte is not None else None
                 if dte is not None:
                     forecasted += 1
@@ -1012,6 +1576,17 @@ def retry_deliveries(db: Session, now: Optional[datetime] = None) -> dict:
     return _retry_due(db, load_settings(db), now or _now())
 
 
+def deliver_events(db: Session, now: Optional[datetime] = None) -> dict:
+    """POST every due outbound event to its subscribers, with backoff.
+
+    Shares the notification path's backoff and dead-letter policy rather than
+    owning a second one (see central.events.delivery). Bounded per cycle, because
+    a backlog against one dead subscriber must not spend the cycle that also has
+    alerts to deliver. Also prunes fully-delivered events past their retention.
+    """
+    return _deliver_events(db, load_settings(db), now or _now())
+
+
 def flush_quiet_hours(db: Session, now: Optional[datetime] = None) -> dict:
     """Deliver notifications held by a quiet-hours window, batched into a digest.
 
@@ -1058,6 +1633,7 @@ def _open_forecast_alert(
     )
     db.add(alert)
     db.flush()  # assign alert.id
+    emit_alert_opened(db, alert, printer)
     _notify_alert(
         db, alert, rule=None, printer=printer,
         candidates=candidates or [], now=now, runtime=runtime,
@@ -1092,6 +1668,7 @@ def _resolve_stale_forecasts(
             _close_ticket_for(alert, channels)
             alert.state = m.AlertState.resolved
             alert.resolved_at = now
+            emit_alert_resolved(db, alert, resolved_at=now)
             resolved += 1
     return resolved
 
@@ -1142,3 +1719,237 @@ def sync_directories(db: Session, now: Optional[datetime] = None) -> dict:
     if not ran:
         return {}
     return {"directory_sync": {"ran": ran, "ok": ok, "failed": failed}}
+
+
+# --------------------------------------------------------------------------- #
+# Outbound supply-reorder events (RECOMMEND-ONLY -- see central.reorder)
+# --------------------------------------------------------------------------- #
+# Machine state, not operator config: a plain app_settings row rather than a
+# Spec, exactly like the report send markers in central.reports. load_settings
+# ignores non-Spec keys, so it never leaks into the Settings UI.
+REORDER_EMIT_MARKER = "reorder.last_emit_at"
+
+
+def publish_reorder_recommendations(
+    db: Session, now: Optional[datetime] = None
+) -> dict:
+    """Publish ``supply.reorder_recommended`` for every currently-recommended supply.
+
+    Interval-gated (``reorder.emit_interval_min``, default daily) off a marker
+    row. The worker cycles every 60 seconds and the recommendation set is stable
+    for days at a time, so publishing every cycle would send an ERP the same
+    facts 1,440 times a day. Each event still carries a stable ``dedupe_key``, so
+    a consumer can recognise a repeat regardless of cadence.
+
+    Nothing here writes a recommendation anywhere. The marker records only WHEN
+    we last published -- it is notification bookkeeping of the same kind as the
+    report send markers, not order state, and it must stay that way.
+
+    Off by default: with no event bus installed, and with publishing a
+    customer's fleet to an external system being an opt-in decision, the honest
+    outcome of a default install is "nothing was sent", reported as such.
+    """
+    from central import reorder as _reorder
+
+    settings = load_settings(db)
+    if not settings.get("reorder.emit_events", False):
+        return {"reorder_events": "disabled"}
+
+    now = _aware(now) or _now()
+    try:
+        interval = max(1, int(settings.get("reorder.emit_interval_min", 1440)))
+    except (TypeError, ValueError):
+        interval = 1440
+    last_raw = db.get(m.AppSetting, REORDER_EMIT_MARKER)
+    if last_raw is not None and last_raw.value:
+        try:
+            last = _aware(datetime.fromisoformat(last_raw.value))
+        except ValueError:
+            last = None  # hand-edited/corrupt marker: publish rather than wedge
+        if last is not None and last > now - timedelta(minutes=interval):
+            return {}
+
+    recs = _reorder.recommendations(
+        db, thresholds=_reorder.ReorderThresholds.from_runtime(settings)
+    )
+    result = _reorder.publish_recommendations(db, recs)
+    # The marker moves only when something was actually transmitted. A run that
+    # published nothing because the bus is absent must not consume the interval
+    # -- that would silently swallow the first real window after it is installed.
+    if result.published:
+        if last_raw is None:
+            db.add(m.AppSetting(key=REORDER_EMIT_MARKER, value=now.isoformat()))
+        else:
+            last_raw.value = now.isoformat()
+        db.commit()
+    return {"reorder_events": result.as_dict()}
+
+
+# --------------------------------------------------------------------------- #
+# Cartridge cycles: the measurement behind yield-gap detection
+# --------------------------------------------------------------------------- #
+# Machine state, not operator config -- a plain app_settings row, like the
+# reorder emit marker above and the report send markers in central.reports.
+# load_settings ignores non-Spec keys, so it never surfaces in the Settings UI.
+YIELD_SCAN_MARKER = "yield.last_scan_at"
+
+
+def scan_supply_cycles(db: Session, now: Optional[datetime] = None) -> dict:
+    """Fold new readings into cartridge cycles, and report yield shortfalls.
+
+    Interval-gated (``yield.scan_interval_min``, default 6 hours) off a marker
+    row. A cartridge change is a monthly-grade event and each pass reads only
+    what arrived since the last one, so running this on the 60-second cycle
+    would buy nothing and cost a query per printer per minute.
+
+    **Per printer, committed per printer.** A malformed snapshot on one device
+    must not cost the rest of the fleet its cartridge history, and a cycle
+    half-written is worse than one not written -- the next pass would resume from
+    a watermark whose pages had already been counted.
+
+    Events are opt-in (``yield.emit_events``, default off) and are emitted only
+    for cartridges this pass actually closed, plus the standing shortfalls, so a
+    consumer sees each replacement exactly once. With the bus uninstalled or the
+    setting off, nothing is transmitted and the result says so rather than
+    reporting a send that did not happen.
+    """
+    from central import supply_yield as _yield
+
+    settings = load_settings(db)
+    thresholds = _yield.YieldThresholds.from_runtime(settings)
+    if not thresholds.enabled:
+        return {"supply_cycles": "disabled"}
+
+    now = _aware(now) or _now()
+    marker = db.get(m.AppSetting, YIELD_SCAN_MARKER)
+    if marker is not None and marker.value:
+        try:
+            last = _aware(datetime.fromisoformat(marker.value))
+        except ValueError:
+            last = None  # hand-edited/corrupt marker: scan rather than wedge
+        if last is not None and last > now - timedelta(
+            minutes=thresholds.scan_interval_min
+        ):
+            return {}
+
+    totals = {"points": 0, "extended": 0, "opened": 0, "closed": 0}
+    closed_ids: list = []
+    scanned = 0
+    for printer in db.scalars(
+        select(m.Printer).where(
+            m.Printer.discovery_state == m.DiscoveryState.approved
+        )
+    ):
+        try:
+            scan = _yield.scan_printer(db, printer, now=now, runtime=settings)
+            db.commit()
+            # Read AFTER the commit: the ids only exist once the INSERTs have
+            # run, and a scan whose transaction failed must contribute no
+            # replacements to announce.
+            closed_ids.extend(cycle.id for cycle in scan.closed)
+        except Exception:  # noqa: BLE001 -- one printer must not stop the fleet
+            db.rollback()
+            log.exception("supply-cycle scan failed for printer %s", printer.id)
+            continue
+        scanned += 1
+        counts = scan.counts
+        for key in totals:
+            totals[key] += counts[key]
+
+    if marker is None:
+        db.add(m.AppSetting(key=YIELD_SCAN_MARKER, value=now.isoformat()))
+    else:
+        marker.value = now.isoformat()
+    db.commit()
+
+    result = {
+        "printers": scanned,
+        "cartridges_replaced": totals["closed"],
+        "cycles_opened": totals["opened"],
+        "readings": totals["points"],
+    }
+    events = _publish_yield_events(
+        db, thresholds, closed_ids=closed_ids, now=now
+    )
+    if events:
+        result["events"] = events
+    return {"supply_cycles": result}
+
+
+def _publish_yield_events(
+    db: Session,
+    thresholds,
+    *,
+    closed_ids: list,
+    now: datetime,
+) -> dict:
+    """Emit ``supply.replaced`` / ``supply.yield_below_expected``, or say why not.
+
+    Separate from the scan so the measurement is never contingent on the bus:
+    with events off (the default) the cartridge history is still recorded, which
+    is what the report reads. Reported as ``{"published": 0, "reason": ...}``
+    rather than as a silent success -- the ``ChannelResult.sent`` rule.
+    """
+    from central import supply_yield as _yield
+    from central.events.emit import (
+        emit_supply_replaced,
+        emit_supply_yield_below_expected,
+    )
+
+    if not thresholds.emit_events:
+        return {"published": 0, "reason": "yield.emit_events is off"}
+
+    published = 0
+    failed = 0
+    for cycle_id in closed_ids:
+        cycle = db.get(m.SupplyCycle, cycle_id)
+        if cycle is None or cycle.printer is None:
+            continue
+        try:
+            if emit_supply_replaced(db, cycle.printer, cycle) is not None:
+                published += 1
+        except Exception:  # noqa: BLE001 -- one bad row must not stop the rest
+            failed += 1
+            log.exception("emitting supply.replaced for cycle %s failed", cycle_id)
+
+    for row in _yield.assessments(db, thresholds=thresholds):
+        if not row.is_below:
+            continue
+        printer = db.get(m.Printer, row.printer_id)
+        if printer is None:
+            continue
+        try:
+            if emit_supply_yield_below_expected(
+                db, printer, row, threshold_pct=thresholds.shortfall_pct,
+                period=now.date().isoformat(),
+            ) is not None:
+                published += 1
+        except Exception:  # noqa: BLE001
+            failed += 1
+            log.exception(
+                "emitting supply.yield_below_expected for %s failed", row.dedupe_key
+            )
+    db.commit()
+    return {"published": published, "failed": failed}
+
+
+def prune_login_attempts(db: Session, now: Optional[datetime] = None) -> dict:
+    """Drop failed-sign-in rows that can no longer affect a throttle decision.
+
+    ``central.ratelimit`` already prunes the two buckets each failure touches, so
+    an install with no worker at all (a bare ``uvicorn`` dev box) stays bounded.
+    This exists for the keys nobody comes back to: a spray of ten thousand
+    invented usernames leaves ten thousand buckets that will never be read again,
+    and nothing else would ever delete them.
+
+    Deliberately not a substitute for the audit log -- the ``login.failed`` rows
+    are the forensic record and are untouched by this.
+    """
+    from central import ratelimit
+
+    now = _aware(now) or _now()
+    policy = ratelimit.Policy.from_settings(load_settings(db))
+    removed = ratelimit.prune(db, policy=policy, now=now)
+    if removed:
+        db.commit()
+    return {"login_attempts_pruned": removed}

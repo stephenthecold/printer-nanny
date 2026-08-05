@@ -11,6 +11,16 @@ __pycache__
 *.db
 .env
 .env.*
+# The generated SECRET_KEY. .gitignore calls this out by name as a live
+# credential -- it lands in the repo root after any local alembic/seed/uvicorn
+# run -- and `COPY . .` was baking it into a shared image layer, recoverable by
+# anyone with `docker save` or registry pull access. The container never READS
+# it (on Postgres there is nowhere to persist one), so this is disclosure into a
+# distributable artifact rather than a runtime weakening -- but it is exactly
+# the failure .gitignore was written to prevent, missed one file over.
+.printer-nanny-secret-key
+# Its own example shows an operator putting a Postgres URL with a password here.
+docker-compose.override.yml
 htmlcov
 .coverage
 .DS_Store

@@ -31,7 +31,7 @@
   {% if new_key %}
     <div class="{{ c.note('warning', 'mb-4') }}">
       <p class="font-medium">Copy this key now — it is not shown again.</p>
-      <code class="mt-2 block break-all rounded bg-slate-900 px-3 py-2 font-mono text-xs text-slate-100">{{ new_key }}</code>
+      <code class="mt-2 block break-all rounded bg-slate-900 px-3 py-2 font-mono text-xs text-slate-100">{{ new_key.key }}</code>
       <p class="mt-2 text-xs">Bake it into this client's installer as <code>PN_ENROLL_KEY</code>. It can only enroll machines — it cannot read your fleet.</p>
     </div>
   {% endif %}
@@ -65,6 +65,7 @@
           <td class="{{ c.td_cls('right') }}">
             {% if k.live %}
             <form method="post" action="/manage/machines/keys/{{ k.id }}/revoke" class="inline">
+              {{ csrf_field() }}
               <button type="submit" class="{{ c.btn('danger', 'sm') }}"
                       aria-label="Revoke enrollment key {{ k.label }}">Revoke</button>
             </form>
@@ -79,6 +80,7 @@
   </div>
 
   <form method="post" action="/manage/machines/keys/create" class="mt-4 flex flex-wrap items-end gap-3">
+    {{ csrf_field() }}
     <input type="hidden" name="client_id" value="{{ client.id }}">
     <div class="min-w-0 grow">
       {{ c.field('label', 'Label', placeholder='%s workstations' % client.name) }}
@@ -129,6 +131,7 @@
           <td class="{{ c.td_cls() }}">{{ (pkg.size / 1048576) | round(1) }} MB</td>
           <td class="{{ c.td_cls('right') }}">
             <form method="post" action="/manage/machines/drivers/{{ pkg.id }}/delete" class="inline">
+              {{ csrf_field() }}
               <button type="submit" class="{{ c.btn('danger', 'sm') }}"
                       aria-label="Delete driver package {{ pkg.name }}">Delete</button>
             </form>
@@ -143,6 +146,7 @@
 
   <form method="post" action="/manage/machines/drivers/upload" enctype="multipart/form-data"
         class="mt-4 grid gap-3 sm:grid-cols-2">
+    {{ csrf_field() }}
     <input type="hidden" name="client_id" value="{{ client.id }}">
     {{ c.field('name', 'Label', placeholder='Brother HL-L2350DW v1.2.3') }}
     {{ c.field('driver_name', 'Driver name', required=True,
@@ -200,6 +204,7 @@
   </p>
   {% if msi_available %}
     <form method="post" action="/manage/machines/msi">
+      {{ csrf_field() }}
       <input type="hidden" name="client_id" value="{{ client.id }}">
       <button type="submit" class="{{ c.btn('primary') }}">Download Windows MSI</button>
     </form>
@@ -232,6 +237,7 @@
   </div>
   {% if pkg_available %}
     <form method="post" action="/manage/machines/pkg">
+      {{ csrf_field() }}
       <input type="hidden" name="client_id" value="{{ client.id }}">
       <button type="submit" class="{{ c.btn('primary') }}">Download macOS bundle</button>
     </form>
@@ -275,6 +281,7 @@
                 <span>{{ printer.display_name or printer.ip }}</span>
                 {% if is_default %}{{ c.badge('default', 'success') }}{% endif %}
                 <form method="post" action="/manage/machines/unassign" class="inline">
+                  {{ csrf_field() }}
                   <input type="hidden" name="machine_id" value="{{ mach.id }}">
                   <input type="hidden" name="printer_id" value="{{ printer.id }}">
                   <button type="submit" class="{{ c.btn('subtle', 'sm') }}"
@@ -287,6 +294,7 @@
             {% endfor %}
 
             <form method="post" action="/manage/machines/assign" class="mt-2 flex flex-wrap items-center gap-2">
+              {{ csrf_field() }}
               <input type="hidden" name="machine_id" value="{{ mach.id }}">
               <label class="sr-only" for="printer-{{ mach.id }}">Printer to assign to {{ mach.name or 'this machine' }}</label>
               <select id="printer-{{ mach.id }}" name="printer_id" class="{{ c.input_sm_cls() }}">
@@ -310,6 +318,7 @@
           <td class="{{ c.td_cls('right') }}">
             <div class="flex flex-wrap justify-end gap-2">
               <form method="post" action="/manage/machines/{{ mach.id }}/default-wins" class="inline">
+                {{ csrf_field() }}
                 <input type="hidden" name="default_wins" value="{{ '0' if mach.default_wins else '1' }}">
                 <button type="submit" class="{{ c.btn('subtle', 'sm') }}"
                         aria-label="{{ 'Stop' if mach.default_wins else 'Let' }} {{ mach.name or 'this machine' }} {{ 'overriding' if mach.default_wins else 'override' }} personal defaults">
@@ -317,6 +326,7 @@
                 </button>
               </form>
               <form method="post" action="/manage/machines/{{ mach.id }}/active" class="inline">
+                {{ csrf_field() }}
                 <input type="hidden" name="active" value="{{ '0' if mach.active else '1' }}">
                 <button type="submit" class="{{ c.btn('warning' if mach.active else 'success', 'sm') }}"
                         aria-label="{{ 'Retire' if mach.active else 'Reactivate' }} {{ mach.name or 'this machine' }}">

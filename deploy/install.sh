@@ -566,8 +566,11 @@ esac
 cat <<EOF
 
   Printer Nanny is up: ${ENTRY}
-  Login: admin / admin   ← change this password immediately
-                           (Settings → Users, or /manage)
+  Login: admin
+  Password: generated on first boot and printed ONCE in the api log --
+            run: docker compose logs api | grep -A3 "password:"
+            You must change it at first sign-in.
+            (Set PN_ADMIN_PASSWORD in .env before first boot to choose it.)
 
   Logs:    docker compose logs -f api worker
   Stop:    docker compose down

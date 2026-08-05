@@ -12,8 +12,27 @@ from central.config import settings
 from central.db import Base
 import central.models  # noqa: F401  (register models on Base.metadata)
 
+from migrations.guard import install_downgrade_preflight, install_drop_table_guard
+
+# Every downgrade in this tree drops tables that revision 0001 -- not the
+# revision doing the dropping -- created, because 0001 is create_all(). Their
+# has_table guards check existence, not authorship, so they cannot tell the
+# difference and the drop proceeds. Installed here rather than in seventeen
+# downgrade() bodies so a revision written later is covered without its author
+# knowing this exists. See migrations/guard.py for the measured failure.
+install_drop_table_guard()
+
 config = context.config
-config.set_main_option("sqlalchemy.url", settings.database_url)
+# Deliberately NOT `config.set_main_option("sqlalchemy.url", settings.database_url)`.
+# That writes through ConfigParser, whose BasicInterpolation treats `%` as a
+# directive -- so any percent-encoded character in a password (`p%40ss`, entirely
+# normal in a Postgres URL) makes `alembic upgrade head` die at import time with
+# `ValueError: invalid interpolation syntax`, before a single migration runs. The
+# option is also never read: alembic core never consults `sqlalchemy.url` itself,
+# `fileConfig` below is handed a *filename* and re-parses alembic.ini from disk so
+# it cannot see an in-memory option, and both paths here carry the URL themselves
+# -- offline passes it to `context.configure(url=...)`, online assigns it onto the
+# plain dict `get_section()` returns. Keep the URL out of ConfigParser.
 if config.config_file_name:
     fileConfig(config.config_file_name)
 
@@ -41,6 +60,11 @@ def run_migrations_online() -> None:
             target_metadata=target_metadata,
             render_as_batch=settings.is_sqlite,
         )
+        # Before any step runs, not partway through: SQLite commits implicitly
+        # around DDL, so a refusal raised mid-run leaves the database stranded
+        # between revisions. Offline mode is deliberately not guarded -- it
+        # writes SQL to stdout and touches no database.
+        install_downgrade_preflight(context, connection, target_metadata)
         with context.begin_transaction():
             context.run_migrations()
 

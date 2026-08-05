@@ -1,0 +1,192 @@
+{% extends "base.html" %}
+{% from "_components.html" import badge, btn, card_cls, empty_row, field, note,
+        page_title, section_title, select_field, table_cls, table_wrap,
+        td_cls, th_cls, thead_cls, tr_cls %}
+{% block title %}Alert rules · {{ app.name or 'Printer Nanny' }}{% endblock %}
+{% block body %}
+{{ page_title('Alert rules',
+   'What raises an alert. Every condition here except the last asks “is this true right now”; an occurrence-rate rule asks “has this happened too often lately”.') }}
+
+{% if flash %}
+<div role="status" class="{{ note('warning', 'mb-4') }}">{{ flash }}</div>
+{% endif %}
+
+<div class="grid lg:grid-cols-3 gap-6">
+  <section class="{{ card_cls('none', 'lg:col-span-2') }}">
+    <div class="px-4 py-3 border-b font-semibold">Rules</div>
+    <div class="{{ table_wrap() }}">
+      <table class="{{ table_cls() }}">
+        <thead class="{{ thead_cls() }}">
+          <tr>
+            <th class="{{ th_cls() }}">Rule</th>
+            <th class="{{ th_cls() }}">Condition</th>
+            <th class="{{ th_cls() }}">Applies to</th>
+            <th class="{{ th_cls() }}">Raises</th>
+            <th class="{{ th_cls('right') }}"><span class="sr-only">Actions</span></th>
+          </tr>
+        </thead>
+        <tbody>
+          {% for r in rules %}
+          <tr class="{{ tr_cls('align-top') }}{{ ' opacity-50' if not r.enabled }}">
+            <td class="{{ td_cls() }}">
+              <div class="font-medium">{{ r.name }}</div>
+              {% if not r.enabled %}{{ badge('disabled', 'muted') }}{% endif %}
+            </td>
+            <td class="{{ td_cls() }}">
+              <div>{{ condition_labels.get(r.condition_type.value, r.condition_type.value) }}</div>
+              {% if r.condition_type.value == 'occurrence_rate' %}
+              <div class="text-xs text-slate-500 tabular-nums">
+                {{ r.threshold | round | int }}× in {{ fmt_window(r.window_minutes) }}
+              </div>
+              <div class="text-xs text-slate-400">
+                {% if r.match_code %}code contains “{{ r.match_code }}”{% else %}any event{% endif %}{#
+                #}{% if r.match_min_severity %}, {{ r.match_min_severity.value }} and above{% endif %}
+              </div>
+              {% elif r.threshold is not none %}
+              <div class="text-xs text-slate-500 tabular-nums">
+                {{ r.threshold | round(1) }} {{ threshold_unit(r) or '' }}
+              </div>
+              {% endif %}
+            </td>
+            <td class="{{ td_cls() }} text-xs">
+              {% if r.scope.value == 'global' %}
+              <span class="text-slate-600">all clients</span>
+              {% else %}
+              <span class="text-slate-600">{{ r.scope.value }}</span>
+              <div class="text-slate-400">
+                {%- if r.scope.value == 'client' -%}
+                  {%- for c in clients %}{% if c.id == r.scope_id %}{{ c.name }}{% endif %}{% endfor -%}
+                {%- elif r.scope.value == 'site' -%}
+                  {%- for s in sites %}{% if s.id == r.scope_id %}{{ s.name }}{% endif %}{% endfor -%}
+                {%- else -%}
+                  {%- for p in printers %}{% if p.id == r.scope_id %}{{ p.display_name or p.model or p.ip }}{% endif %}{% endfor -%}
+                {%- endif -%}
+              </div>
+              {% endif %}
+            </td>
+            <td class="{{ td_cls() }}">
+              {{ badge(r.severity.value, 'error' if r.severity.value == 'critical' else ('warning' if r.severity.value == 'warning' else 'info')) }}
+            </td>
+            <td class="{{ td_cls('right') }}">
+              <form method="post" action="/manage/alert-rules/{{ r.id }}/toggle" class="inline">
+                {{ csrf_field() }}
+                <button class="{{ btn('subtle', 'sm') }}">{{ 'Disable' if r.enabled else 'Enable' }}</button>
+              </form>
+              <form method="post" action="/manage/alert-rules/{{ r.id }}/delete" class="inline"
+                    data-name="{{ r.name }}"
+                    onsubmit="return confirm('Delete rule ' + this.dataset.name + '? Its open alerts resolve on the next worker cycle.');">
+                {{ csrf_field() }}
+                <button class="{{ btn('danger', 'sm') }}">Delete</button>
+              </form>
+            </td>
+          </tr>
+          {% else %}
+          {{ empty_row(5, 'No alert rules — nothing on the fleet will ever raise an alert.') }}
+          {% endfor %}
+        </tbody>
+      </table>
+    </div>
+
+    <div class="px-4 py-3 border-t">
+      <div class="{{ note('muted') }}">
+        <p class="font-medium">How an occurrence-rate rule behaves</p>
+        <ul class="mt-1 list-disc list-inside space-y-0.5">
+          <li>
+            The window <strong>rolls</strong>: the count is always “since
+            <em>now</em> minus the window”, so occurrences age out on their own.
+          </li>
+          <li>
+            It clears with a margin, not on the first dip — currently
+            <span class="tabular-nums">{{ clear_margin_pct | round | int }}%</span>
+            below the count (Settings → Alerts). Resolving the instant one
+            occurrence ages out is how flapping starts.
+          </li>
+          <li>
+            While the alert is open its detail is <strong>rewritten each cycle
+            with the current count</strong>, so it never sits there claiming a
+            number the printer left behind hours ago.
+          </li>
+          <li>
+            The flap cooldown ({{ flap_cooldown_min }}m) folds a quick re-fire
+            back into one incident — but for these rules it is capped at the
+            rule's own window, because two firings that share no counted event
+            are not the same incident.
+          </li>
+        </ul>
+      </div>
+    </div>
+  </section>
+
+  <section class="{{ card_cls() }}">
+    {{ section_title('Add a rule') }}
+    <form method="post" action="/manage/alert-rules" class="space-y-3 text-sm">
+      {{ csrf_field() }}
+      {{ field('name', 'Name', required=True, placeholder='Jams — more than 10 a day') }}
+
+      {% call select_field('condition_type', 'Condition', required=True) %}
+        {% for value, label in condition_labels.items() %}
+        <option value="{{ value }}"{{ ' selected' if value == 'occurrence_rate' }}>{{ label }}</option>
+        {% endfor %}
+      {% endcall %}
+
+      {{ field('threshold', 'Threshold', type='number', step='any', min='0',
+               placeholder='10',
+               help='Percent, minutes, or — for an occurrence-rate rule — the number of occurrences.') }}
+
+      <fieldset class="border rounded p-2 space-y-2">
+        <legend class="text-xs text-slate-500 px-1">Occurrence rate only</legend>
+        <div class="flex gap-2">
+          <div class="flex-1">
+            {{ field('window_amount', 'Window', type='number', min='1', value='24',
+                     placeholder='24') }}
+          </div>
+          <div class="flex-1">
+            {% call select_field('window_unit', 'Unit') %}
+              <option value="minutes">minutes</option>
+              <option value="hours" selected>hours</option>
+              <option value="days">days</option>
+            {% endcall %}
+          </div>
+        </div>
+        {{ field('match_code', 'Event code contains', placeholder='jam',
+                 help='Case-insensitive. The agent records codes like “jammed”, “door-open”, “low-toner”, so “jam” is enough. Leave blank to count every event.') }}
+        {% call select_field('match_min_severity', 'Only count severity') %}
+          <option value="">Any severity (includes info)</option>
+          <option value="warning" selected>Warning and above</option>
+          <option value="critical">Critical only</option>
+        {% endcall %}
+        <p class="text-xs text-slate-400">
+          Longest windows are capped at {{ max_window_days }} days.
+        </p>
+      </fieldset>
+
+      {% call select_field('scope', 'Applies to') %}
+        <option value="global">All clients</option>
+        <option value="client">One client</option>
+        <option value="site">One site</option>
+        <option value="printer">One printer</option>
+      {% endcall %}
+      {% call select_field('scope_id', 'Scope target') %}
+        <option value="">— target (for client/site/printer) —</option>
+        {% for c in clients %}<option value="{{ c.id }}">client: {{ c.name }}</option>{% endfor %}
+        {% for s in sites %}<option value="{{ s.id }}">site: {{ s.name }}</option>{% endfor %}
+        {% for p in printers %}<option value="{{ p.id }}">printer: {{ p.display_name or p.model or p.ip }}</option>{% endfor %}
+      {% endcall %}
+
+      {% call select_field('severity', 'Raise the alert as',
+                           help='The severity of the alert this rule opens — which is also what a quiet-hours window measures break-through against.') %}
+        <option value="info">Info</option>
+        <option value="warning" selected>Warning</option>
+        <option value="critical">Critical</option>
+      {% endcall %}
+
+      <button class="{{ btn('accent', 'md', 'w-full') }}">Add rule</button>
+    </form>
+    <p class="text-xs text-slate-400 mt-3">
+      Notification routing, quiet hours and the recovery margins live under
+      <a href="/settings?group=alerts" class="text-sky-700 hover:underline">Settings → Alerts</a>
+      and <a href="/manage/suppression" class="text-sky-700 hover:underline">Quiet hours</a>.
+    </p>
+  </section>
+</div>
+{% endblock %}

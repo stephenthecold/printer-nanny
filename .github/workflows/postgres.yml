@@ -1,0 +1,158 @@
+name: Postgres
+
+# Production runs on PostgreSQL. Until this job existed, CI did not: the whole
+# suite ran on SQLite, so every path that only exists on Postgres was executed
+# for the first time on a customer's server.
+#
+# Concretely, these had zero coverage:
+#   * the BRIN index on readings.ts (migration 0002 is dialect-guarded)
+#   * pg_try_advisory_lock leader election (a no-op on SQLite, so the "second
+#     worker skips the cycle" contract was never once asserted)
+#   * pg_dump --format=custom / pg_restore --clean (both subprocess seams were
+#     monkeypatched away in tests/test_backup_routes.py)
+#   * real Alembic runs -- SQLite migrates under render_as_batch and Postgres
+#     does not, so a migration can pass there and fail here
+#
+# Writing the tests this job runs found two shipped defects immediately: a
+# fresh `alembic upgrade head` could not build the schema at all, and the
+# backup path handed pg_dump a URL libpq does not understand and produced a
+# zero-byte "backup". Neither was visible from SQLite.
+#
+# NOT path-filtered, unlike the Windows (2x) and macOS (10x) jobs. Linux runner
+# minutes bill at 1x, so the cost discipline that makes those two selective does
+# not apply here -- and a filter would be actively wrong: the defects above lived
+# in central/models.py and central/dashboard/backup_routes.py, files no
+# Postgres-shaped path filter would plausibly have listed. The next phase of work
+# (retention/rollup) is BRIN- and partitioning-shaped, which is exactly when this
+# needs to be running on every change rather than on the ones someone guessed.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  postgres:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    services:
+      postgres:
+        # Pinned to the same major docker-compose.yml defaults to
+        # (POSTGRES_IMAGE:-postgres:16-alpine). Testing against a different major
+        # than production ships would be a different question than the one asked.
+        image: postgres:16-alpine
+        env:
+          POSTGRES_USER: nanny
+          POSTGRES_PASSWORD: nanny
+          POSTGRES_DB: printer_nanny_test
+        ports:
+          - 5432:5432
+        # Without this the job races the server's first-boot initdb and fails
+        # at collection with "connection refused" -- which reads as a broken
+        # test rather than a container that was not up yet.
+        options: >-
+          --health-cmd "pg_isready -U nanny -d printer_nanny_test"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+
+    env:
+      # Deliberately not DATABASE_URL: tests/conftest.py drops and truncates
+      # every table it can see, so it refuses to honour an ambient database URL.
+      # This variable has to be set on purpose, and exists nowhere else.
+      PN_TEST_DATABASE_URL: postgresql+psycopg://nanny:nanny@localhost:5432/printer_nanny_test
+
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          # One version, not the 3.9/3.12 matrix ci.yml runs. The floor-compat
+          # question is about Python, and ci.yml already answers it; this job's
+          # question is about the database. 3.12 is what the Docker image runs.
+          python-version: "3.12"
+
+      - name: Install
+        run: |
+          python -m pip install --upgrade pip
+          pip install -e ".[dev,agent,postgres]"
+
+      - name: Install the Postgres client tools
+        # tests/test_postgres_paths.py runs the REAL pg_dump and pg_restore
+        # against the service container -- the backup feature had never been
+        # executed by anything. Noble ships postgresql-client-16 in its own
+        # repos, so no PGDG source is needed.
+        #
+        # The major matters: pg_dump refuses to dump from a server NEWER than
+        # itself ("aborting because of server version mismatch"). Pinning the
+        # client to the same major as the service is what keeps that from
+        # surfacing as a mystery failure the day a runner image changes.
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y postgresql-client-16
+          echo "/usr/lib/postgresql/16/bin" >> "$GITHUB_PATH"
+
+      - name: Report the database environment
+        # Printed unconditionally, in the spirit of the Windows job: when a
+        # future image moves a version, this output is what turns "mystery
+        # failure" into "the client major no longer matches the server".
+        run: |
+          pg_dump --version
+          pg_restore --version
+          psql "postgresql://nanny:nanny@localhost:5432/printer_nanny_test" -c 'SELECT version();'
+          python -c "import psycopg; print('psycopg', psycopg.__version__)"
+
+      - name: Lint (ruff)
+        run: ruff check central agent tests scripts migrations
+
+      - name: Test (pytest, against Postgres)
+        run: pytest
+
+      - name: Prove the Postgres-only tests actually ran
+        # The failure mode this whole job exists to end is a green run that
+        # exercised nothing. Every test that needs a server is marked
+        # postgres_only and SKIPS without one, and the pg_dump round trip skips
+        # again without the binaries -- so a misconfigured job would go green
+        # while proving less than the SQLite one did.
+        #
+        # Any skip here is therefore fatal, not informational.
+        run: |
+          set -o pipefail
+          pytest -m postgres_only -rs --no-header | tee /tmp/pg-only.log
+          if grep -qE '[0-9]+ skipped' /tmp/pg-only.log; then
+            echo "::error::postgres_only tests were SKIPPED -- this job proved nothing"
+            exit 1
+          fi
+          grep -qE '[0-9]+ passed' /tmp/pg-only.log
+
+      - name: Migrations apply + reverse (Postgres, not SQLite)
+        # ci.yml runs this against SQLite, where migrations execute under
+        # render_as_batch (rebuild-the-table) and Postgres's ALTER semantics are
+        # never touched. Run against the real server, on its own database so the
+        # suite's is left alone.
+        env:
+          SECRET_KEY: ci-secret-not-a-real-deployment
+        run: |
+          psql "postgresql://nanny:nanny@localhost:5432/printer_nanny_test" \
+            -c 'CREATE DATABASE printer_nanny_migrations;'
+          export DATABASE_URL="postgresql+psycopg://nanny:nanny@localhost:5432/printer_nanny_migrations"
+          alembic upgrade head
+          alembic downgrade base
+          alembic upgrade head
+
+      - name: Worker cycle against Postgres
+        # The end-to-end smoke this repo requires of every change: seed a real
+        # throwaway database and run the worker, rather than trusting that a
+        # green suite means the thing starts. This is also the only place
+        # try_leader_lock runs outside a test -- on the Postgres branch, taking
+        # and releasing a real advisory lock.
+        env:
+          SECRET_KEY: ci-secret-not-a-real-deployment
+          DATABASE_URL: postgresql+psycopg://nanny:nanny@localhost:5432/printer_nanny_migrations
+        run: |
+          python -m central.seed
+          python -m central.worker.run --once

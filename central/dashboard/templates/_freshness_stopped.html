@@ -1,0 +1,18 @@
+{#
+  Terminal freshness strip: replaces the live one and takes its timer with it.
+
+  Served with HTTP 286, which is htmx's signal to cancel polling on the element
+  it swapped. That matters most for an expired session: without it the poll
+  would follow the redirect to /login and swap an entire login page into a
+  two-centimetre strip, on a timer, forever. It also means an abandoned tab
+  whose session has lapsed stops asking rather than knocking once a minute for
+  the rest of the week.
+
+  Carries no hx-* attributes at all, so nothing can restart it but a reload.
+#}
+{% from "_components.html" import note %}
+<div id="pn-freshness" class="{{ note('muted', 'mb-4 flex items-start gap-2') }}"
+     data-pn-state="none" data-pn-announce="{{ message }}">
+  <span aria-hidden="true">🕒</span>
+  <div class="min-w-0">{{ message }}</div>
+</div>

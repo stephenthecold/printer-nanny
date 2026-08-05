@@ -3,32 +3,32 @@
 from __future__ import annotations
 
 from datetime import datetime, timezone
-from pathlib import Path
 from typing import Optional
 
 from fastapi import APIRouter, Depends, Form, Request
 from fastapi.responses import HTMLResponse, RedirectResponse
-from fastapi.templating import Jinja2Templates
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
 from central import models as m
 from central import queries
+from central import supplies as supplies_lib
+from central.branding import branding_for
+from central.csrf import rotate_token
+from central.dashboard.templating import templates
 from central.db import get_db
+from central.deps import SESSION_EPOCH_KEY, session_user
 from central.health import worker_banner
-from central.runtime import app_branding
-from central.security import hash_password, verify_password
+from central.security import MIN_PASSWORD_LENGTH, hash_password, verify_password
 
 router = APIRouter(tags=["dashboard"])
-_templates = Jinja2Templates(directory=str(Path(__file__).parent / "templates"))
+# One shared Jinja environment (central/dashboard/templating.py): it carries
+# the csrf_field()/csrf_token() globals every form depends on.
+_templates = templates
 
 
 def _user(request: Request, db: Session):
-    uid = request.session.get("user_id")
-    user = db.get(m.User, uid) if uid else None
-    # A deactivated (SCIM-deprovisioned) account is treated as logged out so a
-    # live cookie stops working on its next request, not just at next login.
-    return user if (user is not None and user.active) else None
+    return session_user(request, db)
 
 
 def _login_redirect() -> RedirectResponse:
@@ -40,6 +40,122 @@ def _forbidden_client(user, client_id) -> bool:
     return user.role == m.UserRole.client_readonly and user.client_id != client_id
 
 
+# --- "Data as of ..." freshness strip ---------------------------------------- #
+#: Path the strip polls. One constant so the route, the middleware that keeps it
+#: from rolling the session, and every page's hx-get can never disagree.
+FRESHNESS_PATH = "/fragments/freshness"
+
+
+def _scope_label(db: Session, client_id) -> str:
+    """"Fleet", or the client's own name when the view is scoped to one."""
+    if client_id is None:
+        return "Fleet"
+    client = db.get(m.Client, client_id)
+    return client.name if client is not None else "Fleet"
+
+
+def _freshness_ctx(request: Request, db: Session, user, client_id=None, scope_label="Fleet"):
+    """Context for base.html's freshness strip, or ``{}`` if it can't be measured.
+
+    Added to every page that renders fleet state. Pages that show no device
+    state (settings, users, the audit log) deliberately don't get it: a "data as
+    of" stamp on a page whose data is not time-sensitive is noise, and it would
+    cost those pages three aggregates apiece for nothing.
+
+    Returning ``{}`` on failure is the safe direction -- ``fleet_freshness``
+    already swallows its own errors, and a freshness indicator that 500s the
+    page it exists to qualify would be a remarkable own goal.
+    """
+    from central.freshness import fleet_freshness, refresh_seconds
+
+    fresh = fleet_freshness(db, client_id=client_id, scope_label=scope_label, user=user)
+    if fresh is None:
+        return {}
+    endpoint = FRESHNESS_PATH
+    if client_id is not None:
+        endpoint = f"{FRESHNESS_PATH}?client_id={int(client_id)}"
+    return {
+        "freshness": fresh,
+        "poll_seconds": refresh_seconds(db),
+        "fresh_endpoint": endpoint,
+    }
+
+
+#: htmx cancels an element's polling when a response carries this status. Used
+#: for every terminal condition -- signed out, or a scope that no longer
+#: resolves -- so a dead poll stops asking instead of hammering on, and so a
+#: session that expired never gets the whole login page swapped into a 2cm strip.
+HTMX_STOP_POLLING = 286
+
+
+@router.get(FRESHNESS_PATH, response_class=HTMLResponse)
+def freshness_fragment(request: Request, db: Session = Depends(get_db)):
+    """Re-render just the freshness strip.
+
+    Cheap by construction: three one-row aggregates, no nav count, no page
+    queries, no template inheritance. This is what an open NOC tab re-asks on a
+    timer, so it must stay that way -- anything added here is multiplied by
+    every open tab of every operator.
+
+    It writes nothing. No audit row (a passive read on a timer would bury the
+    audit log in noise and drown the events that matter), no session mutation,
+    and -- see ``central.main`` -- no session cookie refresh either, so an
+    unattended screen still times out on schedule rather than being kept alive
+    forever by its own auto-refresh.
+
+    Tenancy: a client_readonly user's scope comes from their own row and the
+    ``client_id`` query parameter is ignored outright, so the poll cannot be
+    pointed at another tenant by editing a URL.
+    """
+    from central.freshness import fleet_freshness, refresh_seconds
+
+    user = _user(request, db)
+    if user is None:
+        return _stop_polling(request, "Signed out — reload the page to sign in again.")
+
+    readonly = user.role == m.UserRole.client_readonly
+    if readonly:
+        client_id = user.client_id
+        if client_id is None:
+            return _stop_polling(request, "Reload the page.")
+    else:
+        raw = (request.query_params.get("client_id") or "").strip()
+        try:
+            client_id = int(raw) if raw else None
+        except ValueError:
+            return _stop_polling(request, "Reload the page.")
+
+    scope_label = "Fleet"
+    if client_id is not None:
+        client = db.get(m.Client, client_id)
+        if client is None:
+            # The page above this strip would have redirected; stop polling and
+            # let a reload take the operator wherever they now belong.
+            return _stop_polling(request, "Reload the page.")
+        scope_label = client.name
+
+    fresh = fleet_freshness(db, client_id=client_id, scope_label=scope_label, user=user)
+    if fresh is None:
+        return _stop_polling(request, "Freshness unavailable — reload the page.")
+    endpoint = FRESHNESS_PATH
+    if client_id is not None:
+        endpoint = f"{FRESHNESS_PATH}?client_id={int(client_id)}"
+    return _templates.TemplateResponse(
+        request,
+        "_freshness.html",
+        {"freshness": fresh, "poll_seconds": refresh_seconds(db),
+         "fresh_endpoint": endpoint},
+    )
+
+
+def _stop_polling(request: Request, message: str) -> HTMLResponse:
+    """A terminal strip that replaces itself and cancels its own timer."""
+    return _templates.TemplateResponse(
+        request, "_freshness_stopped.html", {"message": message},
+        status_code=HTMX_STOP_POLLING,
+    )
+
+
 def _render(
     request: Request, template: str, db: Optional[Session] = None, **ctx
 ) -> HTMLResponse:
@@ -48,7 +164,17 @@ def _render(
     ctx.setdefault("user", ctx.get("user"))
     # White-label branding injected into every render. Templates read ``app.name``,
     # ``app.logo_url``, ``app.primary_color``, ``app.support_email``, ``app.footer_text``.
-    ctx.setdefault("app", app_branding(db) if db is not None else {})
+    #
+    # ``brand_client`` selects PER-CLIENT branding for the customer-facing
+    # surface: the portal passes the client it is rendering (which covers an
+    # admin previewing one), and any page a client_readonly user reaches picks
+    # up their own client automatically. Staff pages resolve to no client and
+    # render the global values exactly as before. See central/branding.py.
+    brand_client = ctx.pop("brand_client", None)
+    if db is not None:
+        ctx.setdefault("app", branding_for(db, ctx.get("user"), brand_client))
+    else:
+        ctx.setdefault("app", {})
     # Central server version surfaced in the footer of every page so operators
     # can verify a rollout landed without dropping to the shell.
     ctx.setdefault("central_version", _central_version)
@@ -89,24 +215,82 @@ def login(
     password: str = Form(...),
     db: Session = Depends(get_db),
 ):
+    from central import ratelimit
     from central.audit import record, record_anonymous
+    from central.middleware import FORCE_PASSWORD_CHANGE_KEY
+    from central.net import throttle_ip
+    from central.runtime import load_settings
+
+    values = load_settings(db)
+    policy = ratelimit.Policy.from_settings(values)
+    # NOT request.client.host: that is rewritten from X-Forwarded-For by a
+    # middleware that trusts any sender, so keying a throttle on it would hand an
+    # attacker a fresh bucket per request. See central/net.py.
+    source = throttle_ip(request, str(values.get("auth.trusted_proxies", "")))
+
+    throttled = ratelimit.check(db, username=username, ip=source, policy=policy)
+    if throttled is not None:
+        # Refused BEFORE the password is checked -- a throttle that verifies the
+        # password in order to decide whether to apply has already granted the
+        # guess it was supposed to ration. Deliberately not audited per attempt:
+        # the transition into this state was audited once (below), and an
+        # attacker who can write one audit row per request can push everything
+        # else out of the operator's fixed-size audit view.
+        response = _render(
+            request, "login.html", db=db, error=throttled.message()
+        )
+        # 429 so a reverse proxy / fail2ban can see it, and so an automated
+        # client is told to back off rather than reading a 200 as "keep going".
+        response.status_code = 429
+        return response
 
     user = db.scalar(select(m.User).where(m.User.username == username))
-    if user is None or not verify_password(password, user.password_hash):
-        record_anonymous(db, request, username, "login.failed")
+    # ``password_hash`` is None for SSO-only accounts; passlib will not verify
+    # against None, so the guard is what keeps their username from 500ing the
+    # login form rather than being rejected like any other bad credential.
+    password_ok = (
+        user is not None
+        and bool(user.password_hash)
+        and verify_password(password, user.password_hash)
+    )
+    if not password_ok or not user.active:
+        # Deactivated (deprovisioned) accounts cannot log in even with a valid
+        # password -- the same generic message so we don't leak that the account
+        # exists-but-is-disabled. This is the SCIM off-boarding gate at the login
+        # boundary (current_user enforces it for already-live sessions).
+        record_anonymous(
+            db, request, username,
+            "login.failed" if not password_ok else "login.deactivated",
+        )
+        filled = ratelimit.record_failure(
+            db, username=username, ip=source, policy=policy
+        )
+        if filled is not None:
+            record_anonymous(
+                db, request, username, "login.throttled",
+                target=f"{filled}:{username if filled == 'user' else source}",
+                detail=(f"{policy.user_threshold if filled == 'user' else policy.ip_threshold}"
+                        f" failed sign-ins within {policy.window_minutes}m"),
+            )
         db.commit()
         return _render(request, "login.html", db=db, error="Invalid credentials")
-    # Deactivated (deprovisioned) accounts cannot log in even with a valid
-    # password -- the same generic message so we don't leak that the account
-    # exists-but-is-disabled. This is the SCIM off-boarding gate at the login
-    # boundary (current_user enforces it for already-live sessions).
-    if not user.active:
-        record_anonymous(db, request, username, "login.deactivated")
-        db.commit()
-        return _render(request, "login.html", db=db, error="Invalid credentials")
+    # A proven password empties both buckets: the username's, and the source's
+    # (see ratelimit.clear for why the second one is safe).
+    ratelimit.clear(db, username=username, ip=source)
+    # Rotate the CSRF token on the privilege transition, exactly as the OIDC
+    # callback does (auth_oidc.py). Without it, a token an attacker observed or
+    # fixed while the visitor was anonymous stays valid once they authenticate,
+    # which is the session-fixation half of CSRF -- and it was present on the
+    # SSO path and missing here, which is the worst arrangement of the two.
+    rotate_token(request.session)
     request.session["user_id"] = user.id
+    request.session[SESSION_EPOCH_KEY] = user.session_epoch or 0
+    if user.must_change_password:
+        request.session[FORCE_PASSWORD_CHANGE_KEY] = True
     record(db, request, user, "login")
     db.commit()
+    if user.must_change_password:
+        return RedirectResponse("/account", status_code=303)
     return RedirectResponse("/", status_code=303)
 
 
@@ -116,6 +300,12 @@ def logout(request: Request, db: Session = Depends(get_db)):
 
     user = _user(request, db)
     if user is not None:
+        # session.clear() only asks the BROWSER to drop the cookie; the signed
+        # value it already holds keeps verifying for the full max_age. Bumping
+        # the epoch is what makes "log out" mean the session is spent -- which
+        # matters most on the shared or borrowed machine where someone clicks it
+        # precisely because they do not trust what happens next.
+        user.session_epoch = (user.session_epoch or 0) + 1
         record(db, request, user, "logout")
         db.commit()
     request.session.clear()
@@ -143,13 +333,16 @@ def overview(request: Request, db: Session = Depends(get_db)):
         db=db,
         user=user,
         summary=queries.fleet_summary(db, client_filter),
-        low=queries.low_supplies(db)[:10],
+        low=queries.low_supplies(db, limit=10),
         errors=queries.recent_errors(db, 10),
         alerts=queries.open_alerts(db, 10),
         clients=list(db.scalars(select(m.Client).order_by(m.Client.name))),
         rollup=rollup,
         recent_activity=queries.recent_activity(db, 12),
         printer_label=_printer_label,
+        # The overview is the screen most likely to be left open on a wall, and
+        # the one whose green tiles are most readily believed.
+        **_freshness_ctx(request, db, user),
     )
 
 
@@ -184,28 +377,46 @@ def customer_portal(request: Request, db: Session = Depends(get_db)):
         .order_by(m.Printer.site_id, m.Printer.ip)
     ))
     runway = queries.supply_runway(db, [p.id for p in printers])
-    low = [
-        s for s in queries.low_supplies(db)
-        if s.printer and s.printer.client_id == client.id
-    ][:10]
-    alerts = [
-        a for a in queries.open_alerts(db, 30)
-        if a.printer_id and db.get(m.Printer, a.printer_id).client_id == client.id
-    ][:10]
+    # Both of these are scoped and capped IN SQL. They used to fetch the fleet
+    # and narrow it in Python, which for the alerts meant taking the newest 30
+    # alerts across every tenant and only THEN keeping this client's: a customer
+    # with an open critical fault saw "No open issues right now" as soon as
+    # thirty newer alerts belonged to other customers. Filtering after a LIMIT
+    # is not a slow correct answer, it is a wrong one.
+    low = queries.low_supplies(db, client_id=client.id, limit=10)
+    alerts = queries.open_alerts(db, 10, client_id=client.id)
     from central.runtime import load_settings as _ls
     rt = _ls(db)
     freescout_on = bool(rt.get("freescout.enabled"))
     # ESG / sustainability panel — estimated print footprint for THIS client's
     # fleet, scoped by client_id so one tenant never sees another's totals.
     esg = queries.sustainability_rollup(db, client_id=client.id)
+    # Supplies to order, scoped to THIS client in SQL for the same reason the
+    # two above are. Recommendations only -- the portal shows a customer what is
+    # about to run out; it does not let them (or us) order anything.
+    from central import reorder as reorder_mod
+    reorder_recs = reorder_mod.recommendations(db, client_id=client.id)
     return _render(
         request, "portal.html", db=db, user=user,
+        # The portal is THE white-label surface: it renders in this client's
+        # branding, falling back per-field to the global settings. Passed
+        # explicitly so an admin/tech previewing ?client_id=N sees what that
+        # customer sees rather than the MSP's own chrome.
+        brand_client=client,
         client=client, printers=printers, runway=runway,
         low_supplies=low, open_alerts=alerts,
         freescout_enabled=freescout_on,
         esg=esg,
+        reorder_recs=reorder_recs,
+        reorder_summary=reorder_mod.summarize(reorder_recs),
+        urgency_now=reorder_mod.URGENCY_NOW,
         printer_label=_printer_label,
         portal_flash=request.session.pop("portal_flash", None),
+        # Scoped to this client, and labelled with their own name rather than
+        # "Fleet" -- the portal is the one surface where "the fleet" means
+        # theirs. This is also the only view whose reader is never shown the
+        # stalled-worker banner, which is why freshness.warn_worker exists.
+        **_freshness_ctx(request, db, user, client_id=client.id, scope_label=client.name),
     )
 
 
@@ -301,7 +512,13 @@ def client_detail(client_id: int, request: Request, db: Session = Depends(get_db
     # Lowest supply per printer so the listing shows actual levels, not just
     # the forecast: (label, pct) of the most-depleted supply.
     lowest_supply: dict[int, tuple] = {}
-    low_threshold = 20.0
+    # The operator's configured threshold, not a literal. This route hardcoded
+    # 20.0 while ``/`` and the weekly report both resolved
+    # ``queries.low_supply_threshold``, so moving the slider in Settings made
+    # the overview and this page disagree about the same fleet -- on a page a
+    # client_readonly user can reach, which is where an unexplained discrepancy
+    # costs the most.
+    low_threshold = queries.low_supply_threshold(db)
     # Per-site rollup chips: printers / down / warnings / low supplies /
     # soonest order. Plus a client-level total across all sites.
     site_stats: dict[int, dict] = {}
@@ -322,14 +539,25 @@ def client_detail(client_id: int, request: Request, db: Session = Depends(get_db
         elif p.status == m.PrinterStatus.warning:
             stats["warnings"] += 1
             client_stats["warnings"] += 1
+        # Ranked by HEADROOM, not by the raw level: a waste box reports how full
+        # it is, so an emptied one reading 5 was "the most depleted supply" on
+        # every row it appeared in and pushed the actually-dying cartridge out of
+        # the column. ``remaining_pct`` puts both on one comparable scale; the
+        # cell still renders the device's own number, with the flag that says
+        # which way to read it. Receptacles are excluded from the low COUNT for
+        # the same reason ``queries.low_supplies`` excludes them.
         leveled = [s for s in p.supplies if s.level_pct is not None]
         if leveled:
-            worst = min(leveled, key=lambda s: s.level_pct)
+            worst = min(leveled, key=lambda s: supplies_lib.remaining_pct(s))
             lowest_supply[p.id] = (
                 worst.description or worst.color or worst.type.value,
                 worst.level_pct,
+                worst.is_receptacle,
             )
-        low_count = sum(1 for s in leveled if s.level_pct <= low_threshold)
+        low_count = sum(
+            1 for s in leveled
+            if not s.is_receptacle and s.level_pct <= low_threshold
+        )
         stats["low_supplies"] += low_count
         client_stats["low_supplies"] += low_count
         days = (runway.get(p.id) or {}).get("days")
@@ -357,6 +585,69 @@ def client_detail(client_id: int, request: Request, db: Session = Depends(get_db
         site_stats=site_stats,
         client_stats=client_stats,
         printer_label=_printer_label,
+        **_freshness_ctx(request, db, user, client_id=client.id, scope_label=client.name),
+    )
+
+
+# --- Fleet-wide printer list + search --------------------------------------- #
+@router.get("/printers", response_class=HTMLResponse)
+def printer_search(request: Request, db: Session = Depends(get_db)):
+    """Every printer in one paginated list, searchable by the identifiers a
+    caller actually gives you: IP, hostname, serial, asset tag, model, brand and
+    the operator's friendly name.
+
+    WHO CAN SEE IT, AND WHY IT IS NOT STAFF-ONLY. Staff (admin/tech) search the
+    whole fleet; a client_readonly user reaches the same page scoped to their own
+    client. Making it staff-only was the safer-looking option and is the wrong
+    one: a customer with sixty devices across four sites has exactly the same
+    'which one is 10.4.7.23?' problem, their portal lists their fleet flat with
+    no way to filter it, and refusing them a search over data they are already
+    shown buys no security at all. What buys security is where the scope is
+    applied -- ``client_id`` goes into the SQL, so there is no code path on which
+    a term matches another tenant's printer and is then filtered out afterwards.
+
+    Two further narrowings for that role, both matching what /portal and
+    /clients/{id} already do: a client_readonly user sees **approved** devices
+    only (a pending device is not yet part of their fleet and is not theirs to
+    see), and an account with no ``client_id`` -- a misconfiguration, not a
+    tenant -- gets nothing and is sent to /account. Staff see every discovery
+    state, badged, because "I cannot find 10.4.7.23" is at its most likely
+    precisely when the device is still sitting in the approvals queue.
+    """
+    user = _user(request, db)
+    if user is None:
+        return _login_redirect()
+    readonly = user.role == m.UserRole.client_readonly
+    if readonly and user.client_id is None:
+        return RedirectResponse("/account", status_code=303)
+    # Parsed defensively rather than declared as `page: int`: a truncated or
+    # hand-edited URL should land on page 1, not on a 422 validation page.
+    try:
+        page = int(request.query_params.get("page") or 1)
+    except ValueError:
+        page = 1
+    result = queries.search_printers(
+        db,
+        q=request.query_params.get("q") or "",
+        client_id=user.client_id if readonly else None,
+        states=[m.DiscoveryState.approved] if readonly else None,
+        page=page,
+    )
+    return _render(
+        request,
+        "printer_search.html",
+        db=db,
+        user=user,
+        result=result,
+        scoped_to_client=readonly,
+        printer_label=_printer_label,
+        # Same scoping the search itself uses: a client_readonly user's strip
+        # counts their own fleet, never everyone's.
+        **_freshness_ctx(
+            request, db, user,
+            client_id=user.client_id if readonly else None,
+            scope_label=_scope_label(db, user.client_id if readonly else None),
+        ),
     )
 
 
@@ -385,6 +676,8 @@ def printer_detail(printer_id: int, request: Request, db: Session = Depends(get_
             .order_by(m.MaintenanceRecord.performed_at.desc())
         )
     )
+    from central.dashboard.remote import panel_context
+
     return _render(
         request,
         "printer.html",
@@ -397,22 +690,108 @@ def printer_detail(printer_id: int, request: Request, db: Session = Depends(get_
         maintenance=maint,
         spark=_sparkline_points([r.page_count for r in history]),
         printer_label=_printer_label,
+        # Remote hands. Returns {"remote_enabled": False} for a client_readonly
+        # user or a switched-off install, so the card simply is not rendered --
+        # the controls do not exist in the DOM to be found and posted to.
+        **panel_context(db, printer, user),
+    )
+
+
+# --- Supplies to order (recommend-only) ------------------------------------- #
+@router.get("/supplies/reorder", response_class=HTMLResponse)
+def supplies_reorder(request: Request, db: Session = Depends(get_db)):
+    """"Order these N cartridges" -- recommendations, not orders.
+
+    Nothing on this page places, tracks or records an order; there is no SKU
+    catalogue, no on-hand stock and no order state anywhere behind it. It reads
+    supply level, days-to-empty and pages-to-empty and applies the operator's
+    thresholds, so it is derived entirely from data the fleet already collects.
+
+    client_readonly users are sent to their portal, which carries the same
+    recommendations scoped to their own fleet -- the same treatment
+    /security/posture gets. Admin/tech may narrow to one client with
+    ``?client_id=``, which is validated against the clients that actually exist
+    rather than trusted from the query string.
+    """
+    from central import reorder as reorder_mod
+
+    user = _user(request, db)
+    if user is None:
+        return _login_redirect()
+    if user.role == m.UserRole.client_readonly:
+        return RedirectResponse("/portal", status_code=303)
+
+    clients = list(db.scalars(select(m.Client).order_by(m.Client.name)))
+    raw_client_id = (request.query_params.get("client_id") or "").strip()
+    selected_id = None
+    if raw_client_id:
+        try:
+            candidate = int(raw_client_id)
+        except ValueError:
+            candidate = None
+        # Only a real client id narrows the view. An unparseable or unknown one
+        # falls back to the whole fleet rather than silently returning an empty
+        # page that reads as "nothing to order".
+        if candidate is not None and any(c.id == candidate for c in clients):
+            selected_id = candidate
+
+    thresholds = reorder_mod.ReorderThresholds.load(db)
+    recs = reorder_mod.recommendations(db, client_id=selected_id, thresholds=thresholds)
+    return _render(
+        request,
+        "reorder.html",
+        db=db,
+        user=user,
+        groups=reorder_mod.group_by_client(recs),
+        summary=reorder_mod.summarize(recs),
+        thresholds=thresholds,
+        clients=clients,
+        selected_client_id=selected_id,
+        urgency_now=reorder_mod.URGENCY_NOW,
+        # A reorder list computed from supply levels nobody has refreshed since
+        # yesterday is exactly as wrong as a green fleet that is on fire.
+        **_freshness_ctx(request, db, user, client_id=selected_id,
+                         scope_label=_scope_label(db, selected_id)),
     )
 
 
 # --- Device security posture ------------------------------------------------ #
 @router.get("/security/posture", response_class=HTMLResponse)
 def security_posture(request: Request, db: Session = Depends(get_db)):
-    """Operator-facing "treat printers like endpoints" report: per-device
-    security posture flags (insecure SNMP, firmware visibility) plus a fleet
-    summary. Admin/tech only; client_readonly users are bounced to their
-    portal."""
+    """Operator-facing "treat printers like endpoints" report: per-device SNMP
+    transport grade and firmware visibility, plus a fleet summary.
+
+    STAFF ONLY, and that is a product decision rather than an oversight. This
+    report is an MSP remediation worklist, not a customer deliverable: every
+    finding on it is about *our* monitoring configuration (the SNMP version and
+    community string on a subnet row we own), and every fix for it lives on
+    /manage/agents, which a client_readonly user cannot open. Publishing it to
+    the portal would hand customers a red list they can neither act on nor
+    verify, generating tickets whose only true answer is "yes, we know, and it
+    is ours to change". Exposing it per-tenant is a deliberate later decision
+    with wording written for that audience -- not a flag flip. The matching CSV
+    export refuses client_readonly for the same reason.
+
+    ``?client_id=N`` narrows to one client for staff, which is how the report
+    is actually used (remediate one customer at a time). An unknown id is
+    ignored rather than 404'd -- it is a filter, and the honest answer to a
+    stale bookmark is the whole fleet, not an error page.
+    """
     user = _user(request, db)
     if user is None:
         return _login_redirect()
     if user.role == m.UserRole.client_readonly:
         return RedirectResponse("/portal", status_code=303)
-    posture = queries.security_posture_rollup(db)
+
+    clients = list(db.scalars(select(m.Client).order_by(m.Client.name)))
+    try:
+        selected_client_id = int(request.query_params.get("client_id") or 0) or None
+    except ValueError:
+        selected_client_id = None
+    if selected_client_id is not None and not any(c.id == selected_client_id for c in clients):
+        selected_client_id = None
+
+    posture = queries.security_posture_rollup(db, client_id=selected_client_id)
     return _render(
         request,
         "security_posture.html",
@@ -420,7 +799,15 @@ def security_posture(request: Request, db: Session = Depends(get_db)):
         user=user,
         rows=posture["rows"],
         summary=posture["summary"],
+        clients=clients,
+        selected_client_id=selected_client_id,
+        # Labels/tones for the flags and grades live with the logic that
+        # decides them -- see queries.POSTURE_FLAG_META.
+        flag_meta=queries.POSTURE_FLAG_META,
+        grade_meta=queries.SNMP_GRADE_META,
         printer_label=_printer_label,
+        **_freshness_ctx(request, db, user, client_id=selected_client_id,
+                         scope_label=_scope_label(db, selected_client_id)),
     )
 
 
@@ -552,6 +939,10 @@ def alerts_inbox(request: Request, db: Session = Depends(get_db)):
     return _render(
         request, "alerts.html", db=db, user=user, alerts=rows,
         undelivered=queries.undelivered_notifications(db),
+        # An empty alerts inbox is the most reassuring screen in the product and
+        # the one most worth qualifying: "no open alerts" over four-hour-old
+        # readings means nobody has looked, not that nothing is wrong.
+        **_freshness_ctx(request, db, user),
     )
 
 
@@ -571,6 +962,14 @@ def alert_action(alert_id: int, action: str, request: Request, db: Session = Dep
         elif action == "resolve":
             alert.state = m.AlertState.resolved
             alert.resolved_at = datetime.now(timezone.utc)
+            # An operator closing an alert by hand is as real a resolution as
+            # the worker observing the condition clear, and a subscriber that
+            # only heard about the open is left holding a fault that no longer
+            # exists. Same emit, same idempotency key, so the worker resolving
+            # the same alert a moment later adds nothing.
+            from central.events.emit import emit_alert_resolved
+
+            emit_alert_resolved(db, alert)
         record(db, request, user, f"alert.{action}",
                target=f"alert:{alert.id}", detail=alert.title or "")
         db.commit()
@@ -587,6 +986,7 @@ def account_view(request: Request, db: Session = Depends(get_db)):
         request, "account.html", db=db, user=user,
         flash=request.session.pop("account_flash", None),
         error=request.session.pop("account_error", None),
+        must_change_password=bool(user.must_change_password),
     )
 
 
@@ -610,16 +1010,34 @@ def account_change_password(
     if not verify_password(current_password, user.password_hash):
         request.session["account_error"] = "Current password is incorrect."
         return RedirectResponse("/account", status_code=303)
-    if len(new_password) < 8:
+    if len(new_password) < MIN_PASSWORD_LENGTH:
         request.session["account_error"] = "New password must be at least 8 characters."
         return RedirectResponse("/account", status_code=303)
     if new_password != confirm_password:
         request.session["account_error"] = "New password and confirmation don't match."
         return RedirectResponse("/account", status_code=303)
-    user.password_hash = hash_password(new_password)
+    # Refusing to re-set the same password is what makes a forced rotation
+    # actually rotate: otherwise the generated password printed in the container
+    # log can be "changed" to itself and stays live.
+    if verify_password(new_password, user.password_hash):
+        request.session["account_error"] = "New password must differ from the current one."
+        return RedirectResponse("/account", status_code=303)
     from central.audit import record
+    from central.middleware import FORCE_PASSWORD_CHANGE_KEY
 
-    record(db, request, user, "account.password_change")
+    user.password_hash = hash_password(new_password)
+    was_forced = bool(user.must_change_password)
+    user.must_change_password = False
+    request.session.pop(FORCE_PASSWORD_CHANGE_KEY, None)
+    # Changing a password is the thing you do when you think somebody else has
+    # it, so every other session for this account has to stop -- otherwise the
+    # attacker's cookie outlives the credential it came from by up to 12h. This
+    # session is re-stamped below rather than revoked, so the person doing the
+    # rotation is not logged out by their own action.
+    user.session_epoch = (user.session_epoch or 0) + 1
+    request.session[SESSION_EPOCH_KEY] = user.session_epoch
+    record(db, request, user, "account.password_change",
+           detail="forced rotation of a generated password" if was_forced else "")
     db.commit()
     request.session["account_flash"] = "Password changed."
     return RedirectResponse("/account", status_code=303)

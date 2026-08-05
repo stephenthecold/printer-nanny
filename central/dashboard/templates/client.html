@@ -105,7 +105,7 @@
           {% set worst = lowest_supply.get(p.id) %}
           {% if worst %}
           <div class="flex items-center gap-2" title="{{ worst[0] }}">
-            {{ level_bar(worst[1]) }}
+            {{ level_bar(worst[1], worst[2]) }}
           </div>
           {% else %}
           <span class="text-xs text-slate-400">—</span>

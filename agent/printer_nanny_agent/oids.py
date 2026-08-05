@@ -33,6 +33,10 @@ HR_PRINTER_DETECTED_ERROR_STATE = "1.3.6.1.2.1.25.3.5.1.2.1"
 
 # --- Supplies table (walk these bases) ---
 PRT_MARKER_SUPPLIES_DESCRIPTION = "1.3.6.1.2.1.43.11.1.1.6"
+# prtMarkerSuppliesClass. Decides what the LEVEL column means -- remaining for
+# supplyThatIsConsumed(3), how-full for receptacleThatIsFilled(4) -- so it is
+# not optional colour: without it a waste box reads as a cartridge running dry.
+PRT_MARKER_SUPPLIES_CLASS = "1.3.6.1.2.1.43.11.1.1.4"
 PRT_MARKER_SUPPLIES_TYPE = "1.3.6.1.2.1.43.11.1.1.5"
 PRT_MARKER_SUPPLIES_MAX_CAPACITY = "1.3.6.1.2.1.43.11.1.1.8"
 PRT_MARKER_SUPPLIES_LEVEL = "1.3.6.1.2.1.43.11.1.1.9"

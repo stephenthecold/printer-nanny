@@ -1,0 +1,303 @@
+{% extends "base.html" %}
+{% from "_components.html" import badge, btn, card_cls, empty_note, empty_row, field,
+   note, page_title, section_title, select_field, table_cls, table_wrap, td_cls,
+   th_cls, thead_cls, tr_cls %}
+{% block title %}Billing · {{ app.name or 'Printer Nanny' }}{% endblock %}
+{% block body %}
+
+{{ page_title(
+     'Billing',
+     'Cost-per-page contract terms and the invoice they produce. Rates are priced per page to six decimals; every invoice line is rounded half-up to two.') }}
+
+{% if flash %}
+<div class="{{ note('warning', 'mb-4') }}">{{ flash }}</div>
+{% endif %}
+
+{% if not clients %}
+<div class="{{ card_cls('lg', 'text-sm text-slate-600') }}">
+  No clients yet. <a href="/manage/onboard" class="text-sky-700 hover:underline">Onboard one</a> first.
+</div>
+{% else %}
+
+<form method="get" class="mb-5 flex flex-wrap items-end gap-3">
+  <div class="min-w-56">
+    {% call select_field('client_id', 'Client') %}
+      {% for c in clients %}
+      <option value="{{ c.id }}" {% if client and c.id == client.id %}selected{% endif %}>{{ c.name }}</option>
+      {% endfor %}
+    {% endcall %}
+  </div>
+  <div class="w-44">
+    {{ field('month', 'Billing period', type='month', value=month_value,
+             help='Defaults to the last complete month.') }}
+  </div>
+  <button class="{{ btn('primary') }}">Show</button>
+</form>
+
+<div class="grid lg:grid-cols-3 gap-6 items-start">
+
+  <!-- --------------------------------------------------------- rate cards -->
+  {#
+    Rendered as stacked panels rather than table rows on purpose. Each card is
+    an editable form plus a variable-length list of volume bands, and a <form>
+    is not a permitted child of <tr>: the browser hoists it out of the table and
+    every control inside silently stops belonging to it. The `form=` attribute
+    would be the other valid answer, but it needs a unique id per control in a
+    loop -- the exact duplicate-id hazard the component layer exists to avoid.
+  #}
+  <section class="{{ card_cls('none', 'lg:col-span-2') }}">
+    <div class="px-4 py-3 border-b font-semibold flex items-center justify-between gap-2 flex-wrap">
+      <span>Rate cards for {{ client.name }}</span>
+      <span class="text-xs font-normal text-slate-500">
+        Invoices are built from the active card. Retired cards are kept — they are
+        the terms an earlier period was billed under.
+      </span>
+    </div>
+    {% for card in cards %}
+    {#- A named region, because the per-card controls are wrapped by short
+        labels ("Mono /page") that repeat identically on every card. The
+        wrapping label is what makes each control *named*; the region is what
+        says which card you are in -- the non-table equivalent of the
+        row-identity rule for aria-label. -#}
+    <section aria-label="Rate card: {{ card.name }}"
+             class="p-4 {% if not loop.first %}border-t{% endif %}">
+      <form method="post" action="/manage/billing/rate-cards/{{ card.id }}"
+            class="grid gap-2 sm:grid-cols-2 lg:grid-cols-5 items-end">
+        {{ csrf_field() }}
+        <input type="hidden" name="client_id" value="{{ client.id }}" />
+        <div class="lg:col-span-2">
+          <div class="font-medium flex items-center gap-2 flex-wrap">
+            {{ card.name }}
+            {% if card.active %}{{ badge('active', 'ok') }}
+            {% else %}{{ badge('retired', 'muted') }}{% endif %}
+            <span class="text-xs font-normal text-slate-400 tabular-nums">{{ card.currency }}</span>
+          </div>
+          {% if card.notes %}<div class="text-xs text-slate-500 mt-0.5">{{ card.notes }}</div>{% endif %}
+        </div>
+        {{ field('mono_rate', 'Mono /page', value=format_rate(card.mono_rate), size='sm',
+                 extra_cls='tabular-nums') }}
+        {{ field('color_rate', 'Colour /page', value=format_rate(card.color_rate), size='sm',
+                 extra_cls='tabular-nums') }}
+        {{ field('minimum_charge', 'Minimum / month', value=format_money(card.minimum_charge),
+                 size='sm', placeholder='none', extra_cls='tabular-nums') }}
+        <div class="sm:col-span-2 lg:col-span-4">
+          {% call select_field('unsplit_policy', 'Pages with no mono/colour split', size='sm') %}
+            {% for p in policies %}
+            <option value="{{ p }}" {% if card.unsplit_policy.value == p %}selected{% endif %}>
+              {{ 'Do not bill — list as unbilled' if p == 'exclude' else 'Bill at the mono rate' }}
+            </option>
+            {% endfor %}
+          {% endcall %}
+        </div>
+        <button class="{{ btn('primary', 'sm') }}">Save</button>
+      </form>
+
+      <div class="mt-3 flex flex-wrap items-end gap-2">
+        {% for tier in card.tiers %}
+        <form method="post" action="/manage/billing/tiers/{{ tier.id }}/delete"
+              onsubmit="return confirm('Remove this band?')">
+          {{ csrf_field() }}
+          <input type="hidden" name="client_id" value="{{ client.id }}" />
+          <button class="{{ btn('subtle', 'sm', 'tabular-nums') }}"
+                  aria-label="Remove the {{ tier.kind.value }} band up to {{ tier.up_to }} pages on {{ card.name }}">
+            {{ 'colour' if tier.kind.value == 'color' else 'mono' }} ≤ {{ '{:,}'.format(tier.up_to) }}
+            @ {{ format_rate(tier.rate) }} ✕
+          </button>
+        </form>
+        {% else %}
+        <span class="text-xs text-slate-400 mb-1.5">
+          Flat rate — no volume bands. Bands are graduated: each covers only the
+          pages between the previous ceiling and its own, and anything above the
+          highest band is priced at the card rate.
+        </span>
+        {% endfor %}
+      </div>
+
+      <div class="mt-2 flex flex-wrap items-end gap-2">
+        <form method="post" action="/manage/billing/rate-cards/{{ card.id }}/tiers"
+              class="flex flex-wrap items-end gap-2">
+          {{ csrf_field() }}
+          <input type="hidden" name="client_id" value="{{ client.id }}" />
+          <div class="w-28">
+            {% call select_field('kind', 'Band class', size='sm') %}
+              {% for k in meter_classes %}
+              <option value="{{ k }}">{{ 'colour' if k == 'color' else k }}</option>
+              {% endfor %}
+            {% endcall %}
+          </div>
+          <div class="w-32">
+            {{ field('up_to', 'Up to pages', size='sm', placeholder='5000',
+                     extra_cls='tabular-nums') }}
+          </div>
+          <div class="w-28">
+            {{ field('rate', 'Band rate', size='sm', placeholder='0.010000',
+                     extra_cls='tabular-nums') }}
+          </div>
+          <button class="{{ btn('neutral', 'sm') }}">Add band</button>
+        </form>
+
+        <div class="ml-auto flex items-end gap-2">
+          {% if not card.active %}
+          <form method="post" action="/manage/billing/rate-cards/{{ card.id }}/activate">
+            {{ csrf_field() }}
+            <input type="hidden" name="client_id" value="{{ client.id }}" />
+            <button class="{{ btn('success', 'sm') }}">Make active</button>
+          </form>
+          {% endif %}
+          <form method="post" action="/manage/billing/rate-cards/{{ card.id }}/delete"
+                data-name="{{ card.name }}"
+                onsubmit="return confirm('Delete rate card ' + this.dataset.name + '? Past invoices cannot be rebuilt without it.')">
+            {{ csrf_field() }}
+            <input type="hidden" name="client_id" value="{{ client.id }}" />
+            <button class="{{ btn('danger', 'sm') }}">Delete</button>
+          </form>
+        </div>
+      </div>
+    </section>
+    {% else %}
+    <div class="p-4">{{ empty_note('No rate cards for this client yet.') }}</div>
+    {% endfor %}
+  </section>
+
+  <!-- ------------------------------------------------------ new rate card -->
+  <section class="{{ card_cls('md') }}">
+    {{ section_title('Add a rate card') }}
+    <form method="post" action="/manage/billing/rate-cards" class="space-y-2">
+      {{ csrf_field() }}
+      <input type="hidden" name="client_id" value="{{ client.id }}" />
+      {{ field('name', 'Name', required=True, placeholder='Standard MPS 2026') }}
+      <div class="grid grid-cols-2 gap-2">
+        {{ field('mono_rate', 'Mono rate /page', required=True, placeholder='0.008500', extra_cls='tabular-nums') }}
+        {{ field('color_rate', 'Colour rate /page', required=True, placeholder='0.072000', extra_cls='tabular-nums') }}
+      </div>
+      <div class="grid grid-cols-2 gap-2">
+        {{ field('currency', 'Currency', value='USD', extra_cls='uppercase') }}
+        {{ field('minimum_charge', 'Minimum / month', placeholder='none', extra_cls='tabular-nums') }}
+      </div>
+      {% call select_field('unsplit_policy', 'Pages with no mono/colour split',
+                           help='A device that reports no split is never billed as zero colour. Choose what it costs instead.') %}
+        <option value="exclude">Do not bill — list them as unbilled</option>
+        <option value="bill_as_mono">Bill at the mono rate</option>
+      {% endcall %}
+      {{ field('notes', 'Notes', placeholder='Contract reference, review date, …') }}
+      <button class="{{ btn('primary') }}">Add rate card</button>
+      <p class="text-xs text-slate-400">
+        A new card is activated automatically only when the client has none.
+        Otherwise activate it deliberately — it changes what every future invoice charges.
+      </p>
+    </form>
+  </section>
+
+  <!-- ----------------------------------------------------------- invoice -->
+  <section class="{{ card_cls('none', 'lg:col-span-3') }}">
+    <div class="px-4 py-3 border-b font-semibold flex items-center justify-between gap-2 flex-wrap">
+      <span>
+        Invoice preview — {{ client.name }},
+        <span class="tabular-nums">{{ period_start.date().isoformat() }}</span> to
+        <span class="tabular-nums">{{ period_end.date().isoformat() }}</span>
+      </span>
+      {% if invoice %}
+      <a class="{{ btn('accent', 'sm') }}"
+         href="/manage/billing/invoice.csv?client_id={{ client.id }}&amp;month={{ month_value }}">Download CSV</a>
+      {% endif %}
+    </div>
+
+    {% if invoice_error %}
+    <div class="p-4">
+      <div class="{{ note('info') }}">{{ invoice_error }}</div>
+    </div>
+    {% elif invoice %}
+    <div class="{{ table_wrap() }}">
+      <table class="{{ table_cls() }}">
+        <thead class="{{ thead_cls() }}">
+          <tr>
+            <th class="{{ th_cls() }}">Printer</th>
+            <th class="{{ th_cls() }}">Class</th>
+            <th class="{{ th_cls('right') }}">Pages</th>
+            <th class="{{ th_cls() }}">Rate</th>
+            <th class="{{ th_cls('right') }}">Amount</th>
+          </tr>
+        </thead>
+        <tbody>
+          {% for line in invoice.lines %}
+          <tr class="{{ tr_cls() }}">
+            <td class="{{ td_cls() }}">
+              <a href="/printers/{{ line.printer_id }}" class="text-sky-700 hover:underline">{{ line.printer_label }}</a>
+              <span class="text-xs text-slate-400 ml-1 tabular-nums">{{ line.ip }}</span>
+            </td>
+            <td class="{{ td_cls() }}">{{ 'colour' if line.kind == 'color' else line.kind }}</td>
+            <td class="{{ td_cls('right', 'tabular-nums') }}">{{ '{:,}'.format(line.pages) }}</td>
+            <td class="{{ td_cls('left', 'text-xs text-slate-500 tabular-nums') }}">{{ line.rate_detail }}</td>
+            <td class="{{ td_cls('right', 'tabular-nums') }}">{{ format_money(line.amount) }}</td>
+          </tr>
+          {% else %}
+          {{ empty_row(5, 'Nothing metered in this period.') }}
+          {% endfor %}
+        </tbody>
+        <tfoot class="border-t-2">
+          <tr>
+            <td class="{{ td_cls('left', 'text-slate-500') }}" colspan="4">Metered subtotal</td>
+            <td class="{{ td_cls('right', 'tabular-nums') }}">{{ format_money(invoice.metered_subtotal) }}</td>
+          </tr>
+          {% if invoice.minimum_adjustment %}
+          <tr>
+            <td class="{{ td_cls('left', 'text-slate-500') }}" colspan="4">
+              Minimum commitment adjustment
+              <span class="text-xs">(commitment {{ format_money(invoice.minimum_charge) }})</span>
+            </td>
+            <td class="{{ td_cls('right', 'tabular-nums') }}">{{ format_money(invoice.minimum_adjustment) }}</td>
+          </tr>
+          {% endif %}
+          <tr class="font-semibold">
+            <td class="{{ td_cls('left') }}" colspan="4">Total ({{ invoice.currency }})</td>
+            <td class="{{ td_cls('right', 'tabular-nums') }}">{{ format_money(invoice.total) }}</td>
+          </tr>
+        </tfoot>
+      </table>
+    </div>
+
+    <div class="px-4 py-3 border-t text-xs text-slate-500">
+      Rate card <span class="font-medium">{{ invoice.rate_card_name }}</span> ·
+      {{ invoice.billed_printer_count }} of {{ invoice.printer_count }} printers billed ·
+      rounded half-up at each line.
+    </div>
+
+    {% if invoice.unbilled %}
+    <div class="px-4 pb-4">
+      <div class="{{ note('warning') }}">
+        <strong>Not billed:</strong> {{ '{:,}'.format(invoice.unbilled_pages) }} page(s) across
+        {{ invoice.unbilled | length }} printer(s). An unknown meter is never billed as zero —
+        these are listed so the gap is visible rather than absorbed.
+      </div>
+      <div class="{{ table_wrap('mt-2') }}">
+        <table class="{{ table_cls() }}">
+          <thead class="{{ thead_cls() }}">
+            <tr>
+              <th class="{{ th_cls() }}">Printer</th>
+              <th class="{{ th_cls('right') }}">Pages</th>
+              <th class="{{ th_cls() }}">Why</th>
+            </tr>
+          </thead>
+          <tbody>
+            {% for item in invoice.unbilled %}
+            <tr class="{{ tr_cls() }}">
+              <td class="{{ td_cls() }}">
+                <a href="/printers/{{ item.printer_id }}" class="text-sky-700 hover:underline">{{ item.printer_label }}</a>
+                <span class="text-xs text-slate-400 ml-1 tabular-nums">{{ item.ip }}</span>
+              </td>
+              <td class="{{ td_cls('right', 'tabular-nums') }}">{{ '{:,}'.format(item.pages) }}</td>
+              <td class="{{ td_cls('left', 'text-xs text-slate-500') }}">{{ item.reason }}</td>
+            </tr>
+            {% endfor %}
+          </tbody>
+        </table>
+      </div>
+    </div>
+    {% endif %}
+    {% else %}
+    <div class="p-4">{{ empty_note('Select a client to preview an invoice.') }}</div>
+    {% endif %}
+  </section>
+</div>
+{% endif %}
+{% endblock %}

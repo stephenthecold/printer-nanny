@@ -201,7 +201,11 @@ def test_patch_active_false_deactivates_and_blocks_login(db):
     uid = int(r.json()["id"])
     user = db.get(m.User, uid)
     user.password_hash = hash_password("hunter2")
-    user.auth_provider = "local"
+    # NOT auth_provider = "local": that was here to attach a password, but a
+    # password is attached by password_hash alone -- login never consults
+    # auth_provider -- and flipping it contradicted this file's own assertion
+    # that provisioning sets "scim". It also made this test depend on SCIM being
+    # able to manage a local account, which it deliberately no longer can.
     db.commit()
 
     # Sanity: login works while active.
@@ -359,10 +363,13 @@ def test_last_admin_cannot_be_deleted(db):
 
 def test_non_last_admin_can_be_deactivated(db):
     _enable_scim(db)
+    # SCIM-provisioned, because this test is about the last-admin guard not
+    # over-blocking -- not about whether SCIM may touch a local account, which
+    # is a separate rule asserted below.
     a1 = m.User(username="admin1", password_hash=hash_password("x"),
-                role=m.UserRole.admin, active=True)
+                role=m.UserRole.admin, active=True, auth_provider="scim")
     a2 = m.User(username="admin2", password_hash=hash_password("x"),
-                role=m.UserRole.admin, active=True)
+                role=m.UserRole.admin, active=True, auth_provider="scim")
     db.add_all([a1, a2])
     db.commit()
     cli = _client()
@@ -397,3 +404,80 @@ def test_scim_actions_recorded_in_audit_log(db):
     ]
     assert "scim.user.provision" in actions
     assert "scim.user.patch" in actions
+
+
+# --------------------------------------------------------------------------- #
+# SCIM may only manage the accounts it provisioned
+# --------------------------------------------------------------------------- #
+# A bearer token used to be a write handle on every operator account, the
+# bootstrap admin included. The sharpest reach was rewriting a local admin's
+# EMAIL, because that chose which address the SSO path would then match -- so
+# SCIM and OIDC composed into an account takeover that neither looked like on
+# its own. Both halves are closed; this is the SCIM half.
+def _local_admin(db):
+    user = m.User(username="owner", email="owner@msp.test",
+                  password_hash=hash_password("x"), role=m.UserRole.admin,
+                  active=True, auth_provider="local")
+    db.add(user)
+    db.commit()
+    db.refresh(user)
+    return user
+
+
+def test_scim_cannot_rewrite_a_local_account_email(db):
+    """The takeover primitive: choose the address SSO will match on."""
+    _enable_scim(db)
+    user = _local_admin(db)
+    r = _client().patch(
+        f"/scim/v2/Users/{user.id}",
+        headers={**AUTH, **SCIM_JSON},
+        json={"Operations": [{"op": "replace", "path": "email",
+                              "value": "attacker@evil.test"}]},
+    )
+    assert r.status_code == 409
+    db.refresh(user)
+    assert user.email == "owner@msp.test"
+
+
+def test_scim_cannot_reactivate_a_local_account(db):
+    """Undoing an off-boarding a human performed."""
+    _enable_scim(db)
+    user = _local_admin(db)
+    user.active = False
+    db.commit()
+    r = _client().post(
+        "/scim/v2/Users",
+        headers={**AUTH, **SCIM_JSON},
+        json={"userName": "owner", "emails": [{"value": "owner@msp.test"}]},
+    )
+    assert r.status_code == 409
+    db.refresh(user)
+    assert user.active is False
+
+
+def test_scim_cannot_deactivate_a_local_account(db):
+    """Not exempted, though it looks safer than enabling one: a token that can
+    disable every local admin is a fleet-wide denial of service, and the
+    last-admin guard only promises that the final one survives."""
+    _enable_scim(db)
+    user = _local_admin(db)
+    r = _client().delete(f"/scim/v2/Users/{user.id}", headers=AUTH)
+    assert r.status_code == 409
+    db.refresh(user)
+    assert user.active is True
+
+
+def test_scim_still_fully_manages_what_it_provisioned(db):
+    """The guard must not break the connector's actual job."""
+    _enable_scim(db)
+    cli = _client()
+    uid = int(_provision(cli, username="staff@acme.test",
+                         email="staff@acme.test").json()["id"])
+    r = cli.patch(
+        f"/scim/v2/Users/{uid}",
+        headers={**AUTH, **SCIM_JSON},
+        json={"Operations": [{"op": "replace", "path": "active", "value": False}]},
+    )
+    assert r.status_code == 200
+    db.refresh(db.get(m.User, uid))
+    assert db.get(m.User, uid).active is False

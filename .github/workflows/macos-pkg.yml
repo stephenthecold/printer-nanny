@@ -36,6 +36,13 @@ on:
       - 'agent/**'
   workflow_dispatch:
 
+
+# Least privilege: unset, this inherits the repo/org default, which on a repo
+# that has never been tightened is read/write across contents, packages,
+# issues and PRs. postgres.yml and windows-client.yml already set this.
+permissions:
+  contents: read
+
 jobs:
   build:
     runs-on: macos-latest

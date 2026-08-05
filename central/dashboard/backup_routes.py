@@ -25,25 +25,28 @@ from urllib.parse import urlparse
 
 from fastapi import APIRouter, Depends, File, Form, Request, UploadFile
 from fastapi.responses import HTMLResponse, RedirectResponse, StreamingResponse
-from fastapi.templating import Jinja2Templates
+from sqlalchemy.engine import URL, make_url
 from sqlalchemy.orm import Session
 
 from central import models as m
 from central.audit import record
 from central.config import settings
+from central.dashboard.templating import templates
 from central.db import get_db
+from central.deps import session_user
 from central.health import worker_banner
 from central.runtime import app_branding
 
 router = APIRouter(prefix="/admin/backup", tags=["backup"])
-_templates = Jinja2Templates(directory=str(Path(__file__).parent / "templates"))
+# One shared Jinja environment (central/dashboard/templating.py): it carries
+# the csrf_field()/csrf_token() globals every form depends on.
+_templates = templates
 log = logging.getLogger("central.backup")
 
 
 def _admin(request: Request, db: Session) -> Optional[m.User]:
-    uid = request.session.get("user_id")
-    user = db.get(m.User, uid) if uid else None
-    if user is None or not user.active or user.role != m.UserRole.admin:
+    user = session_user(request, db)
+    if user is None or user.role != m.UserRole.admin:
         return None
     return user
 
@@ -76,12 +79,50 @@ def _sqlite_path() -> Path:
     return Path(p if p.startswith("/") else "/" + p)
 
 
+def libpq_target() -> "tuple[str, dict]":
+    """``(dsn, env)`` for a libpq client, from the SQLAlchemy ``DATABASE_URL``.
+
+    Two things the obvious version gets wrong, and both are silent.
+
+    **libpq does not understand SQLAlchemy's driver suffix.** ``DATABASE_URL``
+    in docker-compose.yml is ``postgresql+psycopg://…``; a conninfo string that
+    does not begin exactly ``postgresql://`` or ``postgres://`` and contains no
+    ``=`` is taken by libpq as a bare *database name*, so host, port and user
+    all fall back to defaults. Handing it straight to ``pg_dump --dbname``
+    doesn't error on the scheme -- it quietly tries a local unix socket as the
+    container's OS user, fails with ``role "root" does not exist``, and leaves a
+    **zero-byte** dump file behind. Verified against pg_dump 16: exit 1 with the
+    ``+psycopg`` form, exit 0 with the plain one.
+
+    **A password in argv is readable by every user on the box.** The whole URL
+    used to be one argv element, so ``ps`` disclosed the database password to
+    any local process -- the same rule this project already enforces for the
+    Windows service command line and the macOS LaunchDaemon plist. The password
+    therefore travels in ``PGPASSWORD`` and never appears in the DSN.
+    """
+    url = make_url(settings.database_url)
+    dsn = URL.create(
+        drivername="postgresql",
+        username=url.username,
+        host=url.host,
+        port=url.port,
+        database=url.database,
+        # Preserved so a deployment pinning e.g. sslmode=require keeps it.
+        query=url.query,
+    ).render_as_string(hide_password=False)
+    env = os.environ.copy()
+    if url.password:
+        env["PGPASSWORD"] = url.password
+    return dsn, env
+
+
 def _pg_dump_to_file(out_path: Path) -> None:
     """pg_dump in custom format (pg_restore-compatible, includes the schema)."""
+    dsn, env = libpq_target()
     proc = subprocess.run(
         ["pg_dump", "--format=custom", "--no-owner", "--no-privileges",
-         "--dbname", settings.database_url, "--file", str(out_path)],
-        capture_output=True, text=False, check=False,
+         "--dbname", dsn, "--file", str(out_path)],
+        capture_output=True, text=False, check=False, env=env,
     )
     if proc.returncode != 0:
         raise RuntimeError(
@@ -93,10 +134,11 @@ def _pg_dump_to_file(out_path: Path) -> None:
 def _pg_restore_from_file(src_path: Path) -> None:
     """Restore over the live database. --clean wipes existing objects; the
     dump is in custom format from pg_dump --format=custom."""
+    dsn, env = libpq_target()
     proc = subprocess.run(
         ["pg_restore", "--clean", "--if-exists", "--no-owner", "--no-privileges",
-         "--dbname", settings.database_url, str(src_path)],
-        capture_output=True, text=False, check=False,
+         "--dbname", dsn, str(src_path)],
+        capture_output=True, text=False, check=False, env=env,
     )
     if proc.returncode != 0:
         raise RuntimeError(
@@ -124,7 +166,40 @@ def backup_page(request: Request, db: Session = Depends(get_db)):
 
 
 @router.get("/download")
+def backup_download_get(request: Request, db: Session = Depends(get_db)):
+    """A stale bookmark, not a download. Streams nothing, ever.
+
+    This route used to *be* the download, and that was the defect: a GET that
+    returns the entire database -- every tenant, every encrypted credential,
+    every audit row -- is reachable by making a logged-in admin's browser
+    navigate, and ``SameSite=lax`` explicitly permits top-level GET navigation.
+    A link, a redirect, a ``window.open`` from any page the operator visits was
+    enough. The size of the side effect matters too: on Postgres each hit forks
+    a ``pg_dump`` of the whole database, so the same link is a cheap way to keep
+    a server busy.
+
+    The download is now ``POST`` with a CSRF token, which a cross-site
+    navigation cannot produce. This handler survives so an operator's bookmark
+    lands on the page with the button rather than on a bare 405 -- degrading to
+    something explicable, per the updater's contract that a refused operation
+    says why.
+    """
+    if _admin(request, db) is None:
+        return RedirectResponse("/login", status_code=303)
+    request.session["flash"] = (
+        "Backup downloads are now a button rather than a link, so another site "
+        "cannot trigger one through your session. Use Download below."
+    )
+    return RedirectResponse("/admin/backup", status_code=303)
+
+
+@router.post("/download")
 def backup_download(request: Request, db: Session = Depends(get_db)):
+    """Stream a full backup. POST, because it discloses the whole database.
+
+    Reached from the button on /admin/backup, which carries the CSRF token; see
+    the GET handler above for why this cannot be a GET.
+    """
     user = _admin(request, db)
     if user is None:
         return RedirectResponse("/login", status_code=303)

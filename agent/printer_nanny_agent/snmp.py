@@ -69,6 +69,29 @@ class SnmpBackend:
         """
         return await self.walk(host, base_oid, params)
 
+    async def set(
+        self, host: str, oid: str, value: str, value_type: str, params: SnmpParams
+    ) -> str:
+        """Write one scalar OID. Returns the value the device echoed back.
+
+        THE ONLY WRITE THIS AGENT CAN PERFORM, and it is deliberately narrow:
+        one OID, one scalar, two types. Every caller comes from central's closed
+        write vocabulary (``central/remote.py``), which is what keeps "the agent
+        can write to devices" from meaning "the agent can be told to write
+        anything anywhere".
+
+        ``value_type`` is ``"string"`` or ``"int"``. Anything else raises rather
+        than defaulting -- guessing a type here would mean sending an
+        OctetString where the MIB wants an Integer, which most agents answer
+        with ``wrongType`` and some answer by doing something unintended.
+
+        The default implementation raises: a backend that cannot write must say
+        so, not silently report success. That matters more than usual here,
+        because "the device accepted the write" is the evidence central records
+        as capability.
+        """
+        raise NotImplementedError("this SNMP backend cannot write")
+
     async def close(self) -> None:  # pragma: no cover - optional cleanup hook
         return None
 
@@ -140,6 +163,48 @@ class PysnmpBackend(SnmpBackend):
             else:
                 out[oid] = text
         return out
+
+    async def set(
+        self, host: str, oid: str, value: str, value_type: str, params: SnmpParams
+    ) -> str:
+        from pysnmp.hlapi.v3arch.asyncio import (
+            Integer32,
+            ObjectIdentity,
+            ObjectType,
+            OctetString,
+            set_cmd,
+        )
+
+        if value_type == "string":
+            payload = OctetString(value)
+        elif value_type == "int":
+            try:
+                payload = Integer32(int(value))
+            except (TypeError, ValueError):
+                raise SnmpError(f"{host}: {value!r} is not an integer")
+        else:
+            raise SnmpError(f"{host}: unsupported SNMP write type {value_type!r}")
+
+        target = await self._target(host, params)
+        err_ind, err_stat, _err_idx, var_binds = await set_cmd(
+            self._engine,
+            self._auth(params),
+            target,
+            self._context(params),
+            ObjectType(ObjectIdentity(oid), payload),
+        )
+        # errorIndication is a transport-level failure (no response); errorStatus
+        # is the device answering "no" -- noAccess, notWritable, wrongType,
+        # authorizationError. Both are SnmpError so the caller reports "the
+        # device did not accept the write" with the reason, and both are the
+        # NORMAL result on a hardened fleet rather than an exceptional one.
+        if err_ind:
+            raise SnmpError(f"{host}: {err_ind}")
+        if err_stat:
+            raise SnmpError(f"{host}: {err_stat.prettyPrint()}")
+        for _name, echoed in var_binds:
+            return echoed.prettyPrint()
+        return ""
 
     async def walk(self, host: str, base_oid: str, params: SnmpParams) -> Dict[str, str]:
         return await self.walk_max(host, base_oid, params, 512)

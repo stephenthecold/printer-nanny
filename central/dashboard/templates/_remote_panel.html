@@ -1,0 +1,181 @@
+{#
+  Remote hands panel, included by printer.html.
+
+  Rendered only when `remote_enabled` is true, which central/dashboard/remote.py
+  sets false for a client_readonly user and for an install with the feature
+  switched off -- so the controls are absent from the DOM entirely rather than
+  merely hidden.
+
+  THE ONE THING TO NOT UNDO HERE: the captured device page is shown inside
+  `<iframe sandbox="">` -- the empty attribute, meaning every restriction on.
+  That is the second of two independent isolations; the first is the CSP the
+  body route itself returns. Adding a single token (`allow-scripts`,
+  `allow-same-origin`, `allow-forms`) to make some device's page "work properly"
+  would hand a printer on a customer LAN script execution, or form submission,
+  against an authenticated operator's session. See the module docstring in
+  central/dashboard/remote.py for exactly what an evil device can and cannot do.
+#}
+{% from "_components.html" import badge, btn, card_cls, field, note, select_field %}
+{% set cap = printer.remote_capability.value %}
+<section class="{{ card_cls('md', 'mb-6') }}" id="remote">
+  <div class="flex items-center gap-2 flex-wrap mb-3">
+    <h2 class="font-semibold">Remote hands</h2>
+    {% if cap == 'writable' %}
+      {{ badge('writes proven', 'ok') }}
+    {% elif cap == 'read_only' %}
+      {{ badge('read-only', 'muted') }}
+    {% else %}
+      {{ badge('not checked', 'neutral') }}
+    {% endif %}
+    {% if printer.remote_write_disabled %}{{ badge('pinned read-only', 'warning') }}{% endif %}
+    <span class="ml-auto text-xs text-slate-400">
+      via agent {{ remote_agent_id if remote_agent_id else 'none assigned' }}
+    </span>
+  </div>
+
+  {% if remote_address_error %}
+  <div class="{{ note('error', 'mb-3') }}">{{ remote_address_error }}</div>
+  {% elif not remote_agent_id %}
+  <div class="{{ note('warning', 'mb-3') }}">
+    No agent covers this printer's site, so nothing here can be carried out.
+  </div>
+  {% endif %}
+
+  <p class="text-xs text-slate-500 mb-4">
+    The site agent reaches the device on your behalf -- central has no route to it.
+    Page fetches are read-only by construction: no write ever travels that path.
+    Write actions are separate, named operations over SNMP, and only on a device
+    that has passed the capability check below.
+  </p>
+
+  <div class="grid md:grid-cols-2 gap-4">
+    {# ----------------------------------------------------------- read ----- #}
+    <div>
+      <h3 class="text-sm font-semibold mb-2">View a page</h3>
+      <form method="post" action="/manage/printers/{{ printer.id }}/remote/fetch"
+            class="space-y-2">
+        {{ csrf_field() }}
+        <div class="grid grid-cols-3 gap-2">
+          {% call select_field('scheme', 'Scheme', size='sm') %}
+            <option value="http">http</option>
+            <option value="https">https</option>
+          {% endcall %}
+          {% call select_field('port', 'Port', size='sm') %}
+            {% for p in remote_ports %}<option value="{{ p }}">{{ p }}</option>{% endfor %}
+          {% endcall %}
+          <div class="col-span-3">
+            {{ field('path', 'Path on the device', value='/', size='sm',
+                     placeholder='/general/status.html',
+                     help='Path only. The address is this printer\'s own; you cannot change it.') }}
+          </div>
+        </div>
+        <button class="{{ btn('accent', 'sm') }}">Fetch page</button>
+      </form>
+    </div>
+
+    {# ---------------------------------------------------------- write ----- #}
+    <div>
+      <h3 class="text-sm font-semibold mb-2">Write actions</h3>
+      <form method="post" action="/manage/printers/{{ printer.id }}/remote/probe"
+            class="mb-3">
+        {{ csrf_field() }}
+        <button class="{{ btn('neutral', 'sm') }}">Check write capability</button>
+        <span class="block text-xs text-slate-400 mt-1">
+          Writes the value the device already holds, so nothing on it changes.
+          {% if printer.remote_capability_at %}
+          Last checked {{ printer.remote_capability_at.strftime('%Y-%m-%d %H:%M') }} UTC.
+          {% endif %}
+        </span>
+        {% if printer.remote_capability_detail %}
+        <span class="block text-xs text-slate-500 mt-1">{{ printer.remote_capability_detail }}</span>
+        {% endif %}
+      </form>
+
+      {% if remote_writes_blocked %}
+      <div class="{{ note('muted') }}">{{ remote_writes_blocked }}</div>
+      {% else %}
+      <form method="post" action="/manage/printers/{{ printer.id }}/remote/write"
+            class="space-y-2"
+            onsubmit="return confirm('Send this write to the printer?')">
+        {{ csrf_field() }}
+        {% call select_field('op', 'Action', size='sm') %}
+          {% for op in remote_write_ops %}
+          <option value="{{ op.key }}">{{ op.label }}</option>
+          {% endfor %}
+        {% endcall %}
+        {{ field('value', 'Value', size='sm',
+                 help='Ignored by Restart, which sends a fixed value.') }}
+        <button class="{{ btn('warning', 'sm') }}">Run action</button>
+      </form>
+      {% endif %}
+
+      <form method="post" action="/manage/printers/{{ printer.id }}/remote/pin-read-only"
+            class="mt-3">
+        {{ csrf_field() }}
+        <input type="hidden" name="disabled"
+               value="{{ '0' if printer.remote_write_disabled else '1' }}" />
+        <button class="{{ btn('subtle', 'sm') }}">
+          {{ 'Allow writes again' if printer.remote_write_disabled else 'Pin this printer read-only' }}
+        </button>
+      </form>
+    </div>
+  </div>
+
+  {# --------------------------------------------------------- history ----- #}
+  <h3 class="text-sm font-semibold mt-5 mb-2">Recent requests</h3>
+  <ul class="space-y-2 text-sm">
+    {% for req in remote_requests %}
+    {% set state = remote_status_of(req) %}
+    <li class="border-t pt-2">
+      <div class="flex items-center gap-2 flex-wrap">
+        <span class="text-slate-400 tabular-nums text-xs w-28">
+          {{ req.created_at.strftime('%m-%d %H:%M') }}
+        </span>
+        {% if state == 'succeeded' %}{{ badge(state, 'ok') }}
+        {% elif state == 'failed' %}{{ badge(state, 'error') }}
+        {% elif state == 'expired' %}{{ badge(state, 'warning') }}
+        {% else %}{{ badge(state, 'info') }}{% endif %}
+        <span class="text-xs text-slate-600">
+          {% if req.kind.value == 'fetch' %}
+            GET {{ req.scheme }}://{{ printer.ip }}:{{ req.port }}{{ req.path }}
+            {%- if req.http_status %} &rarr; {{ req.http_status }}{% endif %}
+          {% elif req.kind.value == 'probe' %}
+            capability check
+          {% else %}
+            {{ req.op }}{% if req.op_value %} = {{ req.op_value }}{% endif %}
+          {% endif %}
+        </span>
+        <span class="text-xs text-slate-400">{{ req.requested_by or '' }}</span>
+      </div>
+      {% if req.kind.value == 'write' and state == 'succeeded' %}
+      <div class="text-xs mt-1 {{ 'text-green-700' if req.verified else 'text-slate-500' }}">
+        {% if req.verified %}confirmed by reading the value back
+        {% elif req.verified is none %}issued -- there is nothing readable to confirm it with
+        {% else %}the device accepted it but the read-back disagrees{% endif %}
+      </div>
+      {% endif %}
+      {% if req.error %}
+      <div class="text-xs text-red-600 mt-1">{{ req.error }}</div>
+      {% endif %}
+      {% if req.kind.value == 'fetch' and req.body %}
+      <details class="mt-2">
+        <summary class="cursor-pointer text-xs text-sky-700">
+          Show the page ({{ req.body_bytes or 0 }} bytes{% if req.truncated %}, truncated at the cap{% endif %}{% if req.content_type %}, device declared {{ req.content_type }}{% endif %})
+        </summary>
+        <p class="text-xs text-amber-700 mt-1">
+          Below is content written by the device at {{ printer.ip }}. It is displayed
+          in a sandbox with scripts, forms and all network access disabled -- treat
+          anything it asks you to type as untrusted.
+        </p>
+        <iframe class="w-full h-96 mt-1 border border-slate-300 rounded bg-white"
+                sandbox="" loading="lazy" referrerpolicy="no-referrer"
+                title="Captured page from {{ printer.ip }}"
+                src="/manage/printers/{{ printer.id }}/remote/{{ req.id }}/body"></iframe>
+      </details>
+      {% endif %}
+    </li>
+    {% else %}
+    <li class="text-slate-400">Nothing requested yet.</li>
+    {% endfor %}
+  </ul>
+</section>

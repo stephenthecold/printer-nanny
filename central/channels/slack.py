@@ -34,6 +34,33 @@ _SEVERITY_EMOJI = {
 }
 
 
+def _esc(value: object) -> str:
+    """Escape a value for Slack's message parser.
+
+    Slack parses ``<…>`` as a control sequence, not as text: ``<https://evil|
+    https://help.acme.example>`` renders as a link whose *visible* text is the
+    attacker's choice, and ``<!channel>`` / ``<!here>`` broadcast to everyone in
+    the channel. Values reaching here are SNMP brand/model/hostname strings off
+    devices on customer LANs plus operator and end-user free text, so a printer
+    can name itself ``<!channel>`` and page an MSP's ops room, or forge a
+    plausible link in a message the team trusts because the monitoring bot sent
+    it.
+
+    Slack documents exactly three replacements for this and warns against doing
+    more: "You shouldn't encode the entire piece of text, as only the specific
+    characters shown above will be decoded for display in Slack." So this is
+    deliberately **not** ``html.escape`` -- that also rewrites quotes, which
+    Slack does not decode, leaving a literal ``&#x27;`` in every printer named
+    after somebody's office. ``&`` must be replaced first or the ampersands
+    introduced by the other two get double-encoded.
+
+    What this does not cover is ``mrkdwn`` emphasis (``*bold*``, ``_italic_``):
+    Slack offers no escape for it and it can only restyle text, never redirect
+    it.
+    """
+    return str(value).replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+
+
 class SlackChannel(NotificationChannel):
     type = "slack"
 
@@ -53,20 +80,24 @@ class SlackChannel(NotificationChannel):
         emoji = _SEVERITY_EMOJI.get(note.severity, "")
         color = _SEVERITY_COLOR.get(note.severity, "good")
         fields = []
+        # Field values are escaped too, not just the top-level text: Slack
+        # parses control sequences in attachment text and field values alike,
+        # so an unescaped field is the same hole one layer down.
         if note.client_name:
-            fields.append({"title": "Client", "value": note.client_name, "short": True})
+            fields.append({"title": "Client", "value": _esc(note.client_name), "short": True})
         if note.site_name:
-            fields.append({"title": "Site", "value": note.site_name, "short": True})
+            fields.append({"title": "Site", "value": _esc(note.site_name), "short": True})
         if note.printer_label:
-            fields.append({"title": "Printer", "value": note.printer_label, "short": False})
+            fields.append({"title": "Printer", "value": _esc(note.printer_label), "short": False})
+        app_name = self.setting("app.name", "Printer Nanny") or "Printer Nanny"
         return {
-            "text": f"{emoji} *{note.title}*".strip(),
+            "text": f"{emoji} *{_esc(note.title)}*".strip(),
             "attachments": [
                 {
                     "color": color,
-                    "text": note.body,
+                    "text": _esc(note.body),
                     "fields": fields,
-                    "footer": self.setting("app.name", "Printer Nanny") or "Printer Nanny",
+                    "footer": _esc(app_name),
                     "mrkdwn_in": ["text"],
                 }
             ],

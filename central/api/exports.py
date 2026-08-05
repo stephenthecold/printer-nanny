@@ -13,14 +13,17 @@ Tenant scoping:
 * client_readonly users only ever see their pinned client's printers
   (their session is forced through the same filter).
 
-CSV is streamed (csv.writer over a StringIO that we yield chunks from) so
+CSV is streamed (a writer over a StringIO that we yield chunks from) so
 a multi-thousand-row fleet doesn't blow up memory. Content-Disposition
 forces a download with a sensible default filename.
+
+Every cell goes through ``central.csv_safe.safe_writer``: half of these columns
+are SNMP strings off a device on a client LAN, and RFC 4180 quoting does nothing
+about a cell that starts with ``=``. See that module for the rule.
 """
 
 from __future__ import annotations
 
-import csv
 import io
 from datetime import datetime
 from typing import Iterable, Optional
@@ -31,6 +34,8 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from central import models as m
+from central import queries
+from central.csv_safe import safe_writer
 from central.db import get_db
 from central.deps import require_user
 
@@ -62,12 +67,20 @@ def _resolve_client_filter(user: m.User, client_id: Optional[int]) -> Optional[i
 
 
 def _csv_response(filename: str, header: list[str], rows: Iterable[list]) -> StreamingResponse:
-    """Stream a CSV file. Header + rows go through csv.writer so quoting/escaping
-    is RFC 4180-correct on values that contain commas, quotes, or newlines."""
+    """Stream a CSV file.
+
+    Header + rows go through ``safe_writer``, which is ``csv.writer`` plus
+    formula-injection neutralisation. The quoting/escaping stays RFC
+    4180-correct on values containing commas, quotes or newlines -- that was
+    never in question, and was never the whole job: a cell beginning ``=``,
+    ``+``, ``-`` or ``@`` is quoted correctly *and* executed by Excel. Doing it
+    in the writer means a column added to any of the three views below is
+    covered without its author having to know this exists.
+    """
 
     def iter_rows():
         buf = io.StringIO()
-        writer = csv.writer(buf)
+        writer = safe_writer(buf)
         writer.writerow(header)
         yield buf.getvalue()
         buf.seek(0)
@@ -225,3 +238,63 @@ def export_alerts(
             ]
 
     return _csv_response(f"printer-nanny-alerts-{_datestamp()}.csv", header, rows())
+
+
+@router.get("/posture.csv")
+def export_posture(
+    client_id: Optional[int] = None,
+    user: m.User = Depends(require_user),
+    db: Session = Depends(get_db),
+) -> StreamingResponse:
+    """Device security posture, one row per approved printer.
+
+    STAFF ONLY -- deliberately not merely tenant-scoped. Every other export
+    here pins a client_readonly user to their own client and serves them the
+    file; this one refuses them outright, because it must match the
+    /security/posture page it is the download button for. An export that hands
+    a customer a report the UI will not show them is a tenancy hole with a
+    filename, and it is reached by guessing a URL rather than by clicking
+    anything. See the route in central/dashboard/routes.py for why the whole
+    surface is staff-only.
+
+    The community string itself is never a column. Whether it is a factory
+    default is the finding; the value is the credential, and this file gets
+    mailed around.
+    """
+    if user.role == m.UserRole.client_readonly:
+        raise HTTPException(
+            status.HTTP_403_FORBIDDEN,
+            "The security-posture report is staff-only",
+        )
+    posture = queries.security_posture_rollup(db, client_id=client_id)
+
+    header = [
+        "client", "site", "ip", "hostname", "display_name", "brand", "model",
+        "serial", "firmware", "firmware_known",
+        "snmp_version", "snmp_grade", "snmp_source", "snmp_default_community",
+        "flags",
+    ]
+
+    def rows():
+        for row in posture["rows"]:
+            printer = row["printer"]
+            yield [
+                row["client"].name if row["client"] else "",
+                row["site"].name if row["site"] else "",
+                printer.ip or "",
+                printer.hostname or "",
+                printer.display_name or "",
+                printer.brand or "",
+                printer.model or "",
+                printer.serial or "",
+                # Honest blank, never a placeholder that reads as a version.
+                row["firmware"] or "",
+                "yes" if row["firmware_known"] else "no",
+                row["snmp_version"],
+                row["snmp_grade"],
+                row["snmp_source"] or "",
+                "yes" if row["snmp_default_community"] else "no",
+                " ".join(row["flags"]),
+            ]
+
+    return _csv_response(f"printer-nanny-posture-{_datestamp()}.csv", header, rows())

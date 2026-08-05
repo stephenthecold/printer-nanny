@@ -23,6 +23,7 @@ from sqlalchemy.orm import Session
 from central import models as m
 from central import services
 from central.audit import record
+from central.dashboard import _keystore
 from central.dashboard.manage import (
     _flash,
     _manager,
@@ -164,7 +165,7 @@ def machines_page(
         # Shown exactly once, straight after minting, then gone. Held in the
         # session rather than the database because storing it would defeat the
         # point of hashing it in the first place.
-        new_key=request.session.pop("new_enroll_key", None),
+        new_key=_keystore.pop(request.session.pop("new_enroll_key_token", None)),
     )
 
 
@@ -205,7 +206,14 @@ def create_enroll_key(
     )
     db.commit()
 
-    request.session["new_enroll_key"] = key
+    # Server-side, with only a random token in the session. Starlette SIGNS the
+    # session cookie but does not ENCRYPT it, so anything parked there is
+    # base64-readable by the browser holding it -- and this is a live,
+    # long-lived, multi-use credential that enrolls machines into this client.
+    # _keystore exists for exactly this and says so in its docstring; every
+    # other minted secret already uses it (agent keys, claim codes, event
+    # signing secrets). This was the one call site that did not.
+    request.session["new_enroll_key_token"] = _keystore.put({"key": key})
     _flash(request, "Enrollment key created. Copy it now — it is not shown again.")
     return _redirect(f"/manage/machines?client_id={client.id}")
 
@@ -677,7 +685,17 @@ async def upload_driver_package(
         if kind != "system" and package is None:
             _flash(request, "That macOS driver kind needs a package file.")
             return _redirect(f"/manage/machines?client_id={client.id}")
-        if kind == "system" and (ref.startswith("..") or not ref.startswith("/")):
+        # `pkg` as well as `system`: for both, `ref` is the path of the PPD that
+        # ends up INSTALLED on the Mac, and the client validates it the same way.
+        # Only `system` was checked here, so a `pkg` row could be saved with a
+        # relative ref -- which the client could never resolve, which read to it
+        # as "not installed yet", which ran the vendor installer as root and then
+        # failed. Every poll. The client refuses that shape now too; this stops
+        # it being savable in the first place, where the operator can still see
+        # what they typed.
+        if kind in ("system", "pkg") and (
+            ref.startswith("..") or not ref.startswith("/")
+        ):
             _flash(request, "An installed PPD path must be absolute.")
             return _redirect(f"/manage/machines?client_id={client.id}")
     elif package is None or not inf_relpath.strip():

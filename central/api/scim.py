@@ -193,6 +193,40 @@ def _is_last_active_admin(db: Session, user: m.User) -> bool:
     )
 
 
+#: ``auth_provider`` values a SCIM connector is allowed to manage. A ``local``
+#: account is one an operator created with a password, in this UI -- SCIM did not
+#: provision it and must not adopt it.
+_SCIM_MANAGED_PROVIDERS = frozenset({"scim", "oidc"})
+
+
+def _refuse_if_not_scim_managed(user: m.User) -> None:
+    """Refuse to mutate an account SCIM does not own.
+
+    Without this, a SCIM bearer token was a write handle on **every** operator
+    account, the bootstrap admin included. Three separate reaches: POST /Users
+    matched an existing row by username-or-email and flipped ``active`` back on
+    -- undoing a deliberate off-boarding; PUT replaced its username and email;
+    PATCH did the same piecemeal. Rewriting a local admin's *email* was the
+    sharpest, because it chose which address the SSO path would then match, so
+    the two features composed into an account takeover that neither one looked
+    like on its own.
+
+    Deactivation is not exempted. It is tempting -- disabling an account seems
+    safe in the way enabling one is not -- but a token that can deactivate every
+    local admin is a fleet-wide denial of service, and ``_is_last_active_admin``
+    only guarantees that the *last* one survives.
+
+    SCIM- and OIDC-provisioned accounts stay fully managed, which is the whole
+    point of the connector; only accounts it never created are off limits.
+    """
+    if user.auth_provider not in _SCIM_MANAGED_PROVIDERS:
+        raise _scim_error(
+            f"Refused: {user.username!r} is a local account, not one SCIM "
+            "provisioned. Change its auth provider first if this is a "
+            "deliberate migration.",
+            status.HTTP_409_CONFLICT,
+        )
+
 # --------------------------------------------------------------------------- #
 # Routes
 # --------------------------------------------------------------------------- #
@@ -281,6 +315,7 @@ async def create_user(request: Request, db: Session = Depends(require_scim)) -> 
     external_id = body.get("externalId")
     external_id = str(external_id).strip() if external_id else None
     if existing is not None:
+        _refuse_if_not_scim_managed(existing)
         # Idempotent re-provision: ensure active, backfill email/externalId.
         reactivated = not existing.active
         existing.active = True
@@ -327,6 +362,7 @@ async def replace_user(
     if user is None:
         raise _scim_error(f"User {user_id} not found", status.HTTP_404_NOT_FOUND)
     body = await _json_body(request)
+    _refuse_if_not_scim_managed(user)
     new_active = _as_bool(body.get("active"), user.active)
     if not new_active and _is_last_active_admin(db, user):
         raise _scim_error(
@@ -368,6 +404,7 @@ async def patch_user(
     user = db.get(m.User, user_id)
     if user is None:
         raise _scim_error(f"User {user_id} not found", status.HTTP_404_NOT_FOUND)
+    _refuse_if_not_scim_managed(user)
     body = await _json_body(request)
 
     changes = _collect_patch_changes(body)
@@ -412,6 +449,7 @@ def delete_user(
     if user is None:
         # 204 on a missing user keeps DELETE idempotent for connectors retrying.
         return Response(status_code=status.HTTP_204_NO_CONTENT)
+    _refuse_if_not_scim_managed(user)
     if _is_last_active_admin(db, user):
         raise _scim_error(
             "Refused: this is the only active admin and cannot be deprovisioned",

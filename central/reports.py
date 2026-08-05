@@ -14,7 +14,6 @@ alert recipients. The monthly CSV rides as a real attachment.
 
 from __future__ import annotations
 
-import csv
 import io
 import logging
 from datetime import datetime, timezone
@@ -24,10 +23,12 @@ from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
+from central import billing
 from central import models as m
 from central import queries
 from central.channels import Notification
 from central.channels.email import EmailChannel
+from central.csv_safe import safe_writer
 from central.runtime import load_settings
 
 log = logging.getLogger("central.reports")
@@ -124,11 +125,55 @@ def _release_report_run(db: Session, report_type: str, period_key: str) -> None:
 # --------------------------------------------------------------------------- #
 # Content builders (pure -- unit-testable without channels)
 # --------------------------------------------------------------------------- #
+def _reorder_section(db: Session) -> list:
+    """The "supplies to order" block of the weekly email, or nothing.
+
+    Aggregated per client, then per cartridge within a client, because the
+    reader's job is to raise one order per customer. A flat per-device list
+    makes them do that grouping by hand, which is where "we already ordered that
+    one" mistakes come from.
+
+    Returns an empty list when the operator has switched the section off or
+    there is nothing to order -- an empty heading in a weekly email is noise
+    that teaches people to skim past the section that matters.
+
+    Every printer/cartridge string reaching these lines has been through
+    ``reorder._one_line``: they originate from SNMP on a customer LAN and from
+    operator free-text, and this body is plain text, where an embedded newline
+    forges a report line.
+    """
+    from central.reorder import group_by_client, recommendations
+
+    rt = load_settings(db)
+    if not rt.get("reorder.include_in_reports", True):
+        return []
+    groups = group_by_client(recommendations(db))
+    if not groups:
+        return []
+
+    total = sum(g.total_units for g in groups)
+    urgent = sum(g.urgent_units for g in groups)
+    out = [
+        "",
+        f"Supplies to order ({total} cartridge(s), {urgent} needed now):",
+    ]
+    for group in groups:
+        out.append(f"  {group.client_name} — {group.total_units} to order")
+        for line in group.lines:
+            when = " [ORDER NOW]" if line.is_urgent else ""
+            model = f" ({line.model})" if line.model else ""
+            out.append(f"    {line.quantity} x {line.label}{model}{when}")
+            for printer in line.printers:
+                out.append(f"        {printer}")
+    out.append("  (recommendations only — nothing has been ordered)")
+    return out
+
+
 def build_weekly_summary(db: Session) -> Tuple[str, str]:
     """(subject, plain-text body) for the weekly fleet summary."""
     summary = queries.fleet_summary(db)
     rollup = queries.per_client_rollup(db)
-    low = queries.low_supplies(db)[:15]
+    low = queries.low_supplies(db, limit=15)
 
     lines = [
         "Weekly fleet summary",
@@ -166,6 +211,12 @@ def build_weekly_summary(db: Session) -> Tuple[str, str]:
     else:
         lines.append("  none -- all supplies healthy")
 
+    # Supplies to order — recommendations only, aggregated per client and then
+    # per cartridge so an MSP raises one order per customer rather than reading
+    # a per-device list and de-duplicating it by hand. Nothing is ordered here
+    # and nothing about an order is recorded: see central.reorder.
+    lines += _reorder_section(db)
+
     # ESG / sustainability — estimated fleet-wide print footprint, derived from
     # the same page-count history. Cheap to compute, increasingly an RFP ask.
     esg = queries.sustainability_rollup(db)
@@ -187,13 +238,44 @@ def build_weekly_summary(db: Session) -> Tuple[str, str]:
     return subject, "\n".join(lines)
 
 
-def build_monthly_billing_csv(db: Session) -> bytes:
-    """Inventory + page counts for billing import. One row per approved printer."""
+def build_monthly_billing_csv(
+    db: Session,
+    period_start: Optional[datetime] = None,
+    period_end: Optional[datetime] = None,
+) -> bytes:
+    """Inventory + page counts for billing import. One row per approved printer.
+
+    Fifteen columns, and two of the groups must not be confused with each other:
+
+    * ``page_count`` / ``mono_count`` / ``color_count`` are the device's
+      **lifetime cumulative** meters, exactly as they have always been. Their
+      meaning is deliberately unchanged so that no existing downstream import
+      silently re-interprets a file it has been reading for a year.
+    * ``pages_period`` / ``mono_period`` / ``color_period`` are what was printed
+      **during the billing period**, computed as reset-safe positive deltas over
+      the reading series (``queries.period_meters``). A firmware reflash or a
+      replacement device on the same row makes the raw difference negative;
+      those steps contribute 0 rather than cancelling out real prints, so a
+      period total can never go negative and can never be inflated by a reset.
+
+    Blank versus zero is load-bearing in both groups: a blank cell means the
+    device reported no such meter, and a device that reports no colour meter must
+    never be billed as having printed zero colour pages.
+
+    This one is emailed as an attachment and opened by hand, and four of its
+    columns (``brand``/``model``/``hostname``/``serial``) are SNMP strings from
+    a device on a client LAN -- so it goes through ``safe_writer``, not
+    ``csv.writer``. Neutralisation lives in the writer rather than at each cell
+    precisely so the period-delta columns could not bypass it.
+    """
+    if period_start is None or period_end is None:
+        period_start, period_end = billing.previous_month()
     buf = io.StringIO()
-    writer = csv.writer(buf)
+    writer = safe_writer(buf)
     writer.writerow([
         "client", "site", "ip", "hostname", "brand", "model", "serial",
-        "asset_tag", "page_count", "mono_count", "color_count", "last_seen_utc",
+        "asset_tag", "page_count", "mono_count", "color_count",
+        "pages_period", "mono_period", "color_period", "last_seen_utc",
     ])
     stmt = (
         select(m.Printer)
@@ -201,6 +283,7 @@ def build_monthly_billing_csv(db: Session) -> bytes:
         .order_by(m.Printer.client_id, m.Printer.site_id, m.Printer.ip)
     )
     for p in db.scalars(stmt):
+        period = queries.period_meters(db, p.id, period_start, period_end)
         writer.writerow([
             p.client.name if p.client else "",
             p.site.name if p.site else "",
@@ -215,6 +298,9 @@ def build_monthly_billing_csv(db: Session) -> bytes:
             # device reports no split, so a missing meter is never billed as zero.
             p.mono_count if p.mono_count is not None else "",
             p.color_count if p.color_count is not None else "",
+            period.pages if period.pages is not None else "",
+            period.mono if period.mono is not None else "",
+            period.color if period.color is not None else "",
             p.last_seen.isoformat() if p.last_seen else "",
         ])
     return buf.getvalue().encode("utf-8")
@@ -281,17 +367,36 @@ def run_scheduled_reports(db: Session, now: Optional[datetime] = None) -> dict:
 
     # --- Monthly --- (one send per YYYY-MM)
     if rt.get("reports.monthly_enabled") and now.hour >= send_hour:
-        want_dom = int(rt.get("reports.monthly_day") or 1)
+        # Clamped into the month that actually exists. Testing the raw setting
+        # against now.day meant 31 silently skipped the five short months and 29
+        # skipped February three years in four -- a billing report that misses
+        # months is a billing bug, not a scheduling nicety.
+        want_dom = billing.clamp_day_of_month(
+            int(rt.get("reports.monthly_day") or 1), now.year, now.month
+        )
         stamp = now.strftime("%Y-%m")
         if now.day == want_dom and not _has_run(db, REPORT_MONTHLY, stamp):
             if not _claim_report_run(db, REPORT_MONTHLY, stamp):
                 out["monthly_report"] = "skipped"  # another cycle claimed it
             else:
-                csv_bytes = build_monthly_billing_csv(db)
+                # The report is identified by the month it is SENT in (that is
+                # also its once-per-period claim key), and it bills the last
+                # complete month before that. Both are stated in the body,
+                # because "the June report" and "June's pages" are different
+                # things and an operator reconciling an invoice needs to know
+                # which window the period columns cover.
+                period_start, period_end = billing.previous_month(now)
+                csv_bytes = build_monthly_billing_csv(db, period_start, period_end)
                 subject = f"Monthly billing report ({stamp})"
                 body = (
-                    f"Attached: inventory and page counts for {stamp}, one row per "
-                    "monitored printer. Import into your billing system or open in Excel."
+                    "Attached: inventory and page counts, one row per monitored printer.\n"
+                    f"Billing period: {period_start.date().isoformat()} to "
+                    f"{period_end.date().isoformat()} (UTC, end exclusive).\n\n"
+                    "The *_period columns are pages printed during that window; the "
+                    "page_count/mono_count/color_count columns remain the device's "
+                    "lifetime meters. A blank cell means the device reported no such "
+                    "meter -- it does not mean zero.\n"
+                    "Import into your billing system or open in Excel."
                 )
                 ok, detail = _deliver(
                     db, rt, subject, body,

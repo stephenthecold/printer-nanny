@@ -17,6 +17,7 @@
   <div class="flex items-center gap-2 my-3 text-xs text-slate-400"><div class="flex-1 border-t"></div>or<div class="flex-1 border-t"></div></div>
   {% endif %}
   <form method="post" action="/login" class="space-y-3">
+    {{ csrf_field() }}
     {# These carried only a placeholder before. A placeholder is not an
        accessible name -- it is unavailable to assistive tech as a label and
        disappears the moment the field has content. autocomplete tokens let

@@ -64,6 +64,7 @@ import zipfile
 from dataclasses import dataclass, field
 from typing import Dict, List, Optional, Tuple
 
+from printer_nanny_agent import fsperm
 from printer_nanny_agent import workstation as ws
 
 log = logging.getLogger(__name__)
@@ -79,8 +80,28 @@ MANAGED_PREFIX = "PN "
 _NAME_BANNED = set('\\/,!"')
 
 
+#: Ceiling on what one driver package may unpack to. Generous -- vendor print
+#: drivers are genuinely large -- but finite, which is the property that was
+#: missing: the only size bound anywhere was on the COMPRESSED upload.
+_MAX_UNPACKED_BYTES = 2 * 1024 * 1024 * 1024
+
+
 class ServiceError(RuntimeError):
     """Enrollment or configuration failed in a way retrying will not fix."""
+
+
+class EnrollmentRefused(ServiceError):
+    """Central rejected the enrollment key itself.
+
+    A subclass rather than a bare ``ServiceError`` because the refused-key
+    sentinel keys on *the enrollment key*, and suppressing a start is only right
+    when the key is what was wrong. Today this is the sole ``ServiceError`` in
+    the module, so catching the parent would behave identically -- which is
+    exactly the trap: the next terminal-but-unrelated failure to be raised as a
+    ``ServiceError`` would start poisoning a perfectly good key for six hours.
+    The CLI still catches ``ServiceError`` for its exit code, so a new sibling
+    keeps the terminal exit and simply does not record a refusal.
+    """
 
 
 class DefaultPrinterError(RuntimeError):
@@ -165,15 +186,27 @@ def _windows_state_dir() -> str:
     return os.path.join(base, "PrinterNanny")
 
 
+def _secure_state_dir(directory: str) -> None:
+    """Restrict the state directory. See ``fsperm`` for why this is not chmod.
+
+    Kept as a name here because this module's callers and tests use it; the
+    implementation moved out when the identical bug turned up in the site
+    agent's definition cache, so there would not be two copies to drift.
+    """
+    fsperm.secure_dir(directory)
+
+
 def _write_json_atomic(path: str, payload: dict) -> None:
     """Write owner-only, atomically.
 
     The permissions are set on the temp file *before* the rename, so the file
     never exists under its final name in a world-readable state -- this holds a
-    live API key, and a window is still a window.
+    live API key, and a window is still a window. On Windows that mode is not
+    the protection (see ``_secure_state_dir``); the directory ACL is.
     """
     directory = os.path.dirname(path) or "."
     os.makedirs(directory, exist_ok=True)
+    _secure_state_dir(directory)
     fd, tmp = tempfile.mkstemp(dir=directory, prefix=".pn-state.")
     try:
         with os.fdopen(fd, "w", encoding="utf-8") as fp:
@@ -208,6 +241,117 @@ def save_state(state: dict, state_dir: Optional[str] = None) -> None:
     _write_json_atomic(
         os.path.join(state_dir or default_state_dir(), "machine.json"), state
     )
+
+
+# --------------------------------------------------------------------------- #
+# The refused-key sentinel
+# --------------------------------------------------------------------------- #
+# WHY THIS EXISTS
+# ---------------
+# ``workstation_cli`` returns exit 2 for a refused enrollment key, so that a
+# service manager will not loop on a terminal error. **launchd cannot honour
+# that.** The LaunchDaemon sets ``KeepAlive{SuccessfulExit=false}``, which
+# restarts on ANY non-zero exit, and launchd has no way to express "restart
+# unless the exit code is 2". So the comment on that exit code described a
+# behaviour that did not happen, and one revoked key meant a respawn every 60s
+# for as long as nobody looked. The measured cost of the last respawn loop on
+# this daemon was 9.8 MB/day of log.
+#
+# The four options considered are recorded in deploy/HARDWARE-VERIFICATION.md
+# Part 3. This is the sentinel option, with the cost that document assigns to it
+# -- "adds a state file an operator must know to delete" -- designed out:
+#
+#   * The sentinel records a **fingerprint of the key that was refused**, never
+#     the key. Re-minting a key changes the fingerprint, so the very act that
+#     fixes the problem clears the sentinel. No operator has to know it exists.
+#   * It also records **when**. A key that central un-revokes server-side does
+#     not change, so a fingerprint alone would stay poisoned forever; after
+#     REFUSAL_RETRY_SECONDS the next start tries again regardless.
+#   * The first refusal still exits **2**, truthfully. Only a *second* start
+#     carrying the same key exits 0. launchd therefore restarts exactly once and
+#     then stops, and anything reading the exit code of a real refusal is still
+#     told the truth.
+#
+# What this does NOT do is remove the need to watch launchd actually behave this
+# way on a Mac -- see the checklist in that document. A restart count is
+# observed, never inferred.
+
+#: Filename of the sentinel, alongside ``machine.json`` in the state dir. That
+#: directory is already 0700 and root-owned, which is why a fingerprint may live
+#: there; the key itself still never does.
+REFUSAL_FILENAME = "enroll-refused.json"
+
+#: How long a refusal suppresses a restart. Long enough that a fleet-wide key
+#: revocation cannot produce a respawn storm, short enough that un-revoking a
+#: key server-side is picked up by the next reboot rather than needing a visit.
+REFUSAL_RETRY_SECONDS = 6 * 3600
+
+
+def _key_fingerprint(enroll_key: str) -> str:
+    """SHA-256 of the key. A fingerprint identifies it without storing it."""
+    return hashlib.sha256(enroll_key.encode("utf-8")).hexdigest()
+
+
+def _refusal_path(state_dir: Optional[str] = None) -> str:
+    return os.path.join(state_dir or default_state_dir(), REFUSAL_FILENAME)
+
+
+def record_refusal(
+    enroll_key: str, reason: str, state_dir: Optional[str] = None
+) -> None:
+    """Note that this key was refused, so the next start need not find out again."""
+    _write_json_atomic(
+        _refusal_path(state_dir),
+        {"key_sha256": _key_fingerprint(enroll_key), "at": time.time(), "reason": reason},
+    )
+
+
+def clear_refusal(state_dir: Optional[str] = None) -> None:
+    """Forget any recorded refusal. Safe when there is none."""
+    try:
+        os.remove(_refusal_path(state_dir))
+    except OSError:
+        pass
+
+
+def refusal_blocks_start(
+    enroll_key: str, state_dir: Optional[str] = None, now: Optional[float] = None
+) -> Optional[str]:
+    """The recorded reason if starting again is pointless, else ``None``.
+
+    Deliberately has a side effect: a sentinel that does **not** apply -- a
+    different key, or one older than ``REFUSAL_RETRY_SECONDS`` -- is deleted
+    here. That is what makes the mechanism self-healing rather than a state file
+    someone has to remember. It is done on the read rather than on a successful
+    enrollment because a blocked start never reaches enrollment to clear it.
+
+    An unreadable or malformed sentinel blocks nothing and is removed. Failing
+    open is right for a file whose only job is to suppress work: the cost of
+    ignoring it is one more refusal, and the cost of trusting a corrupt one is a
+    machine that never enrolls again.
+    """
+    path = _refusal_path(state_dir)
+    if not os.path.exists(path):
+        return None
+    try:
+        with open(path, "r", encoding="utf-8") as fp:
+            data = json.load(fp)
+        recorded = str(data["key_sha256"])
+        at = float(data["at"])
+    except (OSError, ValueError, KeyError, TypeError):
+        log.warning("refusal sentinel at %s is unreadable; ignoring it", path)
+        clear_refusal(state_dir)
+        return None
+
+    if recorded != _key_fingerprint(enroll_key):
+        # A new key. Whatever was wrong with the old one is not this one's
+        # problem, and this is the common path back to service.
+        clear_refusal(state_dir)
+        return None
+    if (now if now is not None else time.time()) - at >= REFUSAL_RETRY_SECONDS:
+        clear_refusal(state_dir)
+        return None
+    return str(data.get("reason") or "enrollment was refused")
 
 
 def machine_uid(state_dir: Optional[str] = None) -> str:
@@ -492,6 +636,7 @@ def _safe_extract(archive: str, dest: str) -> None:
     reason: each is a different spelling of "write somewhere I was not given".
     """
     root = os.path.realpath(dest)
+    total = 0
     with zipfile.ZipFile(archive) as zf:
         for member in zf.infolist():
             name = member.filename
@@ -505,6 +650,19 @@ def _safe_extract(archive: str, dest: str) -> None:
             # Mode bits carry the symlink flag on zips written by unix tools.
             if (member.external_attr >> 16) & 0o170000 == 0o120000:
                 raise DriverError(f"archive contains a symlink: {name!r}")
+            total += member.file_size
+            if total > _MAX_UNPACKED_BYTES:
+                # Declared sizes, so this refuses BEFORE writing anything. The
+                # only bound that existed was on the COMPRESSED upload, and a
+                # few-KB zip expands to terabytes -- into %PROGRAMDATA% as
+                # SYSTEM. Upload is manager-only and already grants fleet-wide
+                # code execution, so this is not the sharpest edge here; it is a
+                # missing guard in a function whose own docstring calls its input
+                # attacker-shaped.
+                raise DriverError(
+                    "archive unpacks to more than "
+                    f"{_MAX_UNPACKED_BYTES // (1024 * 1024)} MB"
+                )
         zf.extractall(root)
 
 
@@ -531,16 +689,34 @@ def fetch_driver(
     The digest is checked BEFORE the archive is opened. Verifying after
     unpacking would mean a hostile archive had already been written to disk.
     """
-    sha = str(driver.get("sha256") or "")
-    if len(sha) != 64:
+    sha = str(driver.get("sha256") or "").lower()
+    # Length AND charset. `sha` becomes a path component below, and the download
+    # lands on disk BEFORE the digest is compared -- so a 64-character value of
+    # "../" * 21 + "x" writes attacker-supplied bytes wherever it points, as
+    # LocalSystem or root, before anything has been verified. Extraction is
+    # still refused by the mismatch, but by then the file exists. Central only
+    # ever writes a real hexdigest here; a compromised central, or an install
+    # running with `verify_tls = false`, is the reachable path.
+    if len(sha) != 64 or any(c not in "0123456789abcdef" for c in sha):
         raise DriverError("driver package has no usable checksum")
 
     unpacked = os.path.join(cache_dir, sha)
     marker = os.path.join(unpacked, ".pn-ok")
-    if os.path.exists(marker):
+    if os.path.exists(marker) and _marker_matches(marker, sha):
         return unpacked
+    # A marker that does not name this digest is not ours to trust. It used to be
+    # enough that the file EXISTED -- so anyone who could write into the cache
+    # (see _secure_state_dir for why that was possible on Windows) could plant a
+    # directory, a `.pn-ok` and their own .inf, and the whole verify-then-unpack
+    # path was skipped on the way to `pnputil /add-driver` as LocalSystem.
+    shutil.rmtree(unpacked, ignore_errors=True)
 
     os.makedirs(cache_dir, exist_ok=True)
+    # Same reason as the state file: this tree is under %PROGRAMDATA%, whose
+    # inherited ACL lets any user create and own a subdirectory. Everything
+    # unpacked here is handed to pnputil as LocalSystem, so a writable cache is
+    # arbitrary driver installation.
+    _secure_state_dir(cache_dir)
     archive = os.path.join(cache_dir, sha + ".pkg")
     client.download_driver(int(driver["package_id"]), archive)
 
@@ -569,6 +745,25 @@ def fetch_driver(
     with open(marker, "w", encoding="utf-8") as fp:
         fp.write(sha)
     return unpacked
+
+
+def _marker_matches(marker: str, sha: str) -> bool:
+    """Does the cache marker name the digest we are being asked for?
+
+    The marker has always RECORDED the digest; nothing ever read it back. So a
+    cache hit was decided by the file merely existing, and the verify-then-unpack
+    path -- the whole point of the digest -- was skipped on the strength of a
+    zero-byte file anyone able to write into the cache could create.
+
+    An unreadable or mismatched marker means "not cached", so the package is
+    re-fetched and re-verified. Failing that way costs one download; failing the
+    other way installs an unverified driver as LocalSystem.
+    """
+    try:
+        with open(marker, "r", encoding="utf-8") as fp:
+            return fp.read(200).strip().lower() == sha
+    except OSError:
+        return False
 
 
 def _sha256_file(path: str) -> str:
@@ -873,7 +1068,7 @@ class WorkstationClient:
         if resp.status_code == 401:
             # Central deliberately does not say whether the key is unknown or
             # revoked, so neither can this.
-            raise ServiceError("enrollment refused: the key is not valid")
+            raise EnrollmentRefused("enrollment refused: the key is not valid")
         resp.raise_for_status()
         return resp.json()
 

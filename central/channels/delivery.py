@@ -34,9 +34,9 @@ moment one comes back.
 from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
-from typing import Dict, Iterable, List, Optional, Set, Tuple
+from typing import Dict, Iterable, List, Optional, Set, Tuple, Union
 
-from sqlalchemy import or_, select
+from sqlalchemy import case, func, or_, select, update
 from sqlalchemy.orm import Session
 
 from central import models as m
@@ -74,6 +74,18 @@ WITHHELD_CHANNEL_KEY = "*withheld*"
 # terminates its owed rows instead of holding them forever. Owed rows normally
 # terminate long before this, the moment their alert resolves.
 UNROUTED_GIVE_UP = timedelta(days=7)
+
+#: Deliveries touched per ``retry_due`` cycle, per pass. The sweep runs inside
+#: the worker's leader lock, so an unbounded one spends the whole cycle: a
+#: three-hour SMTP outage on a busy fleet leaves thousands of due rows, and
+#: every one of them was re-sent -- serially, each a network round trip -- ahead
+#: of alert evaluation, forecasting and offline marking. The bound is the same
+#: 200 the sibling event sweeper already uses (``central.events.delivery``,
+#: whose comment says "bounded, unlike the notification sweeper it is modelled
+#: on"); this is that sentence finally being made false.
+#:
+#: Two passes each take up to this many rows, so a cycle is bounded at 2x it.
+BATCH_LIMIT = 200
 
 
 def _now() -> datetime:
@@ -135,7 +147,7 @@ def backoff_delay(attempts: int, base_seconds: int) -> timedelta:
 
 
 def _apply_result(
-    delivery: m.NotificationDelivery,
+    delivery: "Union[m.NotificationDelivery, m.EventDelivery]",
     result: ChannelResult,
     now: datetime,
     *,
@@ -149,6 +161,15 @@ def _apply_result(
     delivered made the durable log (and the alerts page) claim a send that never
     happened. ``skipped`` is terminal -- ``_due_deliveries`` only looks at
     pending/failed -- so it is never retried and never double-counted.
+
+    Deliberately structural rather than typed to one model: the outbound event
+    bus (``central.events.delivery``) folds ITS outcomes through this same
+    function, against ``EventDelivery`` rows shaped to match
+    (``status``/``attempts``/``last_error``/``next_attempt_at``, same
+    ``DeliveryStatus`` vocabulary). There is one backoff policy and one
+    dead-letter rule in this codebase; a second copy is the one that would drift,
+    and the rule most likely to drift is the ``sent``-vs-``ok`` distinction
+    above, which took a shipped defect to arrive at.
     """
     delivery.attempts += 1
     if result.ok:
@@ -244,15 +265,15 @@ def record_dispatch(
     return results
 
 
-def _due_deliveries(db: Session, now: datetime) -> List[m.NotificationDelivery]:
-    """Non-terminal deliveries that are due for a (re)send this cycle.
+def _due_clause(now: datetime):
+    """The "this row wants attention this cycle" predicate, as SQL.
 
-    A row is due when its status is pending/failed and ``next_attempt_at`` is
-    NULL (never scheduled) or in the past. delivered/dead/skipped rows are
-    terminal and excluded, so the job never double-sends a success, revives a
-    dead-letter, or retries a deterministic severity skip.
+    Non-terminal (pending/failed) and either never scheduled (``next_attempt_at``
+    NULL) or scheduled for a moment that has passed. delivered/dead/skipped rows
+    are terminal, so the job never double-sends a success, revives a dead-letter,
+    or retries a deterministic severity skip.
     """
-    stmt = select(m.NotificationDelivery).where(
+    return (
         m.NotificationDelivery.status.in_(
             (m.DeliveryStatus.pending, m.DeliveryStatus.failed)
         ),
@@ -261,11 +282,129 @@ def _due_deliveries(db: Session, now: datetime) -> List[m.NotificationDelivery]:
             m.NotificationDelivery.next_attempt_at <= now,
         ),
     )
+
+
+def _due_order():
+    """Oldest-due first, with a strictly total order. Read the whole comment
+    before changing it -- both halves are load-bearing.
+
+    **NULLs first.** A NULL ``next_attempt_at`` means "due since it was written"
+    (an owed row, or one never attempted), so it is older than any timestamp.
+    ``ORDER BY col ASC`` does NOT agree across our two backends -- Postgres puts
+    NULLs last, SQLite puts them first -- so the position is spelled out with a
+    CASE rather than left to the dialect. ``NULLS FIRST`` would also work on both
+    today, but only because SQLite 3.30+ happens to parse it.
+
+    **``id`` last.** Two rows sharing a ``next_attempt_at`` (an outage fails a
+    dozen deliveries inside one clock tick, all backed off to the same instant)
+    have no defined order without it, and OFFSET-free LIMIT paging over an
+    unstable order is how a batch repeats one row every cycle and never reaches
+    another.
+
+    Together with the rule that every row a pass touches is left sorting behind
+    every row it did not, this is what makes the bounded sweep starvation-free:
+    see ``retry_due``.
+    """
+    return (
+        case((m.NotificationDelivery.next_attempt_at.is_(None), 0), else_=1),
+        m.NotificationDelivery.next_attempt_at,
+        m.NotificationDelivery.id,
+    )
+
+
+def _due_deliveries(
+    db: Session,
+    now: datetime,
+    *,
+    channel_keys: Optional[Iterable[str]] = None,
+    limit: int = BATCH_LIMIT,
+) -> List[m.NotificationDelivery]:
+    """One bounded, ordered batch of deliveries to attempt this cycle.
+
+    ``channel_keys`` restricts the batch to rows something can actually be done
+    with -- the live channels plus the reserved owed key. Rows for a channel the
+    operator has since disabled are excluded **in SQL** rather than fetched and
+    skipped, because a skip does not modify the row: 4,000 queued Slack rows
+    with Slack switched off would otherwise fill every batch forever and no
+    Email row behind them would ever send. Passing ``None`` keeps every row (the
+    counting path uses that).
+
+    The trailing Python filter is not redundant with the SQL one. SQLite stores
+    these as naive strings, and a naive/aware comparison there is done by the
+    dialect on text; re-checking in Python with an explicit UTC assumption is
+    what makes "due" mean the same thing on both backends. It can only ever
+    remove rows, never add them, so it cannot defeat the LIMIT.
+    """
+    stmt = select(m.NotificationDelivery).where(*_due_clause(now))
+    if channel_keys is not None:
+        stmt = stmt.where(m.NotificationDelivery.channel_key.in_(list(channel_keys)))
+    stmt = stmt.order_by(*_due_order()).limit(limit)
     return [
         d
         for d in db.scalars(stmt)
         if d.next_attempt_at is None or _aware(d.next_attempt_at) <= now
     ]
+
+
+def _close_resolved_due(db: Session, now: datetime, limit: int) -> int:
+    """Dead-letter due deliveries whose alert has already resolved. Returns how
+    many.
+
+    Lifted out of the send loop for two reasons, both of which the loop could
+    not satisfy once it was bounded.
+
+    *It must not be gated on the channel.* A row whose channel the operator
+    disabled still has to close out when its alert resolves, or rows for
+    disabled channels accumulate forever on a system that never gets a channel
+    back -- a property this module already had, and which the SQL channel filter
+    above would otherwise have removed. This pass sees every due row.
+
+    *It must not be a query per row.* ``db.get(Alert, ...)`` inside the loop was
+    an N+1 that a thousand-row backlog paid in full. One join answers it for the
+    whole batch.
+
+    Bounded like the send pass, and it always makes progress: every row it
+    touches becomes terminal and leaves the due set, so the next cycle sees the
+    next batch rather than the same one.
+    """
+    ids = list(db.scalars(
+        select(m.NotificationDelivery.id)
+        .join(m.Alert, m.Alert.id == m.NotificationDelivery.alert_id)
+        .where(*_due_clause(now))
+        .where(m.Alert.state == m.AlertState.resolved)
+        .order_by(*_due_order())
+        .limit(limit)
+    ))
+    if not ids:
+        return 0
+    db.execute(
+        update(m.NotificationDelivery)
+        .where(m.NotificationDelivery.id.in_(ids))
+        .values(
+            status=m.DeliveryStatus.dead,
+            last_error="alert resolved before delivery",
+            next_attempt_at=None,
+        )
+        # "fetch" so rows already loaded in this Session reflect the new state.
+        # The default ("evaluate") cannot evaluate this criteria and raises;
+        # False would leave a caller holding a stale object that still says
+        # `pending`, which in a test reads as the sweep having done nothing.
+        .execution_options(synchronize_session="fetch")
+    )
+    return len(ids)
+
+
+def _not_resolved():
+    """Rows whose alert is not already resolved (agent-scope rows have none)."""
+    return or_(
+        m.NotificationDelivery.alert_id.is_(None),
+        ~select(m.Alert.id)
+        .where(
+            m.Alert.id == m.NotificationDelivery.alert_id,
+            m.Alert.state == m.AlertState.resolved,
+        )
+        .exists(),
+    )
 
 
 def _close(delivery: m.NotificationDelivery, reason: str) -> None:
@@ -371,6 +510,14 @@ def _fan_out_owed(
     if not channels:
         age = now - (_aware(delivery.created_at) or now)
         if age < UNROUTED_GIVE_UP:
+            # Still owed, still due, but moved to the back of the queue. Without
+            # this the bounded sweep would re-examine the same head batch every
+            # cycle and rows behind it would never get their give-up check --
+            # see the starvation invariant in `retry_due`. `now` is >= every
+            # due row's next_attempt_at by definition, so this cannot jump the
+            # queue, and it is <= any later `now`, so the row is due again on
+            # the very next sweep. No attempt is burned.
+            delivery.next_attempt_at = now
             out["owed"] = 1
             return out
         reason = (
@@ -435,7 +582,11 @@ def _fan_out_owed(
         delivery.status = m.DeliveryStatus.pending
         delivery.attempts = 0
         delivery.last_error = UNROUTED_DETAIL
-        delivery.next_attempt_at = None
+        # `now`, not NULL: still due next sweep, but behind everything this
+        # cycle did not reach. A NULL here sorts first, so an unconfigured
+        # channel plus a backlog larger than BATCH_LIMIT would re-dispatch the
+        # same head rows forever and never look at the rest.
+        delivery.next_attempt_at = now
         # Siblings created above would duplicate the owed row; drop them.
         for sibling in rows[1:]:
             db.delete(sibling)
@@ -447,8 +598,28 @@ def _fan_out_owed(
     return out
 
 
+def _skipped_due_count(db: Session, now: datetime, live_keys: Set[str]) -> int:
+    """How many due rows are waiting on a channel that is currently disabled.
+
+    One aggregate over the rows the send pass deliberately did not fetch, so the
+    number an operator sees is the whole backlog rather than however much of it
+    happened to fit in this cycle's batch -- which is what the old unbounded loop
+    reported, and the one part of its behaviour worth keeping exactly.
+    """
+    stmt = (
+        select(func.count())
+        .select_from(m.NotificationDelivery)
+        .where(*_due_clause(now))
+        .where(m.NotificationDelivery.channel_key != UNROUTED_CHANNEL_KEY)
+        .where(_not_resolved())
+    )
+    if live_keys:
+        stmt = stmt.where(m.NotificationDelivery.channel_key.not_in(sorted(live_keys)))
+    return int(db.scalar(stmt) or 0)
+
+
 def retry_due(db: Session, runtime: dict, now: Optional[datetime] = None) -> dict:
-    """Re-send every due pending/failed delivery; mark delivered/dead as warranted.
+    """Re-send due pending/failed deliveries; mark delivered/dead as warranted.
 
     Channels are rebuilt once from ``active_channels`` and matched to each
     delivery by ``channel_key``. A delivery whose channel is no longer active
@@ -457,22 +628,65 @@ def retry_due(db: Session, runtime: dict, now: Optional[datetime] = None) -> dic
     routable when the alert opened) is fanned out to whatever channels exist now,
     which is what makes re-enabling a channel actually recover the alert.
 
-    The resolved-alert check runs BEFORE the channel lookup: a row whose channel
-    is gone must still close out when its alert resolves, otherwise rows for
-    disabled channels -- owed rows included -- accumulate forever on a system
-    that never gets a channel back. Returns a small summary the worker loop and
-    tests can assert on.
+    Resolved alerts are closed out first, and deliberately without regard to the
+    channel: a row whose channel is gone must still close when its alert
+    resolves, otherwise rows for disabled channels -- owed rows included --
+    accumulate forever on a system that never gets a channel back.
+
+    **Bounded, and starvation-free rather than merely bounded.** This ran the
+    entire due set in one cycle, inside the worker's leader lock, one network
+    round trip at a time; a single SMTP outage on a real fleet therefore bought
+    a cycle in which alert evaluation, forecasting and offline marking simply
+    did not happen. Two passes of ``BATCH_LIMIT`` rows now cap the work. A cap
+    alone would have been a different bug -- process the first N of a stable
+    order and you can process the same N forever -- so the batch is chosen to
+    keep one invariant true:
+
+        **every row a pass touches is left sorting strictly behind every row it
+        did not touch, and every row it cannot touch is never fetched.**
+
+    Three cases, all of which had to be handled for that sentence to be true:
+
+    * A row that is sent becomes terminal, or becomes ``failed`` with a
+      ``next_attempt_at`` in the future. Off the head either way.
+    * A row whose channel is disabled cannot be modified by definition, so it is
+      excluded **in SQL** (``channel_keys``) instead of fetched and skipped.
+      Fetching it was the starvation: 4,000 Slack rows with Slack turned off
+      would have filled every batch and no Email row behind them would ever
+      have sent. The operator still gets the count, from one aggregate.
+    * A row left owed -- no channel at all, or every channel merely skipped --
+      is deliberately not charged an attempt, so nothing about it changes and it
+      would sit at the head. It is stamped ``next_attempt_at = now``, which is
+      still due on the next sweep (recovery the instant a channel appears is the
+      whole point of an owed row) but now sorts behind every row still waiting.
+
+    Returns a small summary the worker loop and tests can assert on.
     """
     now = now or _now()
     max_attempts = int(runtime.get("notifications.max_attempts", 5) or 5)
     base_seconds = int(runtime.get("notifications.retry_base_seconds", 60) or 60)
 
     channels = {ch.name: ch for ch in active_channels(runtime)}
-    retried = delivered = dead = skipped = owed = not_sent = 0
-    for delivery in _due_deliveries(db, now):
-        # Resolved alerts no longer need notifying; close the loop quietly so a
-        # transient outage that has since cleared doesn't page on stale news.
+    retried = delivered = skipped = owed = not_sent = 0
+
+    # Pass 1: stale news. Every due row whose alert already resolved, channel or
+    # no channel, closed in one statement instead of one `db.get` per row.
+    dead = _close_resolved_due(db, now, BATCH_LIMIT)
+
+    # Pass 2: the sendable batch. Only rows with a live channel, plus owed rows
+    # (which have no channel by definition and are what recovers when one is
+    # enabled). Resolved rows are excluded here rather than re-checked per row:
+    # pass 1 owns them, and anything it did not reach this cycle it reaches next.
+    live_keys = set(channels)
+    batch = _due_deliveries(
+        db, now,
+        channel_keys=live_keys | {UNROUTED_CHANNEL_KEY},
+        limit=BATCH_LIMIT,
+    )
+    for delivery in batch:
         if _alert_resolved(db, delivery):
+            # Only reachable when pass 1 hit its own limit; keep the outcome
+            # identical to what it would have been had it not.
             _close(delivery, "alert resolved before delivery")
             dead += 1
             continue
@@ -488,7 +702,7 @@ def retry_due(db: Session, runtime: dict, now: Optional[datetime] = None) -> dic
             not_sent += out["not_sent"]
             continue
         channel = channels.get(delivery.channel_key)
-        if channel is None:
+        if channel is None:  # pragma: no cover - excluded in SQL above
             skipped += 1
             continue
         note = notification_from_payload(delivery.payload)
@@ -503,6 +717,7 @@ def retry_due(db: Session, runtime: dict, now: Optional[datetime] = None) -> dic
             dead += 1
         elif delivery.status == m.DeliveryStatus.skipped:
             not_sent += 1
+    skipped += _skipped_due_count(db, now, live_keys)
     db.commit()
     return {
         "deliveries_retried": retried,
@@ -510,7 +725,10 @@ def retry_due(db: Session, runtime: dict, now: Optional[datetime] = None) -> dic
         "deliveries_dead": dead,
         # Channel is no longer active, so the row was left alone for a later
         # cycle. Distinct from deliveries_not_sent, which DID run and
-        # terminated without transmitting.
+        # terminated without transmitting. Counted over the WHOLE due set, not
+        # just this cycle's batch: the batch deliberately excludes these, and a
+        # number that shrank because the sweep was bounded would read as a
+        # backlog draining when nothing had drained.
         "deliveries_skipped": skipped,
         # Terminated as DeliveryStatus.skipped: the channel reported success but
         # transmitted nothing (severity gate / unconfigured dry-run). Counted

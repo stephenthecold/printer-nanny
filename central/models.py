@@ -9,13 +9,15 @@ tables track service and notifications. Enums are stored as VARCHAR
 from __future__ import annotations
 
 import enum
-from datetime import datetime, timezone
+from datetime import date, datetime, timezone
+from decimal import Decimal
 from typing import Optional
 
 from sqlalchemy import (
     JSON,
     Boolean,
     CheckConstraint,
+    Date,
     DateTime,
     Enum,
     Float,
@@ -26,11 +28,14 @@ from sqlalchemy import (
     String,
     Text,
     UniqueConstraint,
+    false,
     text,
+    true,
 )
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from central.db import Base
+from central.money import Money, Rate
 
 
 def utcnow() -> datetime:
@@ -194,6 +199,13 @@ class AlertConditionType(str, enum.Enum):
     # forecast pass, not by an AlertRule, so it has its own open/resolve
     # lifecycle (auto-resolves when the cartridge is swapped/refilled).
     predicted_depletion = "predicted_depletion"
+    # Rate, not state: N matching printer_events inside a rolling window of
+    # AlertRule.window_minutes. Every other condition here asks "is this true
+    # right now"; this one asks "has this happened too often lately", which is
+    # the difference between "the printer is jammed" (already covered by
+    # error_severity) and "the printer jams ten times a day" (nothing covered
+    # it). threshold = the count N; see AlertRule for the matching columns.
+    occurrence_rate = "occurrence_rate"
 
 
 class AlertState(str, enum.Enum):
@@ -264,12 +276,49 @@ class CommandType(str, enum.Enum):
     # then exit so the service manager (systemd / NSSM) restarts the process
     # against the freshly-installed code. payload: {"pip_source": "git+..."}.
     update_agent = "update_agent"
+    # --- Remote hands (see central/remote.py) ---------------------------------
+    # These three carry a ``request_id`` and are the only command types whose
+    # result travels BACK to central. They are never enqueueable through the
+    # JSON command API: each one has to pass a capability gate, a rate limit and
+    # a tenancy check that only the remote routes perform, so ``CommandIn``
+    # refuses them outright rather than letting a caller construct one directly.
+    remote_fetch = "remote_fetch"    # payload: {request_id, ip, scheme, port, path}
+    remote_probe = "remote_probe"    # payload: {request_id, ip}
+    remote_write = "remote_write"    # payload: {request_id, ip, op, oid, snmp_type, value}
 
 
 class CommandStatus(str, enum.Enum):
     pending = "pending"
     sent = "sent"
     done = "done"
+
+
+class RemoteCapability(str, enum.Enum):
+    """Whether this device accepts writes FROM US, as proven by a probe.
+
+    ``unknown`` is the shipped state of every printer and behaves exactly like
+    ``read_only`` -- a device that has not been proven writable is read-only.
+    The two are kept distinct only so the UI can say "not checked yet" instead
+    of asserting a result nobody measured.
+    """
+
+    unknown = "unknown"
+    read_only = "read_only"
+    writable = "writable"
+
+
+class RemoteRequestKind(str, enum.Enum):
+    fetch = "fetch"    # read-only HTTP GET against the device's web server
+    probe = "probe"    # no-op SNMP SET to establish capability
+    write = "write"    # a named operation from remote.WRITE_OPS
+
+
+class RemoteRequestStatus(str, enum.Enum):
+    pending = "pending"
+    sent = "sent"
+    succeeded = "succeeded"
+    failed = "failed"
+    expired = "expired"
 
 
 # --------------------------------------------------------------------------- #
@@ -288,6 +337,21 @@ class Client(Base):
     # save, and resolved defensively at read time (see central.suppression), so
     # a stale or hand-edited value degrades to UTC instead of killing the worker.
     timezone: Mapped[Optional[str]] = mapped_column(String(64), default=None)
+    # --- Per-client white-label branding (customer portal only) ---------------
+    # NULL/blank on any of these means "inherit the global app.* setting", and
+    # the fallback is per-field: a client that sets only a colour keeps the
+    # MSP's name and logo. See central/branding.py for where this is applied
+    # (and, just as deliberately, where it is not: alert email stays global).
+    #
+    # brand_primary_color is validated to #rgb/#rrggbb on the way in AND
+    # re-checked on the way out, because it is interpolated into a CSS
+    # declaration. brand_logo_url is either an external https URL or the
+    # internal /branding/clients/<id>/logo path an upload points it at; the
+    # bytes themselves live in app_assets under client_logo_asset_name(), so
+    # there is one blob store and one uploader rather than two.
+    brand_name: Mapped[Optional[str]] = mapped_column(String(120), default=None)
+    brand_logo_url: Mapped[Optional[str]] = mapped_column(String(1000), default=None)
+    brand_primary_color: Mapped[Optional[str]] = mapped_column(String(32), default=None)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
 
     sites: Mapped[list[Site]] = relationship(back_populates="client", cascade="all, delete-orphan")
@@ -339,7 +403,18 @@ class Agent(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
 
     site: Mapped[Site] = relationship(back_populates="agents")
-    subnets: Mapped[list[Subnet]] = relationship(back_populates="agent")
+    # ``Subnet`` now carries several FKs to ``agents`` (primary / standby /
+    # current lease holder), so this one has to say which it means. Without
+    # ``foreign_keys`` SQLAlchemy cannot choose and raises at mapper
+    # configuration time. It means the PRIMARY assignment, unchanged: a card on
+    # the Agents page still lists the subnets this agent owns, and the subnets
+    # it is merely standing by for are listed separately.
+    subnets: Mapped[list[Subnet]] = relationship(
+        back_populates="agent", foreign_keys="Subnet.agent_id"
+    )
+    standby_subnets: Mapped[list[Subnet]] = relationship(
+        foreign_keys="Subnet.standby_agent_id", viewonly=True
+    )
     commands: Mapped[list[Command]] = relationship(
         back_populates="agent", cascade="all, delete-orphan"
     )
@@ -450,6 +525,51 @@ class Subnet(Base):
     # created in a hurry is not silently more permissive than one created
     # carefully.
     trusted: Mapped[bool] = mapped_column(Boolean, default=False)
+    # ------------------------------------------------------------------ #
+    # Collector redundancy (see central/collector.py for the whole rule set)
+    # ------------------------------------------------------------------ #
+    # The second agent allowed to collect this subnet when the primary stops.
+    # NULL -- the overwhelmingly common case, and the shipped default -- means
+    # this subnet has no redundancy and is NOT leased at all: ``agent_id``
+    # collects it, exactly as before, with no lease check on any path. Every
+    # behaviour below switches on "is standby_agent_id set", so an upgrade
+    # changes nobody's collection.
+    #
+    # Exactly one standby, not a list: picking between two eligible standbys is
+    # a coin flip, and the whole takeover path exists to refuse coin flips
+    # (services.adopt_by_name, "exactly one candidate or none").
+    standby_agent_id: Mapped[Optional[int]] = mapped_column(
+        ForeignKey("agents.id", ondelete="SET NULL"), default=None, index=True
+    )
+    # Who is collecting RIGHT NOW, and until when. This is a lease, not a
+    # setting: it is granted by a conditional UPDATE (never read-then-write) and
+    # it expires. ``collector_lease_expires_at`` doubles as an acquisition
+    # BARRIER -- after a lease is revoked the holder is cleared but the expiry
+    # is left in place, so no successor may acquire before the instant the old
+    # holder must already have stopped collecting. That is what makes a
+    # revocation overlap-free without a second column.
+    collector_agent_id: Mapped[Optional[int]] = mapped_column(
+        ForeignKey("agents.id", ondelete="SET NULL"), default=None, index=True
+    )
+    collector_lease_expires_at: Mapped[Optional[datetime]] = mapped_column(
+        DateTime(timezone=True), default=None
+    )
+    # When the current holder took the lease -- "last takeover" in the UI.
+    collector_since: Mapped[Optional[datetime]] = mapped_column(
+        DateTime(timezone=True), default=None
+    )
+    # The predecessor and the instant its tenure ended. Readings are pushed in
+    # batches and spooled across a central outage, so a displaced collector will
+    # legitimately replay readings it took while it DID hold the lease. Those
+    # are history, not duplicates -- they are strictly older than the successor's
+    # first reading -- so ingest admits them from this one agent, bounded by
+    # this timestamp, and refuses everything else.
+    collector_prev_agent_id: Mapped[Optional[int]] = mapped_column(
+        ForeignKey("agents.id", ondelete="SET NULL"), default=None
+    )
+    collector_prev_until: Mapped[Optional[datetime]] = mapped_column(
+        DateTime(timezone=True), default=None
+    )
     # Discovery status (updated by the ingest endpoint on each /discovered batch).
     last_discovery_at: Mapped[Optional[datetime]] = mapped_column(
         DateTime(timezone=True), default=None
@@ -459,9 +579,20 @@ class Subnet(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
 
     site: Mapped[Site] = relationship(back_populates="subnets")
-    agent: Mapped[Optional[Agent]] = relationship(back_populates="subnets")
+    agent: Mapped[Optional[Agent]] = relationship(
+        back_populates="subnets", foreign_keys=[agent_id]
+    )
+    standby_agent: Mapped[Optional[Agent]] = relationship(foreign_keys=[standby_agent_id])
+    collector_agent: Mapped[Optional[Agent]] = relationship(foreign_keys=[collector_agent_id])
 
-    __table_args__ = (UniqueConstraint("site_id", "cidr", name="uq_subnet_site_cidr"),)
+    __table_args__ = (
+        UniqueConstraint("site_id", "cidr", name="uq_subnet_site_cidr"),
+        # The worker's takeover sweep looks for leased subnets whose lease has
+        # lapsed. Declared here as well as in migration 0040 because revision
+        # 0001 is ``create_all()`` -- an index declared only in a migration is
+        # silently absent on every fresh install.
+        Index("ix_subnet_collector_lease", "collector_lease_expires_at"),
+    )
 
 
 # --------------------------------------------------------------------------- #
@@ -558,6 +689,27 @@ class Printer(Base):
     # probe can add fields without a migration.
     ipp_capabilities: Mapped[Optional[dict]] = mapped_column(JSON, default=None)
 
+    # --- remote hands ------------------------------------------------------
+    # What a capability probe OBSERVED, and separately what an operator
+    # DECIDED -- the same two-column shape as driver_tier above, for the same
+    # reason: a re-probe must refresh what we saw without discarding a human's
+    # decision. The asymmetry is the security property, and it is why the
+    # operator column is a boolean rather than a mirror of the enum: an
+    # operator may pin a device read-only, and may NOT pin one writable. A
+    # "writable" override would be an inference standing in for evidence, which
+    # is the one thing this feature must never do (central/remote.py).
+    remote_capability: Mapped[RemoteCapability] = mapped_column(
+        _enum(RemoteCapability), default=RemoteCapability.unknown
+    )
+    remote_capability_at: Mapped[Optional[datetime]] = mapped_column(
+        DateTime(timezone=True), default=None
+    )
+    # What the probe (or a real write) actually observed, in words an operator
+    # can act on: "the device refused the SET (noAccess) -- SNMP writes are
+    # disabled, or the community we hold is read-only".
+    remote_capability_detail: Mapped[Optional[str]] = mapped_column(String(400), default=None)
+    remote_write_disabled: Mapped[bool] = mapped_column(Boolean, default=False)
+
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
 
     @property
@@ -621,8 +773,23 @@ class Supply(Base):
         ForeignKey("printers.id", ondelete="CASCADE"), index=True
     )
     type: Mapped[SupplyType] = mapped_column(_enum(SupplyType), default=SupplyType.toner)
+    # prtMarkerSuppliesClass, verbatim from the device: "consumed",
+    # "receptacle", "other", or NULL when the device did not report the column
+    # (also every row written before this existed).
+    #
+    # It is stored rather than derived because it changes what ``level_pct``
+    # MEANS -- remaining for a cartridge, how-full for a waste box -- and a
+    # value that reverses the reading of another column has to travel with it.
+    # NULL is honestly "not reported", never "consumed": the fallback lives in
+    # ``central.supplies.is_receptacle`` where it can be stated once, not
+    # frozen into the row by whichever agent build happened to write it.
+    supply_class: Mapped[Optional[str]] = mapped_column(String(20), default=None)
     color: Mapped[Optional[str]] = mapped_column(String(40), default=None)  # black/cyan/magenta/yellow
     description: Mapped[Optional[str]] = mapped_column(String(200), default=None)
+    # For a CONSUMED supply this is how much remains; for a RECEPTACLE it is how
+    # full the container is. Never read it without asking ``central.supplies``
+    # which one you have -- 5% is a nearly-dead cartridge and a nearly-empty
+    # waste box, and treating those alike is what this column exists to stop.
     level_pct: Mapped[Optional[float]] = mapped_column(Float, default=None)  # None == unknown
     # Coarse state when no numeric level is reported (e.g. "some remaining").
     status_note: Mapped[Optional[str]] = mapped_column(String(60), default=None)
@@ -636,6 +803,19 @@ class Supply(Base):
     # trustworthy / nothing depleting"; ``forecast_at`` stamps when it was last
     # computed so a stale estimate can be aged out or shown with a timestamp.
     days_to_empty: Mapped[Optional[float]] = mapped_column(Float, default=None)
+    # Companion to days_to_empty on the PAGES axis: level fitted against the
+    # printer's page meter rather than against time. Written by the same worker
+    # pass off the same rows, so it costs no extra query.
+    #
+    # It is a separate measurement rather than days x pages-per-day because the
+    # two say different things. Days-remaining is volatile -- a quiet week
+    # inflates it -- while pages-remaining is a property of the cartridge, is
+    # directly comparable against the page yield a cartridge is sold by, and does
+    # not move when the customer simply stops printing. The reorder
+    # recommendations (central.reorder) trigger on either, so a supply whose
+    # days estimate is too noisy to trust can still be recommended on pages.
+    # ``None`` means "no trustworthy estimate", never "plenty left".
+    pages_to_empty: Mapped[Optional[float]] = mapped_column(Float, default=None)
     forecast_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), default=None)
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
 
@@ -645,9 +825,39 @@ class Supply(Base):
         UniqueConstraint("printer_id", "type", "color", name="uq_supply_printer_type_color"),
     )
 
+    @property
+    def is_receptacle(self) -> bool:
+        """True when ``level_pct`` means "how full", not "how much is left".
+
+        A property rather than a template global because the dashboard builds
+        **four** separate Jinja environments (routes / manage / settings /
+        backup): a global registered on one is missing from the other three, and
+        the failure is a template rendering a waste box the wrong way round with
+        nothing in the log. Reached from Jinja as ``sup.is_receptacle``, so no
+        route has to remember to pass it. The rule itself lives once, in
+        ``central.supplies``; this only forwards.
+        """
+        from central.supplies import is_receptacle  # lazy: supplies imports models
+
+        return is_receptacle(self)
+
 
 class Reading(Base):
-    """Append-only time-series. Postgres partitions this monthly (see migration)."""
+    """Append-only per-poll time-series: the raw material for meters and forecasts.
+
+    NOT partitioned. This docstring used to claim Postgres range-partitioned it
+    monthly "see migration"; migration 0002 explicitly *deferred* partitioning
+    ("can be layered on later if retention volume demands it") and shipped a BRIN
+    index on ``ts`` instead, so the claim described a table that has never
+    existed. Correcting it matters because it was load-bearing in the wrong
+    direction -- it read as "growth is handled", which is how a table with no
+    retention at all reached ~52M rows/year at 500 printers unnoticed.
+
+    Volume is bounded by ``central.retention`` instead: readings older than
+    ``retention.raw_days`` (90) collapse into one ``ReadingRollup`` per printer
+    per UTC day, kept forever, and the raw rows are removed only where an
+    operator has explicitly enabled deletion.
+    """
 
     __tablename__ = "readings"
 
@@ -669,6 +879,226 @@ class Reading(Base):
 
     printer: Mapped[Printer] = relationship(back_populates="readings")
 
+    # Every hot query on this table is "one printer, a time range": the forecast
+    # pass (printer_id = X AND ts >= now-30d), supply_runway, page-count trends,
+    # and the retention pass below. Only two single-column indexes existed, so
+    # Postgres scanned every reading a printer had ever produced and filtered by
+    # ts -- on the largest table in the schema, on every worker cycle. Declared
+    # here rather than only in migration 0034 because revision 0001 is
+    # ``create_all()``: an index that lives only in a migration is silently
+    # absent on every fresh install.
+    __table_args__ = (
+        Index("ix_readings_printer_ts", "printer_id", "ts"),
+    )
+
+
+class ReadingRollup(Base):
+    """One row per printer per UTC day, collapsed from the raw ``readings`` series.
+
+    This is what makes retention possible without losing history: raw readings
+    are kept ``retention.raw_days`` (90) days and then reduce to one of these,
+    which is kept forever. See ``central.retention`` for the pass that writes
+    them and the rules that govern deletion.
+
+    **Meters are stored twice on purpose.** ``page_count``/``mono_count``/
+    ``color_count`` are the day's LAST reported (cumulative, lifetime) values and
+    ``*_start`` the day's FIRST. A cumulative meter alone answers "how many pages
+    has this device ever printed"; billing asks "how many during this period",
+    which is a difference. Holding both ends means one row answers it for its own
+    day, so a month's volume is a sum over 30 self-contained rows rather than a
+    chain that silently reads zero wherever a day is missing.
+
+    **Per-supply levels are in here, and that was a decision.** They are not
+    needed by anything today -- ``FORECAST_HISTORY_WINDOW_DAYS`` and
+    ``RUNWAY_HISTORY_WINDOW_DAYS`` are both 30, which the 90-day raw window
+    clears by 3x, so the forecast reads raw readings exclusively and must keep
+    doing so. They are here because the alternative fails silently later:
+    without them, widening the forecast window past 90 days would return exactly
+    the same answer as 90 days, forever, with no error and nothing to grep --
+    the shape of failure this codebase keeps paying for. A daily sample is
+    sufficient for that future because the fit is percent-per-DAY against a
+    3-day confidence floor: toner does not move meaningfully inside one day, so
+    sub-daily samples carry noise, not signal. ``supply_snapshot`` is the
+    end-of-day snapshot in byte-identical shape to ``Reading.supply_snapshot``,
+    so widening the window is a change to the query and not to the parser.
+
+    ``raw_pruned`` says whether the raw readings behind this row are gone. It is
+    not decoration: it selects the write rule. False means the raw rows are still
+    there, so a re-run RECOMPUTES from them (idempotent). True means they were
+    deleted, so a later straggler for the same day is MERGED in (recomputing
+    would silently discard the whole day and keep only the straggler).
+    """
+
+    __tablename__ = "reading_rollups"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    printer_id: Mapped[int] = mapped_column(
+        ForeignKey("printers.id", ondelete="CASCADE")
+    )
+    # UTC calendar day. Deliberately a DATE and deliberately UTC: readings are
+    # stored in UTC, and a rollup bucketed in a local zone would shift whenever
+    # an operator changed a client's timezone, re-bucketing history that has
+    # already been billed.
+    day: Mapped[date] = mapped_column(Date)
+
+    readings_count: Mapped[int] = mapped_column(Integer, default=0)
+    # The real span of the readings behind this row, not the day's boundaries --
+    # a printer that was offline until 18:00 must not read as a full day.
+    first_ts: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    last_ts: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+
+    page_count_start: Mapped[Optional[int]] = mapped_column(Integer, default=None)
+    page_count: Mapped[Optional[int]] = mapped_column(Integer, default=None)
+    mono_count_start: Mapped[Optional[int]] = mapped_column(Integer, default=None)
+    mono_count: Mapped[Optional[int]] = mapped_column(Integer, default=None)
+    color_count_start: Mapped[Optional[int]] = mapped_column(Integer, default=None)
+    color_count: Mapped[Optional[int]] = mapped_column(Integer, default=None)
+
+    supply_snapshot: Mapped[Optional[dict]] = mapped_column(JSON, default=None)
+
+    raw_pruned: Mapped[bool] = mapped_column(Boolean, default=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+
+    printer: Mapped[Printer] = relationship()
+
+    __table_args__ = (
+        # The uniqueness IS the idempotency: "roll up (printer, day)" has to be
+        # safe to re-run after a crash, and a second row for the same day would
+        # double-count every period that summed it.
+        UniqueConstraint("printer_id", "day", name="uq_reading_rollup_printer_day"),
+        # Fleet-wide date ranges ("every printer, last month") lead with the day;
+        # the unique constraint's btree already serves the per-printer direction.
+        Index("ix_reading_rollups_day", "day"),
+    )
+
+
+class SupplyCycle(Base):
+    """One cartridge's life in one slot: fitted here, replaced there, N pages between.
+
+    **This is the measurement half of yield-gap detection** (``central.supply_yield``);
+    the verdict is computed on read and stored nowhere, exactly as the reorder
+    recommendation is. What is persisted is what cannot be recomputed cheaply: a
+    cartridge can last a year, and the raw readings behind it are only kept
+    ``retention.raw_days`` (90). Rolling this up as it happens is what lets a
+    twelve-month drum be measured at all.
+
+    A "cycle" is bounded by two replacements, detected by
+    ``supplies.refill_boundaries`` -- a level that RISES by more than the
+    tolerance, which is the only cartridge-change signal a printer gives us. It
+    follows that the first cycle we ever see for a slot is **left-truncated**: we
+    joined partway through some cartridge's life, so its pages are not its yield.
+    That is why ``start_level_pct`` is recorded rather than assumed to be 100,
+    and why the yield calculation normalises by the level actually consumed and
+    refuses a cycle that consumed too little to say anything.
+
+    **Both ends of every measure are stored, and the direction of error matters.**
+    ``pages`` accumulates POSITIVE deltas only (a meter reset contributes 0, per
+    ``queries.positive_delta``), so a replaced formatter board cannot manufacture
+    a huge yield. ``min_level_pct`` rather than ``end_level_pct`` is what the
+    consumed fraction is measured against, because a cartridge that read 2% and
+    then blipped back to 4% before it was swapped consumed 98 points, not 96.
+    Understating consumption OVERSTATES yield, which fails towards "no finding" --
+    the safe direction when the finding is an accusation.
+    """
+
+    __tablename__ = "supply_cycles"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    printer_id: Mapped[int] = mapped_column(
+        ForeignKey("printers.id", ondelete="CASCADE"), index=True
+    )
+    # The slot, spelled as the device reports it in ``supply_snapshot``. Stored
+    # as plain strings rather than a FK to ``supplies.id`` because the slot
+    # outlives the row: a Supply row is (printer, type, color) and is rewritten
+    # by ingest, while "the black toner slot on printer 7" is what a cartridge
+    # history is about. ``color`` is "" and never NULL so the lookup is a plain
+    # equality on every dialect -- NULLs compare distinct in SQL, which would
+    # silently open a second cycle for the same slot on a device that reports no
+    # colour.
+    supply_type: Mapped[str] = mapped_column(String(40))
+    color: Mapped[str] = mapped_column(String(40), default="")
+
+    started_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    # The newest observation folded into this cycle. Doubles as the scan
+    # watermark: the next pass reads strictly after it, so a poll is never
+    # counted twice and the history is never re-walked.
+    last_ts: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    # When the replacement that ENDED this cycle was observed. NULL == still the
+    # cartridge in the machine.
+    ended_at: Mapped[Optional[datetime]] = mapped_column(
+        DateTime(timezone=True), default=None
+    )
+
+    start_level_pct: Mapped[float] = mapped_column(Float)
+    end_level_pct: Mapped[float] = mapped_column(Float)
+    min_level_pct: Mapped[float] = mapped_column(Float)
+
+    start_page_count: Mapped[Optional[int]] = mapped_column(Integer, default=None)
+    end_page_count: Mapped[Optional[int]] = mapped_column(Integer, default=None)
+    #: Positive meter deltas summed across the cycle. Not
+    #: ``end_page_count - start_page_count``: that reads a meter reset as a
+    #: negative cartridge.
+    pages: Mapped[int] = mapped_column(Integer, default=0)
+    readings_count: Mapped[int] = mapped_column(Integer, default=1)
+    #: True once a replacement closed it. An open cycle is a measurement in
+    #: progress and is never yield evidence -- a cartridge half used is not a
+    #: cartridge that under-delivered.
+    complete: Mapped[bool] = mapped_column(Boolean, default=False)
+
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+
+    printer: Mapped[Printer] = relationship()
+
+    __table_args__ = (
+        # Every read is "this printer's cycles for this slot" -- the scan looks
+        # up the open one, the report aggregates the complete ones.
+        Index("ix_supply_cycles_printer_slot", "printer_id", "supply_type", "color"),
+        # ...except the replacement log, which is "the fleet's, newest first".
+        Index("ix_supply_cycles_ended", "ended_at"),
+    )
+
+
+class SupplyYieldExpectation(Base):
+    """What a cartridge for this model is SUPPOSED to yield, entered by an operator.
+
+    Deliberately global (no ``client_id``): a cartridge's rated yield is a
+    property of the hardware, not of the customer who owns it, and scoping it per
+    tenant would mean re-typing the same datasheet number for every client with
+    the same printer.
+
+    ``model_tag`` is a case-insensitive SUBSTRING of ``printers.model``, matched
+    by the same rule as a driver package: at least 3 characters, longest tag
+    wins, and an exact tie is REFUSED rather than guessed. SNMP model strings
+    vary between firmware revisions ("Brother MFC-L8900CDW series"), so a
+    substring is the only workable match -- and a coin flip between two
+    equally-specific numbers would produce a yield gap that is an artefact of row
+    order.
+
+    ``color`` is "" for "any colour of this supply type", which is the common
+    case (one rated yield for a colour set). A row naming a specific colour is
+    more specific and wins.
+    """
+
+    __tablename__ = "supply_yield_expectations"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    model_tag: Mapped[str] = mapped_column(String(200))
+    supply_type: Mapped[str] = mapped_column(String(40))
+    color: Mapped[str] = mapped_column(String(40), default="")
+    #: Rated pages per cartridge, e.g. 3000 for a standard-yield black toner.
+    expected_pages: Mapped[int] = mapped_column(Integer)
+    note: Mapped[Optional[str]] = mapped_column(String(300), default=None)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+
+    __table_args__ = (
+        UniqueConstraint(
+            "model_tag", "supply_type", "color", name="uq_supply_yield_expectation"
+        ),
+    )
+
 
 class PrinterEvent(Base):
     __tablename__ = "printer_events"
@@ -686,6 +1116,21 @@ class PrinterEvent(Base):
 
     printer: Mapped[Printer] = relationship(back_populates="events")
 
+    # Occurrence-rate rules ask "how many matching events for this printer since
+    # T", once per rule per cycle, forever. The pre-existing single-column
+    # indexes make that a scan of everything the printer has ever emitted
+    # followed by a filter -- this table is append-only for anything that isn't
+    # a standing snmp_alert condition, so that cost grows without bound as an
+    # install ages. Leading with printer_id and ranging on ts turns it into one
+    # index range per printer.
+    #
+    # Declared here and NOT only in migration 0037: revision 0001 is a
+    # Base.metadata.create_all(), so the ORM metadata is what builds a fresh
+    # database. An index that lives only in the migration is silently absent on
+    # every new install -- exactly the trap ix_suppression_enabled_scope
+    # documents next door.
+    __table_args__ = (Index("ix_printer_events_printer_ts", "printer_id", "ts"),)
+
 
 # --------------------------------------------------------------------------- #
 # Maintenance
@@ -702,6 +1147,18 @@ class MaintenanceSchedule(Base):
     name: Mapped[str] = mapped_column(String(200))
     interval_days: Mapped[Optional[int]] = mapped_column(Integer, default=None)
     page_threshold: Mapped[Optional[int]] = mapped_column(Integer, default=None)
+    # Meter reading at the last logged service. This is what lets a page-driven
+    # schedule RECUR: the effective target is ``last_serviced_page_count +
+    # page_threshold`` (see ``page_target``), so a serviced kit is next due one
+    # kit-life further on rather than staying permanently due.
+    #
+    # NULL means "never serviced" -> base 0 -> the target is the configured
+    # threshold, which is exactly what this schedule did before the column
+    # existed. So every existing row keeps firing where it always did, and no
+    # data migration is needed. Rolling ``page_threshold`` itself instead was
+    # rejected: the step would then be read back out of the value it had just
+    # been added to, doubling on every service.
+    last_serviced_page_count: Mapped[Optional[int]] = mapped_column(Integer, default=None)
     # Component-life trigger: when set, the worker opens a maintenance-due alert
     # once the matching component-life Supply row (belt / fuser / laser / drum /
     # PF kit — populated by the Brother provider's maintenance blob) drops to
@@ -721,6 +1178,18 @@ class MaintenanceSchedule(Base):
     #   laser  -> Supply(type=other, color=laser)
     #   pf_kit -> Supply(type=other, color in {pf-kit-mp, pf-kit-1})
     COMPONENT_TYPES = ("fuser", "drum", "belt", "laser", "pf_kit")
+
+    def page_target(self) -> Optional[int]:
+        """The meter reading at which this schedule is next due on pages.
+
+        One source of truth for the worker's due-check, the schedules table and
+        the "marked serviced" message -- three places that must agree about
+        when the next service lands, and would otherwise each re-derive it.
+        None when the schedule has no page trigger at all.
+        """
+        if self.page_threshold is None:
+            return None
+        return (self.last_serviced_page_count or 0) + self.page_threshold
 
 
 class MaintenanceRecord(Base):
@@ -757,6 +1226,31 @@ class AlertRule(Base):
     channel_ids: Mapped[Optional[list]] = mapped_column(JSON, default=None)  # [notification_channel.id]
     enabled: Mapped[bool] = mapped_column(Boolean, default=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+
+    # -- occurrence_rate only ------------------------------------------------ #
+    # The rolling window W, in minutes, over which ``threshold`` occurrences are
+    # counted. NULL on every other condition type, and a rule that reaches the
+    # evaluator without one is skipped rather than defaulted: guessing a window
+    # invents the operator's intent, and an unbounded one is the append-only
+    # full-table scan the readings forecast already had to be walked back from.
+    window_minutes: Mapped[Optional[int]] = mapped_column(Integer, default=None)
+    # Which events count. Matched case-insensitively as a SUBSTRING of
+    # PrinterEvent.code -- "jam" catches the agent's "jammed" without an
+    # operator having to know the RFC 3805 spelling. NULL/empty counts every
+    # event in the window. Deliberately NOT matched against PrinterEvent.message:
+    # that text is device-controlled free-form prose, so matching on it would
+    # make a rule's behaviour depend on a string a printer on a customer LAN
+    # chooses, and it cannot be indexed.
+    match_code: Mapped[Optional[str]] = mapped_column(String(80), default=None)
+    # Optional severity floor for what counts. NULL means "any severity",
+    # including info -- several normal conditions (low paper, power-save
+    # offline) are recorded at info, so a rate rule that wants only real faults
+    # sets this to warning. Kept separate from ``severity`` (which is the
+    # severity of the alert this rule RAISES) so an operator can raise a
+    # critical alert about a flood of warnings.
+    match_min_severity: Mapped[Optional[EventSeverity]] = mapped_column(
+        _enum(EventSeverity), default=None
+    )
 
 
 class SuppressionWindow(Base):
@@ -819,8 +1313,14 @@ class SuppressionWindow(Base):
         _enum(EventSeverity), default=EventSeverity.critical
     )
     # ...unless this is False, in which case nothing breaks through at all.
+    # ``true()`` renders per dialect (1 on SQLite, TRUE on Postgres). A literal
+    # ``text("1")`` here made ``alembic upgrade head`` fail outright on a fresh
+    # Postgres -- "column is of type boolean but default expression is of type
+    # integer" -- so the documented compose bootstrap could not create its
+    # schema at all. SQLite accepts 1 for a boolean, which is exactly why the
+    # whole suite passed over it; see tests/test_postgres_bootstrap.py.
     allow_breakthrough: Mapped[bool] = mapped_column(
-        Boolean, default=True, server_default=text("1")
+        Boolean, default=True, server_default=true()
     )
     # -- recurring (quiet_hours) --------------------------------------------- #
     # Minutes from LOCAL midnight, 0..1439. end <= start wraps past midnight.
@@ -970,6 +1470,104 @@ class Command(Base):
     agent: Mapped[Agent] = relationship(back_populates="commands")
 
 
+class RemoteRequest(Base):
+    """One operator-initiated remote-hands action and whatever came back.
+
+    The request row is the durable half; the ``Command`` it spawns is the
+    transport. Keeping them apart is what lets the answer outlive the command
+    (an operator reads a captured page minutes later), and what gives the
+    agent-facing result endpoint something to authorise against: a result is
+    accepted only for a request whose ``agent_id`` is the agent posting it.
+
+    ON STORING THE BODY IN THE DATABASE
+    -----------------------------------
+    Driver packages deliberately live on a volume so ``pg_dump`` stays small,
+    and the same question was asked here. The answer is different because the
+    shapes are different: a driver archive is tens of megabytes and permanent,
+    an EWS page is tens of kilobytes and disposable. It is capped at
+    ``remote.MAX_BODY_BYTES`` on both sides of the wire, and a captured body is
+    a transient diagnostic -- there is no correctness cost to it being pruned,
+    which is exactly what makes a file store the wrong trade here.
+
+    THE BODY IS HOSTILE INPUT AND IS NEVER RENDERED IN OUR ORIGIN
+    ------------------------------------------------------------
+    It is HTML written by a device on a customer LAN. See
+    ``dashboard/remote.py`` for the isolation the one route that serves it
+    applies, and what an evil device can and cannot do with it.
+    """
+
+    __tablename__ = "remote_requests"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    printer_id: Mapped[int] = mapped_column(
+        ForeignKey("printers.id", ondelete="CASCADE"), index=True
+    )
+    # The agent asked to carry this out. SET NULL rather than CASCADE: deleting
+    # an agent must not silently erase the record that somebody restarted a
+    # customer's printer through it.
+    agent_id: Mapped[Optional[int]] = mapped_column(
+        ForeignKey("agents.id", ondelete="SET NULL"), default=None, index=True
+    )
+    command_id: Mapped[Optional[int]] = mapped_column(
+        ForeignKey("commands.id", ondelete="SET NULL"), default=None
+    )
+    kind: Mapped[RemoteRequestKind] = mapped_column(_enum(RemoteRequestKind))
+    status: Mapped[RemoteRequestStatus] = mapped_column(
+        _enum(RemoteRequestStatus), default=RemoteRequestStatus.pending, index=True
+    )
+
+    # --- what was asked for (validated by central/remote.py before it is stored)
+    scheme: Mapped[Optional[str]] = mapped_column(String(8), default=None)
+    port: Mapped[Optional[int]] = mapped_column(Integer, default=None)
+    path: Mapped[Optional[str]] = mapped_column(String(600), default=None)
+    #: WRITE_OPS key for a write; NULL otherwise.
+    op: Mapped[Optional[str]] = mapped_column(String(40), default=None)
+    #: The value sent to the device. Operator-supplied free text (a location, a
+    #: contact) -- never a credential, because no write in the vocabulary takes
+    #: one. Recorded so the audit trail and this row agree on what was written.
+    op_value: Mapped[Optional[str]] = mapped_column(String(400), default=None)
+
+    # --- who asked
+    requested_by_user_id: Mapped[Optional[int]] = mapped_column(
+        ForeignKey("users.id", ondelete="SET NULL"), default=None
+    )
+    requested_by: Mapped[Optional[str]] = mapped_column(String(120), default=None)
+
+    # --- what came back
+    http_status: Mapped[Optional[int]] = mapped_column(Integer, default=None)
+    #: The content type the DEVICE declared. Recorded and displayed as metadata;
+    #: deliberately never echoed as a response header (see dashboard/remote.py).
+    content_type: Mapped[Optional[str]] = mapped_column(String(120), default=None)
+    body: Mapped[Optional[str]] = mapped_column(Text, default=None)
+    body_bytes: Mapped[Optional[int]] = mapped_column(Integer, default=None)
+    #: True when the body was cut off at the cap -- so the UI can say so rather
+    #: than showing a truncated page as if it were the whole one.
+    truncated: Mapped[bool] = mapped_column(Boolean, default=False)
+    #: A write only reports success when the read-back agrees. NULL for a
+    #: restart, which has nothing readable afterwards and says so.
+    verified: Mapped[Optional[bool]] = mapped_column(Boolean, default=None)
+    error: Mapped[Optional[str]] = mapped_column(String(600), default=None)
+    #: Free-shape detail from the agent (redirect Location, probe OID, read-back
+    #: value). Diagnostics only; nothing keys off its contents.
+    detail: Mapped[Optional[dict]] = mapped_column(JSON, default=None)
+
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+    completed_at: Mapped[Optional[datetime]] = mapped_column(
+        DateTime(timezone=True), default=None
+    )
+
+    printer: Mapped[Printer] = relationship()
+
+    __table_args__ = (
+        # The panel reads "this printer's requests, newest first" and the rate
+        # limiter reads "this printer's most recent request" -- one printer, one
+        # ordering. Declared here as well as in the migration because revision
+        # 0001 is create_all, so an index that lives only in a migration is
+        # absent on every fresh install.
+        Index("ix_remote_requests_printer_created", "printer_id", "created_at"),
+    )
+
+
 class User(Base):
     __tablename__ = "users"
 
@@ -985,11 +1583,40 @@ class User(Base):
     # and central.deps.current_user) but the row is kept so the audit trail and
     # any historical references survive. This is the enterprise off-boarding
     # gate -- an IdP flips ``active`` to false via SCIM PATCH on termination.
-    active: Mapped[bool] = mapped_column(Boolean, default=True, server_default="1")
+    # ``true()`` rather than "1": a string default renders as DEFAULT '1', which
+    # Postgres only accepts because it coerces the literal. Keeping every boolean
+    # default dialect-rendered is what makes the rule in
+    # tests/test_postgres_bootstrap.py a clean one.
+    active: Mapped[bool] = mapped_column(Boolean, default=True, server_default=true())
     # SCIM external id: the IdP's stable identifier for this user, echoed back
     # in the SCIM ``externalId`` field so the provisioning system can correlate
     # its record with ours across renames. None for locally-created users.
     scim_external_id: Mapped[Optional[str]] = mapped_column(String(200), default=None)
+    # Set when the account's password was generated FOR the person rather than
+    # chosen BY them -- today only the first-run bootstrap (central/seed.py),
+    # which prints the generated password to the container log where it then
+    # stays forever. Until it is cleared the dashboard serves nothing but the
+    # change-password screen, which is what retires that logged value. Kept as a
+    # column rather than a session flag alone so the requirement survives the
+    # operator closing the tab and coming back.
+    must_change_password: Mapped[bool] = mapped_column(
+        Boolean, default=False, server_default=false()
+    )
+    # Bumped whenever every existing session for this user must stop working.
+    # Sessions are signed cookies with no server-side store, so `session.clear()`
+    # only asks the browser to drop one -- the signed value it already holds keeps
+    # verifying for the full max_age. Measured: after logout, after a
+    # self-service password change and after an admin reset, a captured cookie
+    # still reached /manage/users. Role changes and deactivation were already
+    # safe, because those are re-read per request; the credential-rotation
+    # actions were not, which is the wrong way round.
+    #
+    # The counter is stamped into the session at login and compared on every
+    # request. That costs nothing: both places that resolve a session to a user
+    # already load the row.
+    session_epoch: Mapped[int] = mapped_column(
+        Integer, default=0, server_default=text("0"), nullable=False
+    )
     # For client_readonly users: restrict visibility to this client.
     client_id: Mapped[Optional[int]] = mapped_column(
         ForeignKey("clients.id", ondelete="SET NULL"), default=None
@@ -1042,6 +1669,43 @@ class AuditLog(Base):
     # Human-readable object reference, e.g. "printer:42 10.4.1.120".
     target: Mapped[Optional[str]] = mapped_column(String(300), default=None)
     detail: Mapped[Optional[str]] = mapped_column(Text, default=None)
+
+
+class LoginAttempt(Base):
+    """One row per FAILED local sign-in, in two independent scopes.
+
+    This is operational state, NOT a second audit trail -- ``audit_log`` already
+    records every failure with the attempted username, and this table is pruned.
+    They are kept apart deliberately: if the throttle counted audit rows, then
+    trimming the audit log (a routine, legitimate act) would unlock every account
+    at once, and the mechanism would be hostage to a retention policy that has
+    nothing to do with it.
+
+    It lives in the database rather than in process memory because the counter
+    has to be shared and durable. api and worker are separate containers, the api
+    is scalable to more than one replica, and an attacker who can restart a
+    container -- or simply wait for a deploy -- would otherwise get a fresh
+    budget every time.
+
+    ``scope`` is "user" (a normalised username) or "ip" (the resolved source
+    address, see central/net.py). Rows are never updated, only inserted and
+    deleted, so concurrent failures cannot lose a count to a read-modify-write
+    race: the count is whatever ``SELECT count(*)`` sees.
+    """
+
+    __tablename__ = "login_attempts"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    ts: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+    scope: Mapped[str] = mapped_column(String(8))
+    key: Mapped[str] = mapped_column(String(200))
+
+    __table_args__ = (
+        # The read path is always (scope, key, ts >= window start).
+        Index("ix_login_attempts_scope_key_ts", "scope", "key", "ts"),
+        # The prune path is ts alone, across every key.
+        Index("ix_login_attempts_ts", "ts"),
+    )
 
 
 class AppSetting(Base):
@@ -1688,4 +2352,390 @@ class DirectoryConnection(Base):
         # other just created.
         UniqueConstraint("client_id", "provider", name="uq_directory_conn_client_provider"),
         CheckConstraint("provider <> 'manual'", name="ck_directory_conn_not_manual"),
+    )
+
+
+# --------------------------------------------------------------------------- #
+# Billing: cost-per-page rate cards
+# --------------------------------------------------------------------------- #
+class MeterClass(str, enum.Enum):
+    """The two things a cost-per-page contract prices separately."""
+
+    mono = "mono"
+    color = "color"
+
+
+class UnsplitPolicy(str, enum.Enum):
+    """What to do with pages from a device that reports no mono/colour split.
+
+    This is a **commercial decision an operator has to make**, which is why it
+    is a stored column rather than an inference. A mono laser genuinely has no
+    colour meter, so "colour = 0" is right for it and catastrophically wrong for
+    an MFP whose colour meter simply failed to decode.
+
+    ``exclude`` (the default) prices nothing it cannot classify: those pages are
+    reported on the invoice as unbilled, with the reason, so the gap is visible
+    rather than absorbed. ``bill_as_mono`` is the operator saying "the devices in
+    this fleet that report no split are mono devices, bill them at the mono
+    rate" -- an explicit, audited choice attached to the rate card.
+
+    It applies **only** when a device reports neither meter. A device reporting
+    mono but not colour is not covered by it: the pages it did not classify are
+    by definition not the mono ones, so calling them mono would be a different
+    and worse guess.
+    """
+
+    exclude = "exclude"
+    bill_as_mono = "bill_as_mono"
+
+
+class BillingRateCard(Base):
+    """One client's cost-per-page contract terms.
+
+    Per client, like everything else commercial here. The **active** card is the
+    one invoices are built from, and at most one card per client may be active
+    (partial unique index below) -- otherwise "which card produced this invoice"
+    has no answer, and two operators reading the same invoice would each be able
+    to point at a different set of rates.
+
+    Superseded cards are kept, inactive, rather than deleted: they are the terms
+    a previous period was billed under.
+    """
+
+    __tablename__ = "billing_rate_cards"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    client_id: Mapped[int] = mapped_column(
+        ForeignKey("clients.id", ondelete="CASCADE"), index=True
+    )
+    name: Mapped[str] = mapped_column(String(200))
+    # ISO 4217 alpha-3, validated on save. Held per card rather than globally
+    # because an MSP with customers either side of a border bills each in its
+    # own currency; nothing here converts between them, and the invoice states
+    # which one it is in rather than assuming the reader knows.
+    currency: Mapped[str] = mapped_column(String(3), default="USD")
+
+    # Base cost per page. Also the rate for every page above the last volume
+    # band, which is what removes the need for an "unbounded tier" row and the
+    # question of what happens when somebody forgets to add one.
+    mono_rate: Mapped[Decimal] = mapped_column(Rate())
+    color_rate: Mapped[Decimal] = mapped_column(Rate())
+
+    # Optional monthly minimum commitment. When the metered work comes to less
+    # than this, the invoice carries an explicit adjustment line -- never a
+    # silently inflated total.
+    minimum_charge: Mapped[Optional[Decimal]] = mapped_column(Money(), default=None)
+
+    unsplit_policy: Mapped[UnsplitPolicy] = mapped_column(
+        _enum(UnsplitPolicy), default=UnsplitPolicy.exclude
+    )
+    active: Mapped[bool] = mapped_column(Boolean, default=True)
+    notes: Mapped[Optional[str]] = mapped_column(Text, default=None)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+
+    client: Mapped[Client] = relationship()
+    tiers: Mapped[list[BillingRateTier]] = relationship(
+        back_populates="rate_card",
+        cascade="all, delete-orphan",
+        order_by="BillingRateTier.up_to",
+    )
+
+    __table_args__ = (
+        UniqueConstraint("client_id", "name", name="uq_rate_card_client_name"),
+        # At most one active card per client. Partial, so any number of retired
+        # cards can coexist -- the same shape as the printer serial index.
+        Index(
+            "uq_rate_card_client_active",
+            "client_id",
+            unique=True,
+            postgresql_where=text("active"),
+            sqlite_where=text("active"),
+        ),
+    )
+
+
+class BillingRateTier(Base):
+    """One volume band of a rate card, for one meter class.
+
+    Bands are **graduated (marginal)**, not cliff-edged: a band covers the pages
+    between the previous band's ceiling and its own, and only those. Pages above
+    the highest band fall back to the card's base rate.
+
+    Graduated rather than "whole volume at the rate its total qualifies for"
+    because the latter is non-monotonic -- printing one more page can make the
+    bill go *down* -- and an invoice nobody can explain is worse than one that is
+    slightly less generous.
+    """
+
+    __tablename__ = "billing_rate_tiers"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    rate_card_id: Mapped[int] = mapped_column(
+        ForeignKey("billing_rate_cards.id", ondelete="CASCADE"), index=True
+    )
+    kind: Mapped[MeterClass] = mapped_column(_enum(MeterClass))
+    #: Inclusive ceiling of this band, in pages.
+    up_to: Mapped[int] = mapped_column(Integer)
+    rate: Mapped[Decimal] = mapped_column(Rate())
+
+    rate_card: Mapped[BillingRateCard] = relationship(back_populates="tiers")
+
+    __table_args__ = (
+        UniqueConstraint("rate_card_id", "kind", "up_to", name="uq_rate_tier_card_kind_upto"),
+        CheckConstraint("up_to > 0", name="ck_rate_tier_up_to_positive"),
+    )
+    # No CHECK on `rate`: fixed-point columns are stored as text on SQLite (see
+    # central.money), where SQLite's type ordering makes `rate >= 0` true for
+    # every text value. A constraint that is real on one backend and vacuous on
+    # the other is worse than none -- it reads as enforcement. Non-negativity is
+    # enforced at the single point that parses operator input
+    # (`money.parse_rate`) and again in the type's bind path, which raises rather
+    # than storing a value that would mis-sort.
+# Outbound event bus
+#
+# The integration surface that replaces the dropped PSA work: typed, versioned,
+# HMAC-signed events an MSP's own systems consume. Three tables, because the
+# three things have genuinely different lifetimes -- a subscription is
+# configuration, an event is a fact that happened once, and a delivery is one
+# attempt to tell one subscriber about it.
+# --------------------------------------------------------------------------- #
+class EventSubscription(Base):
+    """One outbound destination for typed events, scoped to a tenant or global.
+
+    **Scope is the security property, not a filter.** ``client_id`` NULL means
+    global (the MSP's own systems); a non-NULL ``client_id`` means this
+    destination belongs to that customer and must never be handed another
+    customer's events. Like ``PrinterAssignment`` the rule spans tables -- an
+    event's tenancy lives on ``outbound_events.client_id`` -- so no CHECK can
+    state it; it is owned by ``events.emit.scope_allows`` and re-checked at send
+    time, because an operator may re-scope a subscription while deliveries for
+    other tenants are still queued against it.
+
+    ``secret`` is the HMAC signing key, Fernet-encrypted at rest exactly as
+    ``directory_connections.secret`` is, and for the same reason: it is never
+    rendered in the UI, never echoed in audit detail and never dumped in
+    diagnostics. It is generated server-side and shown once, never typed by an
+    operator and never read back -- an operator who loses it rotates it.
+
+    ``event_types`` NULL/empty means "every type in the catalogue". Naming types
+    explicitly is the normal case for a partner who only cares about supplies.
+    """
+
+    __tablename__ = "event_subscriptions"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    name: Mapped[str] = mapped_column(String(120))
+    #: NULL == global. Non-NULL scopes every delivery to that one tenant.
+    client_id: Mapped[Optional[int]] = mapped_column(
+        ForeignKey("clients.id", ondelete="CASCADE"), default=None, index=True
+    )
+    url: Mapped[str] = mapped_column(String(500))
+    #: Fernet ciphertext (enc:v1:...). Never plaintext, never rendered.
+    secret: Mapped[str] = mapped_column(Text)
+    #: Subset of the catalogue this destination wants; NULL/empty == all.
+    event_types: Mapped[Optional[list]] = mapped_column(JSON, default=None)
+    enabled: Mapped[bool] = mapped_column(Boolean, default=True)
+
+    # Operational bookkeeping, rendered on the subscriptions page. `last_error`
+    # is deliberately short and sanitised: transport errors quote URLs and
+    # occasionally echo credentials, and this column is displayed.
+    last_attempt_at: Mapped[Optional[datetime]] = mapped_column(
+        DateTime(timezone=True), default=None
+    )
+    last_ok: Mapped[Optional[bool]] = mapped_column(Boolean, default=None)
+    last_error: Mapped[Optional[str]] = mapped_column(String(500), default=None)
+
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=utcnow, onupdate=utcnow
+    )
+
+    client: Mapped[Optional[Client]] = relationship()
+
+
+class OutboundEvent(Base):
+    """One thing that happened, frozen for delivery to every interested subscriber.
+
+    Separate from the deliveries so a single occurrence fans out to N
+    destinations without N copies of the payload drifting apart, and so a replay
+    to a newly-added subscriber sends byte-identical data.
+
+    ``idempotency_key`` is the de-duplication contract on BOTH sides. It is
+    stable for one logical occurrence (``alert.opened:alert:412``), UNIQUE here
+    so a re-run of a worker cycle cannot emit the same fact twice, and shipped in
+    the payload and a header so a consumer can detect a replay without keeping
+    state about our retries.
+
+    ``uid`` is per-event and travels as the event id; a retry re-sends the *same*
+    uid, which is what makes "have I seen this before?" answerable downstream.
+    """
+
+    __tablename__ = "outbound_events"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    #: Public event id ("evt_<hex>"), stable across retries.
+    uid: Mapped[str] = mapped_column(String(64), unique=True, index=True)
+    type: Mapped[str] = mapped_column(String(64), index=True)
+    #: Schema version of ``data`` for this type. Bumped only on a breaking change.
+    version: Mapped[int] = mapped_column(Integer, default=1)
+    idempotency_key: Mapped[str] = mapped_column(String(200), unique=True, index=True)
+    #: NULL means the event has no single tenant (fleet-wide). Client-scoped
+    #: subscriptions receive NOTHING with a NULL client_id -- an event of unknown
+    #: tenancy is not "yours".
+    client_id: Mapped[Optional[int]] = mapped_column(
+        ForeignKey("clients.id", ondelete="CASCADE"), default=None, index=True
+    )
+    #: The per-type ``data`` block, already normalised (device strings bounded
+    #: and stripped of control characters). JSON, so quoting is json.dumps's job.
+    data: Mapped[Optional[dict]] = mapped_column(JSON, default=None)
+    occurred_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+
+    __table_args__ = (
+        # The prune sweep and the subscriptions page both read newest-first.
+        Index("ix_outbound_events_created_at", "created_at"),
+    )
+
+
+class EventDelivery(Base):
+    """One (event, subscription) send attempt -- the retry/dead-letter log.
+
+    Deliberately shaped like ``NotificationDelivery``: same ``DeliveryStatus``
+    vocabulary, same ``attempts`` / ``last_error`` / ``next_attempt_at`` triple,
+    so ``channels.delivery._apply_result`` and ``backoff_delay`` fold an outcome
+    into it unchanged. There is exactly one backoff policy and one dead-letter
+    rule in this codebase, and a second implementation is the one that would
+    drift.
+    """
+
+    __tablename__ = "event_deliveries"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    event_id: Mapped[int] = mapped_column(
+        ForeignKey("outbound_events.id", ondelete="CASCADE"), index=True
+    )
+    subscription_id: Mapped[int] = mapped_column(
+        ForeignKey("event_subscriptions.id", ondelete="CASCADE"), index=True
+    )
+    status: Mapped[DeliveryStatus] = mapped_column(
+        _enum(DeliveryStatus), default=DeliveryStatus.pending, index=True
+    )
+    attempts: Mapped[int] = mapped_column(Integer, default=0)
+    last_error: Mapped[Optional[str]] = mapped_column(Text, default=None)
+    #: NULL == due now, matching NotificationDelivery.
+    next_attempt_at: Mapped[Optional[datetime]] = mapped_column(
+        DateTime(timezone=True), default=None, index=True
+    )
+    #: HTTP status of the last attempt, when there was one.
+    response_status: Mapped[Optional[int]] = mapped_column(Integer, default=None)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=utcnow, onupdate=utcnow
+    )
+
+    event: Mapped[OutboundEvent] = relationship()
+    subscription: Mapped[EventSubscription] = relationship()
+
+    __table_args__ = (
+        # One row per destination per event. Without it a re-emit (or a manual
+        # replay) would double-deliver, which is precisely what the idempotency
+        # key exists to make unnecessary.
+        UniqueConstraint(
+            "event_id", "subscription_id", name="uq_event_delivery_event_subscription"
+        ),
+    )
+
+
+class DeviceDefinition(Base):
+    """A server-pushed device/model definition: how to read one printer family's
+    private MIB, expressed as data an agent interprets rather than code it runs.
+
+    WHY THIS TABLE EXISTS
+    ---------------------
+    Today a printer model whose supply levels only live in a vendor-private OID
+    needs a new *provider* -- Python, in the agent package, shipped by a release
+    and rolled out to every site. That makes "we bought a different Brother" an
+    engineering task. A definition moves the model-specific part into a row an
+    operator can add, and the agent fetches it.
+
+    WHAT IS SAFE ABOUT IT
+    ---------------------
+    ``spec`` holds the normalised output of
+    :func:`central.device_definitions.validate_definition`, never an operator's
+    raw text. That validator is the security boundary and it is deliberately
+    narrow: a closed vocabulary of six decoders, numeric-only OIDs, no regular
+    expressions at all, unknown keys refused, and every list/string/depth
+    bounded. The agent re-runs the identical validator on receipt and on every
+    load of its local cache, because a signature proves who produced bytes, not
+    that they are safe.
+
+    SCOPE
+    -----
+    ``client_id`` is NULL for the normal case: a definition describes *hardware*,
+    which is not tenant data, and re-uploading the same Brother definition per
+    customer is how an MSP stops maintaining them. A non-NULL ``client_id``
+    scopes a definition to one customer, and an agent is served only the global
+    set plus the clients it actually collects for -- so one tenant's custom
+    definition never reaches another's site.
+
+    PRECEDENCE (also enforced agent-side; stated here because it is the rule an
+    operator is deciding about when they tick the box)
+    -----------------------------------------------------------------------
+    Built-in providers run FIRST and a definition runs LAST, filling only what
+    is still missing. A definition cannot silently replace a value a
+    hardware-proven provider produced -- that is how a working printer stops
+    working. ``override_builtin`` lets an operator overrule that deliberately;
+    it defaults off, it is shown in the UI, it is audited, and the agent records
+    per-field in ``provider_trace`` that it happened. "Never silently" is the
+    contract, not "never".
+    """
+
+    __tablename__ = "device_definitions"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    #: Stable slug. This -- not the row id -- is what the agent keys on, so a
+    #: definition can be exported, re-imported or restored and still be the
+    #: same definition to every agent holding a cache.
+    key: Mapped[str] = mapped_column(String(64), index=True)
+    name: Mapped[str] = mapped_column(String(200))
+    #: NULL = every client (hardware knowledge). Set = scoped to one tenant.
+    client_id: Mapped[Optional[int]] = mapped_column(
+        ForeignKey("clients.id", ondelete="CASCADE"), default=None, index=True
+    )
+    enabled: Mapped[bool] = mapped_column(Boolean, default=True)
+    #: The validated, normalised definition. Never the operator's raw text.
+    spec: Mapped[dict] = mapped_column(JSON, default=dict)
+    #: Bumped on every content change. Operator-facing ("has this been edited
+    #: since the incident?"); the agent's change detection uses the feed digest,
+    #: which cannot drift from the content the way a hand-bumped number can.
+    revision: Mapped[int] = mapped_column(Integer, default=1)
+    notes: Mapped[Optional[str]] = mapped_column(Text, default=None)
+
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+    created_by_user_id: Mapped[Optional[int]] = mapped_column(
+        ForeignKey("users.id", ondelete="SET NULL"), default=None
+    )
+
+    client: Mapped[Optional[Client]] = relationship()
+
+    __table_args__ = (
+        # One definition per key per scope. Two rows with the same key would
+        # both be served, and the agent -- which dedupes by key -- would take
+        # whichever arrived last: a coin flip over what a fleet reads.
+        UniqueConstraint("key", "client_id", name="uq_device_definitions_key_scope"),
+        # ...and that constraint does NOT cover the common case, which is the
+        # trap worth writing down: SQL treats NULLs as distinct in a UNIQUE, so
+        # the constraint above permits any number of *global* rows sharing a
+        # key -- exactly the rows every agent receives. A partial unique index
+        # is what actually enforces it, and both dialects this project runs on
+        # support one.
+        Index(
+            "uq_device_definitions_global_key",
+            "key",
+            unique=True,
+            sqlite_where=text("client_id IS NULL"),
+            postgresql_where=text("client_id IS NULL"),
+        ),
+        Index("ix_device_definitions_enabled", "enabled"),
     )

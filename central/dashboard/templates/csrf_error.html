@@ -1,0 +1,28 @@
+{# Standalone by design -- see dashboard/templating.render_csrf_error. It must
+   render with no database, so it extends nothing and reads no branding. #}
+<!doctype html>
+<html lang="en" class="h-full bg-slate-50">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Request not accepted &middot; Printer Nanny</title>
+  <link rel="stylesheet" href="/static/tailwind.css">
+</head>
+<body class="h-full text-slate-800">
+<main class="max-w-xl mx-auto px-4 py-16">
+  <div role="alert" class="rounded-lg border border-amber-300 bg-amber-50 p-5">
+    <h1 class="text-lg font-semibold text-amber-900 mb-2">That request was not accepted</h1>
+    <p class="text-sm text-amber-900">{{ message }}</p>
+    <p class="text-sm text-amber-900 mt-3">
+      Nothing was changed. This check exists so another website cannot make your
+      browser act on your Printer Nanny session without your knowledge.
+    </p>
+    <div class="mt-5 flex items-center gap-3">
+      <button type="button" onclick="history.back()"
+              class="inline-flex items-center rounded bg-slate-900 px-3 py-1.5 text-sm font-medium text-white hover:bg-slate-700 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-offset-1 focus-visible:ring-sky-500">Go back</button>
+      <a href="/" class="text-sm text-sky-700 hover:underline rounded focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-offset-1 focus-visible:ring-sky-500">Return to the dashboard</a>
+    </div>
+  </div>
+</main>
+</body>
+</html>

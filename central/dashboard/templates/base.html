@@ -12,8 +12,29 @@
      simply absent. #}
   <link rel="stylesheet" href="/static/tailwind.css">
   <script src="/static/htmx.min.js"></script>
+  {# First-party, not vendored: keeps the freshness strip's relative age honest
+     once the page is open, and announces a freshness transition exactly once.
+     `defer` so it runs after the document is parsed but before DOMContentLoaded. #}
+  <script src="/static/dashboard.js" defer></script>
 </head>
-<body class="h-full text-slate-800 flex flex-col">
+{#
+  CSRF for every htmx-driven control, declared once.
+
+  htmx inherits hx-headers down the DOM, so this single attribute covers every
+  hx-post/hx-delete in the app -- including the bare buttons that have no form
+  to carry a hidden field, and including controls added later. That is the whole
+  point of putting it here rather than on each control: the per-control version
+  is one attribute somebody forgets, and a forgotten one fails as a button that
+  silently does nothing.
+
+  Plain <form> posts cannot set a header at all, so they carry {{ csrf_field() }}
+  instead. Both channels are accepted by central/csrf.py and both are equally
+  unforgeable cross-site; the rule is one channel per mechanism, not per page.
+
+  |tojson quotes and escapes the value, and the attribute is single-quoted
+  because the JSON is double-quoted.
+#}
+<body class="h-full text-slate-800 flex flex-col" hx-headers='{"X-CSRF-Token": {{ csrf_token()|tojson }}}'>
 {% if user %}
 {#
   Navigation.
@@ -37,7 +58,14 @@
   "Agents", not "Manage", even though both prefixes match.
 #}
 {%- set path = request.url.path if request is defined else '' -%}
-{%- set g_watch = [{'href': '/', 'label': 'Overview'}, {'href': '/alerts', 'label': 'Alerts'}] -%}
+{#- /printers is in the "watching the fleet" group for every role: staff search
+    the whole fleet, a client_readonly user gets the same page scoped to their
+    own client (see routes.printer_search). Longest-prefix marking means the
+    printer *detail* page at /printers/<id> lights this entry up too, which is
+    correct -- it is where the search takes you. -#}
+{%- set g_watch = [{'href': '/', 'label': 'Overview'},
+                   {'href': '/printers', 'label': 'Printers'},
+                   {'href': '/alerts', 'label': 'Alerts'}] -%}
 {%- if nav_pending is defined and nav_pending -%}
   {#- Approvals only appears when there is actually something to approve. -#}
   {%- set _ = g_watch.append({'href': '/approvals', 'label': 'Approvals', 'badge': nav_pending}) -%}
@@ -47,15 +75,33 @@
                     {'href': '/manage/maintenance', 'label': 'Maintenance'}] -%}
 {%- if user.role.value != 'client_readonly' -%}
   {%- set _ = g_manage.append({'href': '/manage/onboard', 'label': 'Onboard'}) -%}
+  {%- set _ = g_manage.append({'href': '/manage/alert-rules', 'label': 'Alert rules'}) -%}
   {%- set _ = g_manage.append({'href': '/manage/suppression', 'label': 'Quiet hours'}) -%}
 {%- endif -%}
 {%- set g_admin = [] -%}
 {%- if user.role.value != 'client_readonly' -%}
+  {#- Supplies to order. In the "watch the fleet" sense it is a list you read,
+      but it sits here with Security because both are cross-fleet reports rather
+      than the day-to-day inbox. client_readonly sees the same recommendations
+      in their portal, scoped to their own fleet. -#}
+  {%- set _ = g_admin.append({'href': '/supplies/reorder', 'label': 'Supplies'}) -%}
+  {#- Cartridge yield. Its own entry rather than a tab on Supplies: one page
+      answers "what do I order this week", the other "is what we ordered
+      delivering what it should", and they are read months apart. Active
+      marking is longest-prefix, so /supplies/yield lights this and not
+      Supplies. -#}
+  {%- set _ = g_admin.append({'href': '/supplies/yield', 'label': 'Yield'}) -%}
   {%- set _ = g_admin.append({'href': '/security/posture', 'label': 'Security'}) -%}
 {%- endif -%}
 {%- if user.role.value == 'admin' -%}
   {%- set _ = g_admin.append({'href': '/manage/people', 'label': 'People'}) -%}
   {%- set _ = g_admin.append({'href': '/manage/machines', 'label': 'Machines'}) -%}
+  {#- Billing sits with the admin group because the route is admin-only: a rate
+      card is a customer's commercial terms, not fleet operations. A link that
+      303s for half the operators who can see it is worse than no link. -#}
+  {%- set _ = g_admin.append({'href': '/manage/billing', 'label': 'Billing'}) -%}
+  {%- set _ = g_admin.append({'href': '/manage/events', 'label': 'Events'}) -%}
+  {%- set _ = g_admin.append({'href': '/manage/definitions', 'label': 'Definitions'}) -%}
   {%- set _ = g_admin.append({'href': '/manage/users', 'label': 'Users'}) -%}
   {%- set _ = g_admin.append({'href': '/manage/audit', 'label': 'Audit'}) -%}
   {%- set _ = g_admin.append({'href': '/admin/backup', 'label': 'Backup'}) -%}
@@ -135,6 +181,19 @@
     </div>
   </div>
   {% endif %}
+  {# "Data as of ...". Rendered on every fleet-state surface (the routes that
+     pass `freshness`); pages that show no device state deliberately don't.
+     Sits directly under the worker banner because the two compose: the banner
+     says WHY nothing is arriving, this says HOW LONG it has not been arriving.
+     See central/freshness.py and templates/_freshness.html. #}
+  {% if freshness is defined and freshness %}
+  {% include "_freshness.html" %}
+  {% endif %}
+  {# The only live region on this page, and deliberately outside the strip: the
+     strip re-renders on a timer, and announcing a timer is how a screen reader
+     is made unusable. dashboard.js writes here only when the freshness STATE
+     changes, so a transition is announced once and a steady state is silent. #}
+  <span id="pn-freshness-live" role="status" aria-live="polite" class="sr-only"></span>
   {% if flash %}
   <div class="mb-4 rounded bg-emerald-50 border border-emerald-200 text-emerald-800 text-sm px-3 py-2">{{ flash }}</div>
   {% endif %}
@@ -142,6 +201,41 @@
 </main>
 {# 'app is defined' keeps this safe when base.html is loaded as a module
    for {% from "base.html" import ... %} elsewhere — module imports don't carry context. #}
+{#
+  htmx does not swap a non-2xx response, so before this an htmx button whose
+  request was refused did *nothing at all* -- no message, no change, nothing in
+  the page to distinguish "refused" from "broken". That is the exact shape of
+  failure the CSRF work had to avoid re-creating, so the handling is global
+  rather than per-control: every htmx error surfaces here, not just this one.
+
+  The server's message is inserted with textContent, never innerHTML: it is a
+  response body, and a response body is not something to hand to an HTML parser.
+#}
+<div id="htmx-error" role="alert" aria-live="assertive"
+     class="hidden fixed bottom-4 right-4 z-50 max-w-sm rounded border border-red-300 bg-red-50 px-3 py-2 text-sm text-red-900 shadow-lg"></div>
+<script>
+  (function () {
+    var box = document.getElementById('htmx-error');
+    var timer = null;
+    document.body.addEventListener('htmx:responseError', function (evt) {
+      var xhr = evt.detail.xhr;
+      var text = (xhr.responseText || '').trim();
+      // Only a short plain-text body is a message meant for a human; an HTML
+      // error page is not, and its markup would be shown as literal text.
+      if (!text || text.length > 400 || text.charAt(0) === '<') {
+        text = 'That action was not completed (HTTP ' + xhr.status + '). Reload the page and try again.';
+      }
+      box.textContent = text;
+      box.classList.remove('hidden');
+      if (timer) { clearTimeout(timer); }
+      timer = setTimeout(function () { box.classList.add('hidden'); }, 12000);
+    });
+    document.body.addEventListener('htmx:sendError', function () {
+      box.textContent = 'Could not reach the server. Check your connection and try again.';
+      box.classList.remove('hidden');
+    });
+  })();
+</script>
 {% if app is defined %}
 <footer class="border-t bg-white text-xs text-slate-500">
   <div class="max-w-7xl mx-auto px-4 py-3 flex items-center gap-4 flex-wrap">
@@ -163,14 +257,34 @@
 <span class="px-2 py-0.5 rounded text-xs font-medium {{ colors.get(status.value, 'bg-slate-100') }}">{{ status.value }}</span>
 {%- endmacro %}
 
-{% macro level_bar(pct) -%}
+{#
+  level_bar(pct, receptacle=False)
+
+  ``pct`` is always what the DEVICE reported, and ``receptacle`` says which way
+  to read it: remaining for a cartridge, how-full for a waste box. Colour is
+  chosen from the headroom left, so "red means go and do something" holds for
+  both -- without the flag, an emptied waste box reading 5 drew a red bar and a
+  full one drew green, which is exactly backwards. Pass
+  ``supplies.is_receptacle(sup)``; callers that cannot (a bare percentage with
+  no Supply row behind it) get the cartridge reading, which is what every
+  existing call site already meant.
+-#}
+{% macro level_bar(pct, receptacle=False) -%}
 {%- if pct is none -%}
 <span class="text-xs text-slate-400">unknown</span>
 {%- else -%}
-{%- set color = 'bg-red-500' if pct <= 10 else ('bg-amber-500' if pct <= 25 else 'bg-green-500') -%}
+{%- set headroom = (100 - pct) if receptacle else pct -%}
+{%- set color = 'bg-red-500' if headroom <= 10 else ('bg-amber-500' if headroom <= 25 else 'bg-green-500') -%}
 <div class="flex items-center gap-2">
-  <div class="w-24 h-2 bg-slate-200 rounded"><div class="h-2 rounded {{ color }}" style="width: {{ pct }}%"></div></div>
-  <span class="text-xs tabular-nums w-9">{{ '%.0f'|format(pct) }}%</span>
+  {# `| float` is a security guard, not formatting. `pct` is a supply level off
+     a device on a customer LAN and it lands in a CSS declaration, where
+     escaping stops an attribute breakout but not `1%; background-image:
+     url(https://attacker/)`. It is a Float column today, so a non-numeric value
+     already 500s on the comparison above -- but that is incidental, and a caller
+     handing this macro a preformatted string would make it a live sink with
+     nothing in between. Coercing here makes the safety structural. #}
+  <div class="w-24 h-2 bg-slate-200 rounded"><div class="h-2 rounded {{ color }}" style="width: {{ pct | float }}%"></div></div>
+  <span class="text-xs tabular-nums {{ 'w-16' if receptacle else 'w-9' }}">{{ '%.0f'|format(pct) }}%{% if receptacle %} full{% endif %}</span>
 </div>
 {%- endif -%}
 {%- endmacro %}

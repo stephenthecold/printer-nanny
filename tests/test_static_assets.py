@@ -49,8 +49,6 @@ NON_UTILITY_TOKENS = frozenset(
     {
         # A JS selector hook -- styled by nothing, queried by querySelectorAll.
         "bulk-row",
-        # A security-posture flag value, compared against in a Jinja conditional.
-        "insecure-snmp",
         # The placeholder host in the default agent pip source; agents.html tests
         # for it to decide whether the install command has been configured yet.
         "your-org",
