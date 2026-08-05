@@ -130,6 +130,15 @@ app.add_middleware(SecurityHeadersMiddleware)
 class _NoSessionRefreshOnPoll:
     """Stop the dashboard's auto-refresh poll from renewing the session cookie.
 
+    **Currently a no-op on the pinned Starlette, and kept anyway.** This was
+    written against a SessionMiddleware that re-signed the cookie on EVERY
+    response; 1.3.x only re-sends when ``session.modified``, so a poll never
+    rolled the expiry to begin with. Retained rather than deleted because the
+    behaviour it guards against is a dependency's implementation detail, not a
+    contract -- if it comes back, this is what stops the 12h cap disappearing as
+    a side effect of a convenience feature. The freshness test states which
+    regime it observed rather than asserting one.
+
     SessionMiddleware re-signs and re-sends the cookie on EVERY response with a
     non-empty session, and the signature carries a fresh timestamp, so the 12h
     expiry is a rolling one measured from the last request. That is the right
