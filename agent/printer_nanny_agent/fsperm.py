@@ -27,6 +27,7 @@ from __future__ import annotations
 import logging
 import os
 import stat
+import subprocess
 
 log = logging.getLogger(__name__)
 
@@ -42,6 +43,47 @@ WINDOWS_ACL_SIDS = ("*S-1-5-18", "*S-1-5-32-544")
 #: subprocess on every poll; doing it at first use still covers the case that
 #: actually matters, which is a directory somebody else created before us.
 _secured: set = set()
+
+
+def _current_user_sid() -> "str | None":
+    """This process's own SID, or None if it cannot be read."""
+    try:
+        proc = subprocess.run(
+            ["whoami", "/user", "/fo", "csv", "/nh"],
+            capture_output=True, text=True, timeout=15,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return None
+    if proc.returncode != 0:
+        return None
+    parts = [p.strip().strip('"') for p in (proc.stdout or "").strip().split(",")]
+    sid = parts[-1] if parts else ""
+    return sid if sid.startswith("S-1-") else None
+
+
+def _grantees() -> "list[str]":
+    """SYSTEM + Administrators, plus this process's own account.
+
+    The service runs as LocalSystem, which is already on the list, so in
+    production this adds nothing and the directory stays closed to every other
+    user -- which was the whole point.
+
+    It matters for the other caller: a technician running
+    ``printer-nanny-workstation --once`` to diagnose a machine. Without their own
+    SID, the first call here would revoke their access to a directory they had
+    just created, and every subsequent write would fail with a PermissionError
+    naming a path they own. That is a worse outcome than the inherited ACL was,
+    and it is not hypothetical -- it broke the driver-package tests the moment
+    this helper started running against their cache.
+
+    Adding the current account is much narrower than the inherited
+    ``BUILTIN\\Users`` this replaces: one account, not every logged-in user.
+    """
+    grantees = list(WINDOWS_ACL_SIDS)
+    mine = _current_user_sid()
+    if mine and f"*{mine}" not in grantees:
+        grantees.append(f"*{mine}")
+    return grantees
 
 
 def reset_cache_for_tests() -> None:
@@ -77,7 +119,7 @@ def secure_dir(directory: str) -> None:
     # argv list, never a shell: the path comes from %PROGRAMDATA%, a config file
     # or a --state-dir flag, and is not ours to trust with a command line.
     cmd = ["icacls", real, "/inheritance:r"]
-    for sid in WINDOWS_ACL_SIDS:
+    for sid in _grantees():
         cmd += ["/grant:r", f"{sid}:(OI)(CI)F"]
     try:
         proc = subprocess.run(cmd, capture_output=True, text=True, timeout=30)

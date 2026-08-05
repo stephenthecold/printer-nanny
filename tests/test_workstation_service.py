@@ -22,6 +22,7 @@ import time
 
 import pytest
 
+from printer_nanny_agent import fsperm
 from printer_nanny_agent import workstation as ws
 from printer_nanny_agent import workstation_service as svc
 from printer_nanny_agent.platforms import windows as windows_backend
@@ -784,7 +785,7 @@ def test_once_neither_reads_nor_writes_the_sentinel(tmp_path, monkeypatch):
 def test_the_state_directory_is_restricted_to_its_owner(tmp_path):
     d = tmp_path / "state"
     d.mkdir()
-    svc._state_dir_secured.discard(os.path.abspath(str(d)))
+    fsperm.reset_cache_for_tests()
     svc._secure_state_dir(str(d))
 
     if os.name == "nt":
@@ -792,18 +793,23 @@ def test_the_state_directory_is_restricted_to_its_owner(tmp_path):
             out = subprocess.run(
                 ["icacls", str(d)], capture_output=True, text=True
             ).stdout
-            # SIDs resolve to localised names in icacls OUTPUT, so assert on what
-            # is stable: nobody else is on the list, and inheritance is broken.
+            # SIDs resolve to localised names in icacls OUTPUT, so assert the
+            # PROPERTY rather than the names or a fixed count: inheritance is
+            # broken, and the group that granted every logged-in user is gone.
             # A surviving "(I)" means /inheritance:r did not take.
             assert "(I)" not in out, f"inheritance was not broken:\n{out}"
+            assert "Users:" not in out, f"every logged-in user still has it:\n{out}"
             entries = [ln for ln in out.splitlines()[:20] if ":(" in ln]
-            assert len(entries) == 2, (
-                f"expected exactly SYSTEM + Administrators:\n{out}"
+            # SYSTEM + Administrators, plus this process's own account. That
+            # third grant is deliberate: under the service it resolves to SYSTEM
+            # and adds nothing, but for a technician running --once it is the
+            # difference between a working diagnostic and a PermissionError on a
+            # directory they had just created.
+            assert 2 <= len(entries) <= 3, (
+                f"expected SYSTEM + Administrators (+ this account):\n{out}"
             )
         finally:
-            # Hand it back, or pytest's tmp cleanup cannot remove the directory:
-            # the ACL this test just proved works also locks out the test runner,
-            # which is a real (if mild) demonstration that it took effect.
+            # Hand it back so pytest's tmp cleanup can remove the directory.
             subprocess.run(
                 ["icacls", str(d), "/reset", "/T", "/C", "/Q"],
                 capture_output=True, text=True,
@@ -818,7 +824,7 @@ def test_securing_the_state_directory_never_takes_the_service_down(tmp_path, mon
     because a silent failure is how this stayed invisible."""
     d = tmp_path / "state"
     d.mkdir()
-    svc._state_dir_secured.discard(os.path.abspath(str(d)))
+    fsperm.reset_cache_for_tests()
 
     def boom(*a, **k):
         raise OSError("icacls is missing")
