@@ -42,7 +42,11 @@ from central.dashboard.templating import render_csrf_error
 from central.db import create_all, get_db
 from central.health import database_ok, worker_health
 from central.logging_config import configure_logging
-from central.middleware import ForcePasswordChangeMiddleware, PeerAddressMiddleware
+from central.middleware import (
+    ForcePasswordChangeMiddleware,
+    PeerAddressMiddleware,
+    SecurityHeadersMiddleware,
+)
 
 # `uvicorn central.main:app` gives the api container no entrypoint of ours, so
 # importing this module is the only moment we get before it serves. Until this
@@ -70,6 +74,21 @@ app = FastAPI(
     title="Printer Nanny",
     version="1.0.0",
     dependencies=[Depends(csrf_protect)],
+    # /docs, /redoc and /openapi.json are FastAPI defaults and were UNAUTHENTICATED
+    # -- 198 KB of schema describing every SCIM, agent-ingest, workstation-enroll
+    # and management route, served to anyone who could reach the dashboard. The
+    # Caddyfile reverse-proxies every path, so on a real deployment that is the
+    # internet. They are also the only four routes that are plain Starlette
+    # Routes rather than APIRoutes, which is why the app-level CSRF dependency
+    # never applied to them (harmless -- they are GET) and a useful reminder that
+    # "declared on the app" and "reaches everything" are not the same claim.
+    #
+    # Off by default rather than gated behind auth: an MSP running this does not
+    # need interactive API docs in production, and an operator who does can turn
+    # them on knowingly.
+    openapi_url="/openapi.json" if settings.expose_api_docs else None,
+    docs_url="/docs" if settings.expose_api_docs else None,
+    redoc_url="/redoc" if settings.expose_api_docs else None,
 )
 # Honor X-Forwarded-Proto/For from the reverse proxy so request.base_url returns
 # https:// when Caddy/Nginx terminates TLS in front of us. Without this, the
@@ -103,6 +122,9 @@ app.add_middleware(
 )
 # Outermost: must see scope["client"] before ProxyHeadersMiddleware rewrites it.
 app.add_middleware(PeerAddressMiddleware)
+# Outside everything, so the headers land on error responses and redirects too --
+# a 303 to /login is still a framable page.
+app.add_middleware(SecurityHeadersMiddleware)
 
 
 class _NoSessionRefreshOnPoll:

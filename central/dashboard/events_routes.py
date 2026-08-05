@@ -98,14 +98,30 @@ def _selected_types(raw: List[str]) -> Optional[list]:
     return sorted(wanted)
 
 
+class _BadScope(ValueError):
+    """A client scope that was supplied but could not be read."""
+
+
 def _client_id(raw: str) -> Optional[int]:
+    """The scope for a subscription: a client id, or ``None`` for fleet-wide.
+
+    Raises rather than returning ``None`` on an unparseable value. ``None`` means
+    GLOBAL here, so swallowing the error silently converted a tenant-scoped
+    subscription into one that fans every client's events out to that
+    destination -- failing open, in the direction of disclosure, on a typo.
+
+    Admin-only, so this was a fail-open rather than an escalation. It is still
+    the wrong direction, and `_selected_types` two functions up already refuses
+    to guess in the analogous case, as does `definitions.py` on this exact
+    input. Refusing is the house pattern; this was the deviation.
+    """
     raw = (raw or "").strip()
     if not raw:
         return None
     try:
         return int(raw)
     except (TypeError, ValueError):
-        return None
+        raise _BadScope(raw) from None
 
 
 @router.get("/events", response_class=HTMLResponse)
@@ -187,7 +203,11 @@ def create_subscription(
         request.session["events_error"] = str(exc)
         return _redirect("/manage/events")
 
-    scope = _client_id(client_id)
+    try:
+        scope = _client_id(client_id)
+    except _BadScope:
+        request.session["events_error"] = "Unknown client."
+        return _redirect("/manage/events")
     if scope is not None and db.get(m.Client, scope) is None:
         request.session["events_error"] = "That client no longer exists."
         return _redirect("/manage/events")
@@ -260,7 +280,11 @@ def update_subscription(
         request.session["events_error"] = str(exc)
         return _redirect("/manage/events")
 
-    scope = _client_id(client_id)
+    try:
+        scope = _client_id(client_id)
+    except _BadScope:
+        request.session["events_error"] = "Unknown client."
+        return _redirect("/manage/events")
     if scope is not None and db.get(m.Client, scope) is None:
         request.session["events_error"] = "That client no longer exists."
         return _redirect("/manage/events")

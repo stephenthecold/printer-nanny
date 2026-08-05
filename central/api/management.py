@@ -37,9 +37,14 @@ def list_clients(db: Session = Depends(get_db)):
 
 
 @router.post("/clients", response_model=s.ClientOut, status_code=201)
-def create_client(payload: s.ClientIn, db: Session = Depends(get_db)):
+def create_client(
+    payload: s.ClientIn, request: Request,
+    db: Session = Depends(get_db), user: m.User = Depends(require_staff),
+):
     client = m.Client(name=payload.name, notes=payload.notes)
     db.add(client)
+    db.flush()
+    record(db, request, user, "client.create", target=f"client:{client.id} {client.name}")
     db.commit()
     db.refresh(client)
     return client
@@ -55,10 +60,16 @@ def list_sites(client_id: Optional[int] = None, db: Session = Depends(get_db)):
 
 
 @router.post("/sites", response_model=s.SiteOut, status_code=201)
-def create_site(payload: s.SiteIn, db: Session = Depends(get_db)):
+def create_site(
+    payload: s.SiteIn, request: Request,
+    db: Session = Depends(get_db), user: m.User = Depends(require_staff),
+):
     _get_or_404(db, m.Client, payload.client_id)
     site = m.Site(**payload.model_dump())
     db.add(site)
+    db.flush()
+    record(db, request, user, "site.create",
+           target=f"site:{site.id} {site.name}", detail=f"client={site.client_id}")
     db.commit()
     db.refresh(site)
     return site
@@ -74,10 +85,18 @@ def list_subnets(site_id: Optional[int] = None, db: Session = Depends(get_db)):
 
 
 @router.post("/subnets", response_model=s.SubnetOut, status_code=201)
-def create_subnet(payload: s.SubnetIn, db: Session = Depends(get_db)):
+def create_subnet(
+    payload: s.SubnetIn, request: Request,
+    db: Session = Depends(get_db), user: m.User = Depends(require_staff),
+):
     _get_or_404(db, m.Site, payload.site_id)
     subnet = m.Subnet(**payload.model_dump())
     db.add(subnet)
+    db.flush()
+    # The CIDR, never the community string: audit detail is rendered in the UI
+    # and travels in diagnostics.
+    record(db, request, user, "subnet.create",
+           target=f"subnet:{subnet.id} {subnet.cidr}", detail=f"site={subnet.site_id}")
     db.commit()
     db.refresh(subnet)
     return subnet
@@ -93,7 +112,10 @@ def list_agents(site_id: Optional[int] = None, db: Session = Depends(get_db)):
 
 
 @router.post("/agents", response_model=s.AgentCreated, status_code=201)
-def create_agent(payload: s.AgentIn, db: Session = Depends(get_db)):
+def create_agent(
+    payload: s.AgentIn, request: Request,
+    db: Session = Depends(get_db), user: m.User = Depends(require_staff),
+):
     """Create an agent and return its API key ONCE (only the hash is stored)."""
     _get_or_404(db, m.Site, payload.site_id)
     api_key = generate_api_key()
@@ -101,6 +123,15 @@ def create_agent(payload: s.AgentIn, db: Session = Depends(get_db)):
         site_id=payload.site_id, name=payload.name, api_key_hash=hash_api_key(api_key)
     )
     db.add(agent)
+    db.flush()
+    # This route mints a long-lived agent credential and returns it in plaintext,
+    # and it recorded NOTHING -- while the dashboard route doing the same thing
+    # records `agent.create`. A tech-role session could therefore mint a
+    # credential for any tenant and leave no trail, which also made CLAUDE.md's
+    # claim that agent CRUD is audited false for half the ways to reach it.
+    # The key is never in the detail: only the hash is stored anywhere.
+    record(db, request, user, "agent.create",
+           target=f"agent:{agent.id} {agent.name}", detail=f"site={agent.site_id}")
     db.commit()
     db.refresh(agent)
     base = s.AgentOut.model_validate(agent)
@@ -126,29 +157,54 @@ def list_printers(
 
 
 @router.post("/printers", response_model=s.PrinterOut, status_code=201)
-def create_printer(payload: s.PrinterIn, db: Session = Depends(get_db)):
+def create_printer(
+    payload: s.PrinterIn, request: Request,
+    db: Session = Depends(get_db), user: m.User = Depends(require_staff),
+):
     _get_or_404(db, m.Client, payload.client_id)
-    _get_or_404(db, m.Site, payload.site_id)
+    site = _get_or_404(db, m.Site, payload.site_id)
+    # Same invariant the dashboard route enforces: site_id and client_id are two
+    # separately-writable columns that the ingest path assumes agree, and ingest
+    # keys on the SITE. A row whose site belongs to another client is handed to
+    # that client's agent -- snmp_community included -- while billing still
+    # charges the pages here.
+    if site.client_id != payload.client_id:
+        raise HTTPException(
+            status.HTTP_400_BAD_REQUEST,
+            f"site {payload.site_id} does not belong to client {payload.client_id}",
+        )
     printer = m.Printer(**payload.model_dump(), discovery_state=m.DiscoveryState.approved)
     db.add(printer)
+    db.flush()
+    record(db, request, user, "printer.create",
+           target=f"printer:{printer.id} {printer.ip}",
+           detail=f"client={printer.client_id}")
     db.commit()
     db.refresh(printer)
     return printer
 
 
 @router.post("/printers/{printer_id}/approve", response_model=s.PrinterOut)
-def approve_printer(printer_id: int, db: Session = Depends(get_db)):
+def approve_printer(
+    printer_id: int, request: Request,
+    db: Session = Depends(get_db), user: m.User = Depends(require_staff),
+):
     printer = _get_or_404(db, m.Printer, printer_id)
     printer.discovery_state = m.DiscoveryState.approved
+    record(db, request, user, "printer.approve", target=f"printer:{printer.id} {printer.ip}")
     db.commit()
     db.refresh(printer)
     return printer
 
 
 @router.post("/printers/{printer_id}/ignore", response_model=s.PrinterOut)
-def ignore_printer(printer_id: int, db: Session = Depends(get_db)):
+def ignore_printer(
+    printer_id: int, request: Request,
+    db: Session = Depends(get_db), user: m.User = Depends(require_staff),
+):
     printer = _get_or_404(db, m.Printer, printer_id)
     printer.discovery_state = m.DiscoveryState.ignored
+    record(db, request, user, "printer.ignore", target=f"printer:{printer.id} {printer.ip}")
     db.commit()
     db.refresh(printer)
     return printer

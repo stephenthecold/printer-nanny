@@ -10,7 +10,7 @@ from sqlalchemy.orm import Session
 
 from central import models as m
 from central.db import get_db
-from central.security import hash_api_key
+from central.security import api_key_matches
 
 
 def authenticated_agent(
@@ -23,7 +23,12 @@ def authenticated_agent(
         raise HTTPException(status.HTTP_401_UNAUTHORIZED, "Missing bearer token")
     token = authorization[7:].strip()
     agent = db.get(m.Agent, agent_id)
-    if agent is None or agent.api_key_hash != hash_api_key(token):
+    # api_key_matches wraps hmac.compare_digest. Both sides are SHA-256 hex so a
+    # timing oracle leaks digest bytes rather than the key and is not practically
+    # exploitable over HTTP -- but the helper existed, unused, while the two
+    # call sites here used `!=`. A correct primitive nobody calls is worse than
+    # no primitive: it reads as covered.
+    if agent is None or not api_key_matches(token, agent.api_key_hash):
         # Same error whether the id or the key is wrong — don't leak which.
         raise HTTPException(status.HTTP_401_UNAUTHORIZED, "Invalid agent credentials")
     return agent
@@ -54,7 +59,7 @@ def authenticated_machine(
         machine is None
         or not machine.active
         or not machine.api_key_hash
-        or machine.api_key_hash != hash_api_key(token)
+        or not api_key_matches(token, machine.api_key_hash)
     ):
         raise HTTPException(status.HTTP_401_UNAUTHORIZED, "Invalid machine credentials")
     return machine

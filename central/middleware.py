@@ -75,3 +75,54 @@ class ForcePasswordChangeMiddleware:
             return
         response = RedirectResponse("/account", status_code=303)
         await response(scope, receive, send)
+
+
+#: Sent on every response. Deliberately short, and deliberately not a full CSP:
+#: this codebase's templates carry inline event handlers by design (the blessed
+#: `data-` + `dataset` shape), so a `script-src` policy strict enough to be worth
+#: having would break them, and one loose enough not to would be decoration.
+#: These four cost nothing and close things a CSRF token cannot.
+_SECURITY_HEADERS = (
+    # The CSRF module's motivating case is /admin/backup -- a whole-database
+    # dump, plus a restore. A synchronizer token does NOT stop a framed,
+    # transparent dashboard where an admin is baited into clicking the real
+    # button: the token is in the frame, and it is correct. Framing is the hole
+    # the token cannot cover, so it gets closed here.
+    (b"x-frame-options", b"DENY"),
+    (b"content-security-policy", b"frame-ancestors 'none'"),
+    # Device-supplied strings reach exports and the remote-hands body view; a
+    # browser sniffing one of those into HTML would undo the escaping.
+    (b"x-content-type-options", b"nosniff"),
+    # Dashboard URLs carry client and printer ids. Full URLs should not travel to
+    # a printer's embedded web server in a Referer header.
+    (b"referrer-policy", b"strict-origin-when-cross-origin"),
+)
+
+
+class SecurityHeadersMiddleware:
+    """Add the headers above, without overwriting a route that set its own.
+
+    ``central/dashboard/remote.py`` serves a captured device page under a much
+    stricter, purpose-built CSP (``sandbox; default-src 'none'; ...``). Blanket
+    -setting a weaker one here would replace it, so anything already present
+    wins -- the specific policy beats the default.
+    """
+
+    def __init__(self, app: Callable) -> None:
+        self.app = app
+
+    async def __call__(self, scope: Any, receive: Any, send: Any) -> None:
+        if scope.get("type") != "http":
+            await self.app(scope, receive, send)
+            return
+
+        async def send_with_headers(message: Any) -> None:
+            if message.get("type") == "http.response.start":
+                headers = message.setdefault("headers", [])
+                present = {name.lower() for name, _ in headers}
+                for name, value in _SECURITY_HEADERS:
+                    if name not in present:
+                        headers.append((name, value))
+            await send(message)
+
+        await self.app(scope, receive, send_with_headers)

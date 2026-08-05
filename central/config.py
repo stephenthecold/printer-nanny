@@ -144,6 +144,14 @@ class Settings(BaseSettings):
     # backend (see ``secure_cookies``).
     session_cookie_secure: Optional[bool] = None
 
+    # Serve /docs, /redoc and /openapi.json. OFF by default: they were on, and
+    # unauthenticated, publishing the whole route map -- SCIM, agent ingest,
+    # workstation enrollment, every management route -- to anyone who could
+    # reach the dashboard, which behind the shipped Caddyfile means the
+    # internet. Env rather than a DB-backed setting because it is decided when
+    # the app object is constructed, before a session can be read.
+    expose_api_docs: bool = False
+
     # Verbosity of this project's own loggers (central.* / printer_nanny.*), see
     # central/logging_config.py. Env rather than the DB-backed settings in
     # central/runtime.py because it is a bootstrap concern: the first thing worth
