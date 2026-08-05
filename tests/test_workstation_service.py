@@ -842,3 +842,127 @@ def test_writing_state_secures_the_directory_it_creates(tmp_path, monkeypatch):
     monkeypatch.setattr(svc, "_secure_state_dir", lambda d: seen.append(d))
     svc.save_state({"api_key": "pnm_secret"}, str(tmp_path))
     assert seen == [str(tmp_path)]
+
+
+# --------------------------------------------------------------------------- #
+# ...and the directory it must never lock
+# --------------------------------------------------------------------------- #
+def _perm_fingerprint(path) -> str:
+    """Everything about this directory's permissions, as text.
+
+    Compared for EQUALITY rather than inspected, because a fresh directory does
+    not look the way you would guess. Since 3.12, CPython's ``os.mkdir`` applies
+    a real DACL from its mode argument on Windows, so a just-created directory
+    already carries no inherited ``(I)`` entries at all. An oracle asking "did
+    inheritance survive" therefore answers "this is locked" for a directory
+    nobody has touched, and passes whether or not the guard works -- which is
+    exactly what it did when this was written that way first. Equality needs no
+    theory about what an untouched directory looks like.
+    """
+    if os.name == "nt":
+        proc = subprocess.run(["icacls", str(path)], capture_output=True, text=True)
+        assert proc.returncode == 0, f"icacls failed: {proc.stderr}"
+        return "\n".join(
+            ln.strip() for ln in proc.stdout.splitlines()
+            if ln.strip() and "Successfully processed" not in ln
+        )
+    return oct(stat.S_IMODE(os.stat(path).st_mode))
+
+
+def _hand_back(path) -> None:
+    """Undo a lock so pytest's tmp cleanup can remove the directory."""
+    if os.name == "nt":
+        subprocess.run(
+            ["icacls", str(path), "/reset", "/T", "/C", "/Q"],
+            capture_output=True, text=True,
+        )
+
+
+def test_the_working_directory_is_never_what_gets_locked(tmp_path, monkeypatch):
+    """Both callers compute ``os.path.dirname(path) or "."``, so a bare filename
+    hands this helper the process's own working directory -- a source checkout
+    under pytest or in CI, and for a technician running ``--once`` whatever
+    directory they were standing in. Locking that is never what "secure my state
+    directory" meant, and the damage is noticed a long way from the call.
+
+    Measured on Windows 11 without the guard: inheritance stripped from the
+    working directory and a fresh grant added. This asserts the ACL is untouched
+    rather than that a subprocess was skipped, because the harm is the ACL.
+    """
+    monkeypatch.chdir(tmp_path)
+    if os.name != "nt":
+        # NOT cosmetic. pytest hands out a tmp_path that is ALREADY 0700, so on
+        # POSIX -- which is where CI runs -- a broken guard would chmod it to
+        # 0700 and this test would pass having proven nothing. Starting from a
+        # mode the guard's failure would visibly change is the whole assertion.
+        os.chmod(tmp_path, 0o755)
+    fsperm.reset_cache_for_tests()
+
+    before = _perm_fingerprint(tmp_path)
+    try:
+        fsperm.secure_dir(os.path.dirname("machine.json") or ".")
+        assert _perm_fingerprint(tmp_path) == before, (
+            "securing a bare filename's directory rewrote the working directory"
+        )
+    finally:
+        _hand_back(tmp_path)
+
+
+def test_a_state_directory_below_the_working_directory_is_still_locked(
+    tmp_path, monkeypatch
+):
+    """The exemption is the working directory itself, never a prefix of it.
+
+    A state directory that happens to sit under where the process was started
+    still holds a live bearer credential, so the guard must not become a way to
+    opt out of the protection by choosing where you run from.
+    """
+    monkeypatch.chdir(tmp_path)
+    state = tmp_path / "state"
+    state.mkdir()
+    if os.name != "nt":
+        # Deterministic starting point: tmp_path's children inherit the runner's
+        # umask, and one of 0o077 would make this pass without securing anything.
+        os.chmod(state, 0o755)
+    fsperm.reset_cache_for_tests()
+
+    before = _perm_fingerprint(state)
+    try:
+        fsperm.secure_dir(str(state))
+        assert _perm_fingerprint(state) != before, (
+            "a state directory under the working directory was left open"
+        )
+    finally:
+        _hand_back(state)
+
+
+def test_an_unreadable_working_directory_still_secures_and_never_raises(
+    tmp_path, monkeypatch
+):
+    """``os.getcwd()`` raises once the working directory is deleted out from under
+    a long-running process. Asking it is new here, and it must not have made this
+    helper able to throw: ``secure_dir`` is best-effort by contract, and the
+    workstation client calls it while persisting a **single-use** enrollment
+    credential -- an exception there bricks the machine, where a directory left
+    open merely wants fixing. So a working directory we cannot identify falls
+    through to securing the directory we were actually asked about.
+    """
+    state = tmp_path / "state"
+    state.mkdir()
+    if os.name != "nt":
+        os.chmod(state, 0o755)
+
+    def deleted_cwd():
+        raise FileNotFoundError(2, "No such file or directory")
+
+    monkeypatch.setattr(os, "getcwd", deleted_cwd)
+    fsperm.reset_cache_for_tests()
+
+    before = _perm_fingerprint(state)
+    try:
+        fsperm.secure_dir(str(state))  # must not raise
+        assert _perm_fingerprint(state) != before, (
+            "an unreadable working directory silently disabled the protection"
+        )
+    finally:
+        _hand_back(state)

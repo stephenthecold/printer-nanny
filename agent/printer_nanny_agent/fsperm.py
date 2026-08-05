@@ -91,6 +91,31 @@ def reset_cache_for_tests() -> None:
     _secured.clear()
 
 
+def _is_cwd(real: str) -> bool:
+    """Is ``real`` the process's own working directory?
+
+    Compared through ``normcase`` because the point is to recognise the working
+    directory *however it was spelled*: on Windows ``C:\\Foo`` and ``c:\\foo`` are
+    one directory, and a check that missed on letter case would hand the
+    damaging path back at exactly the moment it was meant to stop it.
+
+    ``os.getcwd()`` **raises** when the working directory has been deleted out
+    from under a long-running process -- POSIX only; Windows refuses to delete a
+    directory any process is sitting in. That must not escape: ``secure_dir``
+    promises never to take a caller down, and the workstation client calls it
+    while persisting a single-use enrollment credential, where an exception
+    bricks the machine rather than merely leaving a directory open. A working
+    directory we cannot identify is therefore reported as "not it", which is
+    exactly the behaviour that predates this check.
+    """
+    try:
+        cwd = os.getcwd()
+    except OSError as exc:  # pragma: no cover - needs a deleted cwd
+        log.debug("cannot read the working directory (%s); securing %s", exc, real)
+        return False
+    return os.path.normcase(real) == os.path.normcase(cwd)
+
+
 def secure_dir(directory: str) -> None:
     """Restrict ``directory`` to SYSTEM + Administrators (Windows) or 0700 (POSIX).
 
@@ -105,6 +130,21 @@ def secure_dir(directory: str) -> None:
     real = os.path.abspath(directory)
     if real in _secured:
         return
+
+    # Both callers derive this as ``os.path.dirname(path) or "."``, so a bare
+    # filename resolves to the PROCESS'S CURRENT DIRECTORY -- which in a test run
+    # or a CI checkout is the source tree, and on a hand-run agent is wherever
+    # the technician happened to be standing. Locking that to 0700, or stripping
+    # inheritance off it on Windows, is never what a caller means by "secure my
+    # state directory", and it is the kind of side effect that is noticed a long
+    # way from here.
+    #
+    # Deliberately not cached in ``_secured``: the check is free, and a process
+    # that later chdirs away must still be able to secure this directory for real.
+    if _is_cwd(real):
+        log.debug("not restricting %s: it is the current directory", real)
+        return
+
     _secured.add(real)
 
     if os.name != "nt":

@@ -695,7 +695,7 @@ converges is not a queue that prints.
 
 ### 6c. Version — **cut, on half its gate**
 
-Currently **central 1.0.0 / agent 1.0.1**. 1.0.0 was gated on §6a **and** §6b.
+Currently **central 1.0.0 / agent 1.0.2**. 1.0.0 was gated on §6a **and** §6b.
 §6a is done, D4 included -- the item named by name as blocking any 1.0 claim.
 §6b has not run, so the version is a claim about the code and not about the
 product. §0 says so plainly rather than leaving it to be discovered.
