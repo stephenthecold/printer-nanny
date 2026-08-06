@@ -124,7 +124,13 @@ services:
     # the stamps from the DB rather than "did I personally stamp", so a second
     # worker container that loses the leader-lock race stays healthy while the
     # leader does the work. Fails on stale, never-stamped, or DB-unreachable.
-    # start_period allows waiting on db + the first cycle (interval above).
+    # start_period allows waiting on db + the first cycle (interval above), and
+    # must stay AHEAD of schema_check.DEFAULT_WAIT_SECONDS (300s): since the
+    # worker waits for the api's `alembic upgrade head` before its first cycle,
+    # time-to-first-stamp is that wait plus the cycle, not the cycle alone. At
+    # the old 180s a migration slower than three minutes -- the exact case the
+    # wait exists for -- marked the worker unhealthy for having correctly
+    # waited, and "no stamp yet" is unhealthy by design (central/worker/health.py).
     # Note: under plain compose an unhealthy container is a SIGNAL (visible in
     # `docker compose ps`), not a restart -- nothing here depends on it.
     healthcheck:
@@ -132,7 +138,7 @@ services:
       interval: 30s
       timeout: 10s
       retries: 3
-      start_period: 180s
+      start_period: 360s
     restart: unless-stopped
 
   # Local SMTP catcher so email alerts are visible in dev (http://localhost:8025).

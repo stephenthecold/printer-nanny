@@ -19,6 +19,7 @@ from central.health import DEFAULT_CYCLE_SECONDS
 from central.logging_config import configure_logging
 from central.reports import run_scheduled_reports
 from central.retention import roll_up_readings
+from central.schema_check import DEFAULT_WAIT_SECONDS, wait_for_schema
 from central.worker import jobs
 
 log = logging.getLogger("printer_nanny.worker")
@@ -177,6 +178,16 @@ def main(argv: Optional[list] = None) -> int:
         default=DEFAULT_CYCLE_SECONDS,
         help="seconds between cycles",
     )
+    parser.add_argument(
+        "--schema-wait",
+        type=float,
+        default=DEFAULT_WAIT_SECONDS,
+        metavar="SECONDS",
+        help=(
+            "wait up to SECONDS for the api container's migrations before the "
+            "first cycle (0 disables the wait)"
+        ),
+    )
     args = parser.parse_args(argv)
 
     # Shared with the api container (central/logging_config.py) rather than a
@@ -195,6 +206,21 @@ def main(argv: Optional[list] = None) -> int:
     # error (see #8 / migration 0007 follow-up).
     if settings.is_sqlite:
         create_all()
+
+    # Close the startup race with the api container's migrations. `docker
+    # compose up -d` starts api and worker in PARALLEL, and only the api runs
+    # `alembic upgrade head` -- so without this the first cycle can query a
+    # schema that is still being built. That is not hypothetical: on 2026-08-05
+    # a production stack with 2.4M readings took long enough over fifteen
+    # revisions that the worker's first cycle lost seven jobs to
+    # UndefinedColumn/UndefinedTable, and every cycle after it was clean. The
+    # database was fine; the worker asked too early.
+    #
+    # Waiting rather than refusing, and giving up rather than waiting forever:
+    # an install whose operator genuinely has not migrated must still come up,
+    # because the dashboard is how they fix it.
+    if args.schema_wait > 0:
+        wait_for_schema(timeout=args.schema_wait, where="worker")
 
     if args.once:
         print(run_cycle(args.interval))

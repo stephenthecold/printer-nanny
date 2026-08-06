@@ -69,6 +69,36 @@ die()  { echo "error: $*" >&2; exit 1; }
 need() { command -v "$1" >/dev/null 2>&1 || die "'$1' not found in PATH"; }
 in_repo() { [ -f docker-compose.yml ] && [ -d central ] && [ -f deploy/Dockerfile ]; }
 
+# Did the migrations actually reach the database? This script used to PRINT that
+# they had -- unconditionally, immediately after `up -d`, having observed
+# nothing. On 2026-08-05 that line was the only thing an operator saw while the
+# worker was losing seven jobs a cycle to a schema that had not finished
+# building. Reporting success for something never checked is the failure this
+# codebase keeps paying for; here is the check.
+#
+# `--wait` matters as much as the check: migrations run inside the api
+# container's own start command, so immediately after `up -d` they are usually
+# still in flight and an instant verdict would be a false alarm. Exit codes come
+# from central/schema_check.py -- 0 clean, 1 drifted, 2 could not check -- and 2
+# is NOT treated as success, because a database we cannot reach is not a
+# migrated one.
+verify_schema() {
+  echo "==> verifying the database schema matches this build"
+  local out rc
+  out="$(docker compose $COMPOSE_PROFILES run --rm -T api \
+           python -m central.schema_check --wait 300 --quiet 2>&1)" && rc=0 || rc=$?
+  case "$rc" in
+    0) echo "    schema OK"; return 0 ;;
+    2) echo "$out" >&2
+       echo "    could not verify the schema (database unreachable)." >&2
+       return 1 ;;
+    *) echo "$out" >&2
+       echo "    Recent api logs:" >&2
+       docker compose logs --tail=40 api >&2 || true
+       return 1 ;;
+  esac
+}
+
 # True when docker-compose.yml carries local edits (staged or not) -- the thing
 # that used to abort `--update` with "would be overwritten by merge".
 compose_dirty() {
@@ -367,7 +397,8 @@ if [ "$UPDATE" -eq 1 ]; then
   docker compose $COMPOSE_PROFILES build --pull
   echo "==> docker compose up -d"
   docker compose $COMPOSE_PROFILES up -d
-  echo "==> done. Migrations + idempotent admin bootstrap ran on container start."
+  verify_schema || die "update finished but the schema is not what this build expects"
+  echo "==> done. Migrations verified against the running database."
   echo "    Logs: docker compose logs -f api worker"
   exit 0
 fi
@@ -537,6 +568,12 @@ until curl $CURL_ARGS "${SCHEME}://localhost:${PORT}/healthz" >/dev/null 2>&1; d
   fi
   sleep 2
 done
+
+# /healthz is a PURE PROCESS CHECK -- it answers 200 whether or not the database
+# is reachable, let alone migrated (see central/main.py). Reaching it proves the
+# api is listening and nothing about the schema, so verify that separately
+# before telling the operator the install is up.
+verify_schema || die "the stack started but the schema is not what this build expects"
 
 if [ "$DEMO" -eq 1 ]; then
   echo
