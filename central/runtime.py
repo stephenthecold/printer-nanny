@@ -20,6 +20,15 @@ from central.config import settings as _env
 
 SECRET_PLACEHOLDER = "__keep__"  # form sends this when a secret is left unchanged
 
+# Suffix of the companion checkbox that REMOVES a stored secret. Empty means
+# "unchanged" -- that is what makes a settings form safe to submit without
+# retyping every credential on it -- so with no separate gesture there is no way
+# to take a credential back out, and an operator who wants a channel to stop
+# authenticating has to edit the database. Unlike `trusted_present`, an absent
+# clear box needs no presence marker: absent and unchecked both mean "keep",
+# which is the direction that cannot lose anything.
+SECRET_CLEAR_SUFFIX = "__clear"
+
 # The SCIM bearer token is persisted as a SHA-256 hash, not as an encrypted
 # secret -- so it can't be decrypted back into a usable credential. The settings
 # form hashes whatever the operator types (see save_settings) and masks the
@@ -664,6 +673,46 @@ def _coerce(spec: Spec, raw: Any) -> Any:
 NUMERIC_TYPES = ("int", "float")
 
 
+def is_secret_key(key: str) -> bool:
+    """Is this a value that must never be rendered back into the form?
+
+    Secret-typed specs, plus the SCIM token -- which is a ``str`` spec because it
+    stores a hash, and would otherwise be echoed into an ordinary text input in
+    the clear. One predicate rather than three copies of the same set, since
+    every copy is a place a newly-added secret can be missed.
+    """
+    spec = SPEC_BY_KEY.get(key)
+    return key == SCIM_TOKEN_HASH_KEY or (spec is not None and spec.type == "secret")
+
+
+def secret_clear_field(key: str) -> str:
+    """Name of the checkbox that asks for ``key``'s stored secret to be removed."""
+    return key + SECRET_CLEAR_SUFFIX
+
+
+def secrets_to_clear(
+    form: Dict[str, Any], sections: "Optional[set]" = None
+) -> "set":
+    """Which stored secrets this submission asks to REMOVE. Writes nothing.
+
+    The read half of the rule ``save_settings`` writes by, so the page can name
+    what it destroyed without keeping a second copy of the predicate that can
+    drift from it -- the same split ``check_settings`` uses.
+
+    Scoped by ``sections`` for the reason bools are: a submission only speaks for
+    the group it rendered. A checkbox that isn't there is not a clear request.
+    """
+    out = set()
+    for spec in SPECS:
+        if sections is not None and spec.section not in sections:
+            continue
+        if not is_secret_key(spec.key):
+            continue
+        if str(form.get(secret_clear_field(spec.key)) or "").strip():
+            out.add(spec.key)
+    return out
+
+
 def check_settings(
     form: Dict[str, Any], sections: "Optional[set]" = None
 ) -> "tuple":
@@ -694,9 +743,29 @@ def check_settings(
     on the READ path: ``load_settings`` coerces whatever is already stored, and
     an install holding a bad value from before this check existed must keep
     rendering rather than 500 on every page.
+
+    A secret submitted **and** marked for clearing lands on the same split: it is
+    two contradictory instructions, so one of them is a mistake, and picking
+    either one silently means an operator who ticked the box by accident loses a
+    credential -- or one who meant to loses nothing and is told it worked.
+
+    What that message may NOT say is "untick 'clear' to store what you typed":
+    the typed value is dropped by ``without_secret_values`` on the way back, so
+    following that literally keeps the OLD secret and reports "Settings saved."
+    -- a silent wrong outcome on exactly the operation (a credential rotation)
+    where the operator has no way to check the result by looking at it. The
+    refusal has to say the value is gone and ask for it again.
     """
     errors: Dict[str, str] = {}
     cleared: Dict[str, Any] = {}
+    for key in secrets_to_clear(form, sections):
+        typed = str(form.get(key) or "").strip()
+        if typed and typed != SECRET_PLACEHOLDER:
+            errors[key] = (
+                "Replace it or clear it, not both. Nothing was saved, and what "
+                "you typed was not carried back. Retype it to replace the "
+                "stored value, or tick 'clear' on its own to remove it."
+            )
     for spec in SPECS:
         if sections is not None and spec.section not in sections:
             continue
@@ -733,9 +802,7 @@ def without_secret_values(form: Dict[str, Any]) -> Dict[str, Any]:
     secret. Their inputs simply come back empty, which the form already treats
     as "keep the stored value".
     """
-    secret_keys = {s.key for s in SPECS if s.type == "secret"}
-    secret_keys.add(SCIM_TOKEN_HASH_KEY)
-    return {k: v for k, v in form.items() if k not in secret_keys}
+    return {k: v for k, v in form.items() if not is_secret_key(k)}
 
 
 def default_settings() -> Dict[str, Any]:
@@ -780,9 +847,13 @@ def save_settings(
     configured while alerting was dark. Callers that need a checkbox cleared
     must say which sections they are speaking for.
 
-    Secret fields left as the placeholder keep their stored value. Secrets are
-    encrypted at rest (central.secrets); every save also sweeps legacy
-    plaintext secret rows into encrypted form -- the lazy half of the
+    Secret fields left blank or holding the placeholder keep their stored value;
+    a secret is removed only by its ``secret_clear_field`` checkbox, and that
+    stores an EMPTY row rather than deleting one -- several secret specs default
+    to an environment variable, so deleting the row would fall back to the
+    default and hand the operator back the credential they just took away.
+    Secrets are encrypted at rest (central.secrets); every save also sweeps
+    legacy plaintext secret rows into encrypted form -- the lazy half of the
     encryption migration.
     """
     from central.secrets import encrypt_value, is_encrypted
@@ -791,14 +862,19 @@ def save_settings(
 
     existing = {row.key: row for row in db.scalars(select(m.AppSetting))}
     partial = sections is None
+    clearing = secrets_to_clear(form, sections)
     for spec in SPECS:
         if sections is not None and spec.section not in sections:
             continue
         absent = spec.key not in form
-        if absent and (partial or spec.type != "bool"):
+        if spec.key in clearing:
+            # Checked ahead of `absent`: the operator's instruction is the
+            # checkbox, not the (necessarily empty) input beside it.
+            value: Any = ""
+        elif absent and (partial or spec.type != "bool"):
             continue  # not submitted → keep whatever is stored
-        if spec.type == "bool":
-            value: Any = not absent  # checkbox present → checked
+        elif spec.type == "bool":
+            value = not absent  # checkbox present → checked
         elif spec.key == SCIM_TOKEN_HASH_KEY:
             # The form posts the *plaintext* SCIM token. Hash it before storing;
             # the placeholder / empty string means "keep the current hash".
@@ -900,15 +976,20 @@ def app_branding(db: Session) -> Dict[str, Any]:
 
 
 def masked_for_form(values: Dict[str, Any]) -> Dict[str, Any]:
-    """Replace secret values with the placeholder so they aren't echoed to the page."""
+    """Replace secret values with the placeholder so they aren't echoed to the page.
+
+    The settings form no longer renders these into a ``value=`` at all -- an
+    input holding ``__keep__`` looks like an eight-character password and hides
+    the "unchanged" placeholder that is the field's only honest label. This stays
+    as the guarantee underneath that: whatever a template does with these values,
+    the credential itself is not among them.
+    """
     out = dict(values)
-    for spec in SPECS:
-        if spec.type == "secret" and out.get(spec.key):
-            out[spec.key] = SECRET_PLACEHOLDER
-    # The SCIM token is a non-secret-typed str (it holds a hash) but must never
-    # be echoed back to the form either -- mask it the same way.
-    if out.get(SCIM_TOKEN_HASH_KEY):
-        out[SCIM_TOKEN_HASH_KEY] = SECRET_PLACEHOLDER
+    for key in list(out):
+        # `is_secret_key` covers the SCIM token, which is a plain str spec (it
+        # holds a hash) and must not be echoed back either.
+        if is_secret_key(key) and out.get(key):
+            out[key] = SECRET_PLACEHOLDER
     return out
 
 

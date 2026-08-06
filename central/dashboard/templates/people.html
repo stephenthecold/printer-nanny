@@ -31,7 +31,7 @@
 
 <div class="grid lg:grid-cols-3 gap-6">
   <!-- ------------------------------- people ------------------------------ -->
-  <section class="{{ card_cls('none', 'lg:col-span-2 overflow-x-auto') }}">
+  <section class="{{ card_cls('none', 'relative lg:col-span-2 overflow-x-auto') }}">
     <div class="px-4 py-3 border-b font-semibold flex items-center justify-between">
       <span>Staff at {{ client.name }}</span>
       <span class="text-xs font-normal text-slate-500">{{ people | length }} total</span>
@@ -118,19 +118,22 @@
       {% if printers and (people or groups) %}
       <form method="post" action="/manage/people/assign" class="space-y-2">
         {{ csrf_field() }}
-        <select name="printer_id" class="w-full border rounded px-2 py-1.5 text-sm" required>
+        {# The first option doubles as the visible cue ("Printer…"), which
+           vanishes the moment anything is selected -- so the name is on the
+           control, not in the list. #}
+        <select name="printer_id" aria-label="Printer to assign" class="w-full border rounded px-2 py-1.5 text-sm" required>
           <option value="">Printer…</option>
           {% for pr in printers %}
           <option value="{{ pr.id }}">{{ pr.display_name or pr.model or pr.ip }}</option>
           {% endfor %}
         </select>
-        <select name="end_user_id" class="w-full border rounded px-2 py-1.5 text-sm">
+        <select name="end_user_id" aria-label="Assign to a person" class="w-full border rounded px-2 py-1.5 text-sm">
           <option value="">— to a person —</option>
           {% for p in people if p.active %}
           <option value="{{ p.id }}">{{ p.display_name or p.email or p.upn }}</option>
           {% endfor %}
         </select>
-        <select name="group_id" class="w-full border rounded px-2 py-1.5 text-sm">
+        <select name="group_id" aria-label="Assign to a group instead" class="w-full border rounded px-2 py-1.5 text-sm">
           <option value="">— or to a group —</option>
           {% for g in groups %}
           <option value="{{ g.id }}">{{ g.name }}</option>
@@ -184,7 +187,12 @@
               <form method="post" action="/manage/people/unassign" class="inline">
                 {{ csrf_field() }}
                 <input type="hidden" name="assignment_id" value="{{ a.id }}" />
-                <button class="text-slate-400 hover:text-rose-600" title="Remove">×</button>
+                {# "×" is spoken as "times", and title= is advisory -- several
+                   screen readers never announce it. The name has to carry the
+                   row too: there is one of these per assigned printer. #}
+                <button class="text-slate-400 hover:text-rose-600"
+                        aria-label="Remove {{ a.printer.display_name or a.printer.model or a.printer.ip }} from {{ g.name }}"
+                        title="Remove">×</button>
               </form>{% if not loop.last %}<span class="text-slate-300">·</span> {% endif %}
             {% endfor %}
             {% else %}
@@ -222,7 +230,7 @@
 {% set any_direct = [] %}
 {% for p in people %}{% for printer, is_default, via in (resolved.get(p.id) or []) %}{% if via is none %}{% set _ = any_direct.append(1) %}{% endif %}{% endfor %}{% endfor %}
 {% if any_direct %}
-<section class="{{ card_cls('none', 'mt-6 overflow-x-auto') }}">
+<section class="{{ card_cls('none', 'relative mt-6 overflow-x-auto') }}">
   <div class="px-4 py-3 border-b font-semibold">Direct assignments</div>
   <table class="w-full text-sm">
     <thead class="text-left text-xs text-slate-500 bg-slate-50">

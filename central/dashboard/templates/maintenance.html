@@ -13,7 +13,7 @@
 </p>
 
 <div class="grid md:grid-cols-3 gap-6">
-  <section class="{{ card_cls('none', 'md:col-span-2 overflow-x-auto') }}">
+  <section class="{{ card_cls('none', 'relative md:col-span-2 overflow-x-auto') }}">
     <div class="px-4 py-3 border-b font-semibold">Schedules</div>
     {% if schedules %}
     <table class="w-full text-sm">
@@ -64,7 +64,9 @@
           <td class="py-2 text-xs tabular-nums">
             <form method="post" action="/manage/maintenance/schedules/{{ s.id }}" class="flex items-center gap-1">
               {{ csrf_field() }}
-              <input type="date" name="next_due" value="{{ s.next_due.strftime('%Y-%m-%d') if s.next_due else '' }}" class="border rounded px-1 py-0.5 text-xs" />
+              {# Named with the schedule, not just "Next due": the column header
+                 identifies nothing when six schedules are on screen. #}
+              <input type="date" name="next_due" aria-label="Next due date for {{ s.name }}" value="{{ s.next_due.strftime('%Y-%m-%d') if s.next_due else '' }}" class="border rounded px-1 py-0.5 text-xs" />
               <input type="hidden" name="interval_days" value="{{ s.interval_days or '' }}" />
               <input type="hidden" name="page_threshold" value="{{ s.page_threshold or '' }}" />
               <input type="hidden" name="component_type" value="{{ s.component_type or '' }}" />
@@ -75,7 +77,7 @@
           <td class="py-2 pr-4 text-right text-xs">
             <form method="post" action="/manage/maintenance/schedules/{{ s.id }}/log" class="inline">
               {{ csrf_field() }}
-              <input name="performed_by" placeholder="Tech name (opt)" class="border rounded px-1 py-0.5 text-xs w-24" />
+              <input name="performed_by" aria-label="Serviced by, for {{ s.name }}" placeholder="Tech name (opt)" class="border rounded px-1 py-0.5 text-xs w-24" />
               <button class="{{ btn('success', 'sm', 'ml-1') }}">Mark serviced</button>
             </form>
             <form method="post" action="/manage/maintenance/schedules/{{ s.id }}/delete" class="inline ml-1"
@@ -171,7 +173,7 @@
 </div>
 
 {% if records %}
-<section class="{{ card_cls('none', 'mt-6 overflow-x-auto') }}">
+<section class="{{ card_cls('none', 'relative mt-6 overflow-x-auto') }}">
   <div class="px-4 py-3 border-b font-semibold">Recent service log</div>
   <table class="w-full text-sm">
     <thead class="text-left text-xs text-slate-500 bg-slate-50">

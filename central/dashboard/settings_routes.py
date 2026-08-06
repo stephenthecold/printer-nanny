@@ -42,14 +42,28 @@ def _admin(request: Request, db: Session) -> Optional[m.User]:
 
 
 def _sections(values: dict, section_names: list):
-    """The given sections' specs grouped for rendering, secrets masked."""
+    """The given sections' specs grouped for rendering, secrets masked.
+
+    ``secret`` / ``stored`` / ``clear_field`` are what let the template render a
+    credential honestly: an empty box saying whether anything is held, and a
+    clear checkbox only where there is something to clear. ``stored`` is a bool
+    computed from the real value and the real value never leaves this function --
+    ``value`` is taken from the masked copy, so a template mistake cannot echo a
+    secret even now that no template renders one.
+    """
     masked = runtime.masked_for_form(values)
     grouped: "OrderedDict[str, list]" = OrderedDict()
     for name in section_names:
         grouped[name] = []
     for spec in runtime.SPECS:
         if spec.section in grouped:
-            grouped[spec.section].append({"spec": spec, "value": masked.get(spec.key)})
+            grouped[spec.section].append({
+                "spec": spec,
+                "value": masked.get(spec.key),
+                "secret": runtime.is_secret_key(spec.key),
+                "stored": bool(values.get(spec.key)),
+                "clear_field": runtime.secret_clear_field(spec.key),
+            })
     return grouped
 
 
@@ -86,7 +100,6 @@ def settings_page(
          "sections": _sections(values, section_names),
          "groups": runtime.SETTINGS_GROUPS,
          "active_group": active_group,
-         "placeholder": runtime.SECRET_PLACEHOLDER,
          "app": runtime.app_branding(db),
          # Stalled-worker banner (base.html) -- see central.health.worker_banner.
          "worker_banner": worker_banner(db, user),
@@ -150,16 +163,25 @@ async def settings_save(request: Request, db: Session = Depends(get_db)):
     # and SAID. Doing it silently was the defect: the fleet-wide threshold moved
     # and the page reported an unqualified success.
     restored = sorted(k for k in cleared if k in changed)
+    # Both lists are filtered by `changed`, so neither claims to have done
+    # something to a setting that already held that value.
+    removed = sorted(k for k in runtime.secrets_to_clear(form, sections) if k in changed)
+    notes = []
     if restored:
         detail = ", ".join(f"{k} → {cleared[k]}" for k in restored)
-        _flash_mod.flash(
-            request,
-            f"Settings saved. {len(restored)} cleared field"
-            f"{'' if len(restored) == 1 else 's'} restored to the default: {detail}.",
-            level="warning",
+        notes.append(
+            f"{len(restored)} cleared field"
+            f"{'' if len(restored) == 1 else 's'} restored to the default: {detail}."
         )
-    else:
-        _flash_mod.flash(request, "Settings saved.")
+    if removed:
+        # Named because removing a credential cannot be undone from this page --
+        # the stored value is gone and only the operator still has it. The key
+        # names are safe to print; the values are what may never be.
+        notes.append("Removed the stored " + ", ".join(removed) + ".")
+    _flash_mod.flash(
+        request, " ".join(["Settings saved."] + notes),
+        level="warning" if restored else "success",
+    )
     return RedirectResponse(f"/settings?group={active_group}", status_code=303)
 
 

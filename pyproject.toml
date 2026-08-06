@@ -1,6 +1,6 @@
 [project]
 name = "printer-nanny"
-version = "1.0.4"
+version = "1.0.5"
 description = "Self-hosted fleet management for printers across MSP clients/sites"
 readme = "README.md"
 license = "Apache-2.0"

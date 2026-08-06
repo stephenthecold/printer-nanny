@@ -6,6 +6,7 @@ creating require any logged-in user; deletes require admin.
 
 from __future__ import annotations
 
+import ipaddress
 import shutil
 import tempfile
 from datetime import datetime, timezone
@@ -184,6 +185,40 @@ def _parse_optional_float(
         errors[key] = (
             "%r is not a number for %s. Leave it empty to clear it."
             % (text[:40], what)
+        )
+        return None
+
+
+def _parse_cidr(raw: str, key: str, errors: dict) -> "Optional[str]":
+    """A subnet in canonical CIDR form, refusing anything ``ipaddress`` can't read.
+
+    Nothing downstream can salvage a bad CIDR, and nothing downstream complains
+    about one either: ``collector._network`` returns None so a discovered printer
+    never matches its subnet, and the agent's ``discovery.hosts_in`` raises before
+    a single address is swept. Both fail quietly, which is why the operator's
+    first evidence of a typo was a site visit that discovered nothing -- the form
+    had already said the customer was "ready".
+
+    ``strict=False`` accepts the address an operator knows a network by
+    ("10.10.0.1/24") instead of making them work out its network address, and the
+    **canonical** form is what comes back so the stored row says what will
+    actually be swept rather than what was typed. That also makes
+    ``uq_subnet_site_cidr`` mean something: two spellings of one network are one
+    row, not two.
+
+    Blank returns None with no error -- whether a subnet is optional (onboarding)
+    or required (assigning one to an agent) is the caller's question, not this
+    one's. ``errors`` is populated in place, matching ``_parse_optional_int``.
+    """
+    text = (raw or "").strip()
+    if not text:
+        return None
+    try:
+        return str(ipaddress.ip_network(text, strict=False))
+    except ValueError:
+        errors[key] = (
+            "%r is not a subnet in CIDR form. Use e.g. 10.10.0.0/24."
+            % (text[:60],)
         )
         return None
 
@@ -1167,6 +1202,22 @@ def onboard_submit(
                level="error")
         return _redirect("/manage/onboard")
 
+    # Before the client exists, like the timezone check above: this ends with an
+    # operator driving to site and installing an agent against a subnet that can
+    # never discover anything, so a half-built customer they have to unpick by
+    # hand is the worse of the two outcomes.
+    cidr_errors: dict = {}
+    network = _parse_cidr(cidr, "cidr", cidr_errors)
+    if cidr_errors:
+        _flash(request, "Nothing was created — %s" % cidr_errors["cidr"],
+               level="error",
+               fields={"client_name": client_name, "client_timezone": tz,
+                       "site_name": site_name, "agent_name": agent_name,
+                       "cidr": cidr, "snmp_community": snmp_community,
+                       "snmp_version": snmp_version},
+               errors=cidr_errors)
+        return _redirect("/manage/onboard")
+
     client = db.scalar(select(m.Client).where(m.Client.name == client_name))
     if client is None:
         client = m.Client(name=client_name, timezone=tz or None)
@@ -1192,18 +1243,17 @@ def onboard_submit(
            target=f"site:{site.id} {site_name} (client:{client.id})",
            detail="via onboarding")
 
-    cidr = cidr.strip()
-    if cidr:
+    if network:
         is_trusted = bool(trusted.strip())
         # agent_id stays NULL: the agent does not exist yet and will adopt this
         # subnet when it redeems the claim code (see services.redeem_claim_token).
         db.add(m.Subnet(
-            site_id=site.id, agent_id=None, cidr=cidr,
+            site_id=site.id, agent_id=None, cidr=network,
             snmp_community=snmp_community.strip() or "public",
             snmp_version=snmp_version, trusted=is_trusted,
         ))
         record(db, request, user, "subnet.create",
-               target=f"subnet:{cidr} site:{site.id}",
+               target=f"subnet:{network} site:{site.id}",
                detail=f"snmp v{snmp_version} via onboarding"
                       + (" trusted=on (auto-approves discoveries)" if is_trusted else ""))
 
@@ -1685,49 +1735,68 @@ def subnet_add(
     ``trusted`` opts this subnet into auto-approving discoveries. Absent (an
     unchecked box posts nothing) means false, which is both the form default
     and the safe one.
+
+    A CIDR that ``ipaddress`` cannot read is refused rather than stored: see
+    ``_parse_cidr`` for why an unusable one is invisible everywhere else.
     """
     if _manager(request, db) is None:
         return _deny(request, db)
     agent = db.get(m.Agent, agent_id)
-    if agent and cidr.strip():
-        effective_site_id = agent.site_id
-        if site_id.strip():
-            try:
-                effective_site_id = int(site_id)
-            except ValueError:
-                # Not "fall back to the agent's own site". A subnet carries SNMP
-                # credentials and decides which tenant a discovered device joins,
-                # so filing it under a site the operator did not choose is a
-                # tenancy decision made by an exception handler.
-                _flash(request, f"{site_id!r} is not a site; the subnet was not added.",
-                       level="error",
-                       fields={"cidr": cidr, "snmp_community": snmp_community,
-                               "bind_interface": bind_interface},
-                       errors={"site_id": "Choose a site from the list."})
-                return _redirect("/manage/agents")
-        is_trusted = bool(trusted.strip())
-        db.add(m.Subnet(
-            site_id=effective_site_id, agent_id=agent.id, cidr=cidr.strip(),
-            snmp_community=snmp_community.strip() or "public",
-            snmp_version=snmp_version,
-            trusted=is_trusted,
-            bind_interface=bind_interface.strip() or None,
-            snmp_v3=_build_v3_blob(
-                user=snmp_v3_user,
-                security_level=snmp_v3_security_level,
-                auth_protocol=snmp_v3_auth_protocol,
-                auth_password=snmp_v3_auth_password,
-                priv_protocol=snmp_v3_priv_protocol,
-                priv_password=snmp_v3_priv_password,
-                context_name=snmp_v3_context_name,
-            ),
-        ))
-        record(db, request, _manager(request, db), "subnet.create",
-               target=f"subnet:{cidr.strip()} agent:{agent.id}",
-               detail=f"snmp v{snmp_version}"
-                      + (" trusted=on (auto-approves discoveries)" if is_trusted else ""))
-        db.commit()
-        _flash(request, f"Subnet {cidr} assigned.")
+    if agent is None:
+        return _redirect("/manage/agents")
+
+    errors: dict = {}
+    network = _parse_cidr(cidr, "cidr", errors)
+    if network is None and not errors:
+        # Blank was previously a silent no-op -- the page came back with no
+        # subnet, no message, and nothing saying which of those had happened.
+        errors["cidr"] = "A subnet is required. Use e.g. 10.10.0.0/24."
+    if errors:
+        _flash(request, "The subnet was not added — %s" % errors["cidr"],
+               level="error",
+               fields={"cidr": cidr, "snmp_community": snmp_community,
+                       "bind_interface": bind_interface},
+               errors=errors)
+        return _redirect("/manage/agents")
+
+    effective_site_id = agent.site_id
+    if site_id.strip():
+        try:
+            effective_site_id = int(site_id)
+        except ValueError:
+            # Not "fall back to the agent's own site". A subnet carries SNMP
+            # credentials and decides which tenant a discovered device joins,
+            # so filing it under a site the operator did not choose is a
+            # tenancy decision made by an exception handler.
+            _flash(request, f"{site_id!r} is not a site; the subnet was not added.",
+                   level="error",
+                   fields={"cidr": cidr, "snmp_community": snmp_community,
+                           "bind_interface": bind_interface},
+                   errors={"site_id": "Choose a site from the list."})
+            return _redirect("/manage/agents")
+    is_trusted = bool(trusted.strip())
+    db.add(m.Subnet(
+        site_id=effective_site_id, agent_id=agent.id, cidr=network,
+        snmp_community=snmp_community.strip() or "public",
+        snmp_version=snmp_version,
+        trusted=is_trusted,
+        bind_interface=bind_interface.strip() or None,
+        snmp_v3=_build_v3_blob(
+            user=snmp_v3_user,
+            security_level=snmp_v3_security_level,
+            auth_protocol=snmp_v3_auth_protocol,
+            auth_password=snmp_v3_auth_password,
+            priv_protocol=snmp_v3_priv_protocol,
+            priv_password=snmp_v3_priv_password,
+            context_name=snmp_v3_context_name,
+        ),
+    ))
+    record(db, request, _manager(request, db), "subnet.create",
+           target=f"subnet:{network} agent:{agent.id}",
+           detail=f"snmp v{snmp_version}"
+                  + (" trusted=on (auto-approves discoveries)" if is_trusted else ""))
+    db.commit()
+    _flash(request, f"Subnet {network} assigned.")
     return _redirect("/manage/agents")
 
 

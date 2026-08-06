@@ -162,8 +162,17 @@
           {% endfor %}
         </select>
       </label>
-      <input name="subject" required placeholder="What's wrong?" class="w-full border rounded px-3 py-2 text-sm" />
-      <textarea name="body" required rows="4" placeholder="Describe the issue..." class="w-full border rounded px-3 py-2 text-sm"></textarea>
+      {# Wrapping labels, matching the select above. The placeholders were the
+         only naming these two had, and a placeholder is gone by the second
+         keystroke -- on the one form in this app filled in by a customer. #}
+      <label class="block">
+        <span class="text-xs text-slate-500">Subject</span>
+        <input name="subject" required placeholder="What's wrong?" class="w-full border rounded px-3 py-2 text-sm" />
+      </label>
+      <label class="block">
+        <span class="text-xs text-slate-500">What happened</span>
+        <textarea name="body" required rows="4" placeholder="Describe the issue..." class="w-full border rounded px-3 py-2 text-sm"></textarea>
+      </label>
       <button class="{{ btn('primary', 'md', 'w-full') }}">Send to support</button>
     </form>
   </section>
