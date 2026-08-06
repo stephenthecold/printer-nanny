@@ -98,9 +98,18 @@
     <h2 class="font-semibold mb-3">Add schedule</h2>
     <form method="post" action="/manage/maintenance/schedules" class="space-y-2">
       {{ csrf_field() }}
+      {#- A refused create hands back what was typed (central/dashboard/flash.py),
+          so the operator corrects one field instead of retyping the form. `err`
+          also switches the numeric inputs to type=text, because a type=number
+          input silently discards content it considers invalid -- re-rendering a
+          rejected value in one would hand back an empty box. -#}
+      {% set sent = (flash.fields if flash else {}) | default({}, true) %}
+      {% set ferr = (flash.errors if flash else {}) | default({}, true) %}
       <label class="block">
         <span class="text-xs text-slate-500">Name</span>
-        <input name="name" required placeholder="Quarterly clean, Fuser kit, ..." class="w-full border rounded px-3 py-2 text-sm" />
+        <input name="name" required placeholder="Quarterly clean, Fuser kit, ..."
+               value="{{ sent.get('name', '') }}"
+               class="w-full border rounded px-3 py-2 text-sm" />
       </label>
       <label class="block">
         <span class="text-xs text-slate-500">Printer (specific)</span>
@@ -119,11 +128,21 @@
       <div class="grid grid-cols-2 gap-2">
         <label class="block">
           <span class="text-xs text-slate-500">Every N days</span>
-          <input name="interval_days" type="number" min="1" placeholder="90" class="w-full border rounded px-3 py-2 text-sm" />
+          <input name="interval_days" type="{{ 'text' if ferr.get('interval_days') else 'number' }}"
+                 min="1" placeholder="90" value="{{ sent.get('interval_days', '') }}"
+                 class="w-full border rounded px-3 py-2 text-sm {{ 'border-red-300 bg-red-50' if ferr.get('interval_days') else '' }}" />
+          {% if ferr.get('interval_days') %}
+          <span class="block text-xs text-red-700 mt-0.5">{{ ferr.get('interval_days') }}</span>
+          {% endif %}
         </label>
         <label class="block">
           <span class="text-xs text-slate-500">At page count</span>
-          <input name="page_threshold" type="number" min="1" placeholder="50000" class="w-full border rounded px-3 py-2 text-sm" />
+          <input name="page_threshold" type="{{ 'text' if ferr.get('page_threshold') else 'number' }}"
+                 min="1" placeholder="50000" value="{{ sent.get('page_threshold', '') }}"
+                 class="w-full border rounded px-3 py-2 text-sm {{ 'border-red-300 bg-red-50' if ferr.get('page_threshold') else '' }}" />
+          {% if ferr.get('page_threshold') %}
+          <span class="block text-xs text-red-700 mt-0.5">{{ ferr.get('page_threshold') }}</span>
+          {% endif %}
         </label>
       </div>
       <div class="grid grid-cols-2 gap-2">

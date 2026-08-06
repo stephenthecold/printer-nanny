@@ -80,6 +80,29 @@ def test_every_source_file_decodes_as_utf8():
     assert not offenders, offenders
 
 
+#: Punctuation this codebase actually uses, and which therefore appears mangled
+#: when a file is round-tripped through CP1252.
+_REAL_PUNCTUATION = "—–’“·é"
+
+
+def _mojibake_signatures():
+    """Derive the corrupted forms instead of writing them out literally.
+
+    Spelling them as literals is what the first version of this test did, and it
+    failed on ITSELF: the detector is a tracked source file, so its own examples
+    were found and reported as damage. Computing them performs the exact
+    corruption being detected -- encode as UTF-8, decode as CP1252 -- which is
+    both self-documenting and keeps this file clean of the pattern it hunts.
+    """
+    out = []
+    for ch in _REAL_PUNCTUATION:
+        try:
+            out.append(ch.encode("utf-8").decode("cp1252"))
+        except UnicodeDecodeError:
+            continue  # not every byte sequence maps; those we simply do not check
+    return tuple(out)
+
+
 def test_no_source_file_contains_mojibake():
     """The signature of UTF-8 decoded as CP1252 and written back.
 
@@ -87,7 +110,8 @@ def test_no_source_file_contains_mojibake():
     to open. These sequences do not occur naturally in this codebase -- every one
     is a mis-decoded punctuation mark.
     """
-    signatures = ("â€”", "â€“", "â€™", "â€œ", "Â·", "Ã©")
+    signatures = _mojibake_signatures()
+    assert signatures, "no signatures derived; the check would pass vacuously"
     offenders = []
     for path in _tracked_files():
         text = path.read_bytes().decode("utf-8", errors="replace")
