@@ -31,6 +31,7 @@ from sqlalchemy.orm import Session
 from central import models as m
 from central.audit import record
 from central.config import settings
+from central.dashboard import flash as _flash_mod
 from central.dashboard.templating import templates
 from central.db import get_db
 from central.deps import session_user
@@ -58,6 +59,8 @@ def _tpl(request, name: str, db: Session, **ctx):
     ctx.setdefault("central_version", _v)
     # Stalled-worker banner (base.html) -- see central.health.worker_banner.
     ctx.setdefault("worker_banner", worker_banner(db, ctx.get("user")))
+    # See manage._tpl: taken here so a handler cannot drop it by forgetting.
+    ctx.setdefault("flash", _flash_mod.pop(request))
     return _templates.TemplateResponse(request, name, ctx)
 
 
@@ -160,8 +163,10 @@ def backup_page(request: Request, db: Session = Depends(get_db)):
         user=user, backend=backend,
         pg_dump_available=pg_dump_available,
         pg_restore_available=pg_restore_available,
-        flash=request.session.pop("flash", None),
-        error=request.session.pop("backup_error", None),
+        # ``backup_error`` was a fourth spelling of this same channel, kept
+        # alongside ``flash`` purely because ``flash`` could not carry a
+        # severity. It can now, so there is one key and one render.
+        flash=_flash_mod.pop(request),
     )
 
 
@@ -186,10 +191,10 @@ def backup_download_get(request: Request, db: Session = Depends(get_db)):
     """
     if _admin(request, db) is None:
         return RedirectResponse("/login", status_code=303)
-    request.session["flash"] = (
+    _flash_mod.flash(request, (
         "Backup downloads are now a button rather than a link, so another site "
         "cannot trigger one through your session. Use Download below."
-    )
+    ))
     return RedirectResponse("/admin/backup", status_code=303)
 
 
@@ -208,7 +213,7 @@ def backup_download(request: Request, db: Session = Depends(get_db)):
     if _is_sqlite():
         src = _sqlite_path()
         if not src.exists():
-            request.session["backup_error"] = f"SQLite file not found at {src}"
+            _flash_mod.error(request, f"SQLite file not found at {src}")
             return RedirectResponse("/admin/backup", status_code=303)
         filename = f"printer-nanny-{stamp}.sqlite"
 
@@ -229,10 +234,10 @@ def backup_download(request: Request, db: Session = Depends(get_db)):
 
     # Postgres path: dump to a tempfile, stream it, delete on close.
     if shutil.which("pg_dump") is None:
-        request.session["backup_error"] = (
+        _flash_mod.error(request, (
             "pg_dump not on PATH in the api container. Add postgresql-client to "
             "the image (or run pg_dump from the host)."
-        )
+        ))
         return RedirectResponse("/admin/backup", status_code=303)
     fd, tmp = tempfile.mkstemp(prefix="pn-backup-", suffix=".dump")
     os.close(fd)
@@ -242,7 +247,7 @@ def backup_download(request: Request, db: Session = Depends(get_db)):
     except Exception as exc:  # noqa: BLE001
         tmp_path.unlink(missing_ok=True)
         log.exception("pg_dump failed")
-        request.session["backup_error"] = str(exc)
+        _flash_mod.error(request, str(exc))
         return RedirectResponse("/admin/backup", status_code=303)
     filename = f"printer-nanny-{stamp}.dump"
 
@@ -276,14 +281,14 @@ async def backup_restore(
     if user is None:
         return RedirectResponse("/login", status_code=303)
     if confirm.strip() != "RESTORE":
-        request.session["backup_error"] = (
+        _flash_mod.error(request, (
             "Restore not run: type RESTORE in the confirmation box to proceed."
-        )
+        ))
         return RedirectResponse("/admin/backup", status_code=303)
 
     payload = await backup_file.read()
     if not payload:
-        request.session["backup_error"] = "Upload was empty."
+        _flash_mod.error(request, "Upload was empty.")
         return RedirectResponse("/admin/backup", status_code=303)
 
     fd, tmp = tempfile.mkstemp(prefix="pn-restore-")
@@ -303,24 +308,24 @@ async def backup_restore(
                    target=f"sqlite:{dest.name}",
                    detail=f"{len(payload)} bytes")
             db.commit()
-            request.session["flash"] = (
+            _flash_mod.flash(request, (
                 "SQLite database restored. Restart the api container to pick up "
                 "the new file (sessions etc. cache schema on connect)."
-            )
+            ))
         else:
             if shutil.which("pg_restore") is None:
-                request.session["backup_error"] = (
+                _flash_mod.error(request, (
                     "pg_restore not on PATH in the api container."
-                )
+                ))
                 return RedirectResponse("/admin/backup", status_code=303)
             _pg_restore_from_file(tmp_path)
             record(db, request, user, "backup.restore",
                    target="postgres", detail=f"{len(payload)} bytes")
             db.commit()
-            request.session["flash"] = "Postgres database restored."
+            _flash_mod.flash(request, "Postgres database restored.")
     except Exception as exc:  # noqa: BLE001
         log.exception("restore failed")
-        request.session["backup_error"] = str(exc)
+        _flash_mod.error(request, str(exc))
     finally:
         tmp_path.unlink(missing_ok=True)
     return RedirectResponse("/admin/backup", status_code=303)

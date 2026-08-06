@@ -15,6 +15,7 @@ from sqlalchemy.orm import Session
 from central import branding
 from central import models as m
 from central import runtime
+from central.dashboard import flash as _flash_mod
 from central.dashboard.templating import templates
 from central.db import get_db
 from central.deps import session_user
@@ -89,7 +90,7 @@ def settings_page(
          "app": runtime.app_branding(db),
          # Stalled-worker banner (base.html) -- see central.health.worker_banner.
          "worker_banner": worker_banner(db, user),
-         "flash": request.session.pop("flash", None),
+         "flash": _flash_mod.pop(request),
          "logo_error": request.session.pop("logo_error", None),
          "has_uploaded_logo": has_uploaded_logo,
          "smtp_oauth_error": smtp_oauth_error or None,
@@ -124,7 +125,7 @@ async def settings_save(request: Request, db: Session = Depends(get_db)):
     if changed:
         record(db, request, user, "settings.update", detail=", ".join(changed))
         db.commit()
-    request.session["flash"] = "Settings saved."
+    _flash_mod.flash(request, "Settings saved.")
     return RedirectResponse(f"/settings?group={active_group}", status_code=303)
 
 
@@ -174,7 +175,7 @@ async def upload_logo(
     # that already reads `app.logo_url` picks the upload up without further work.
     runtime.save_settings(db, {"app.logo_url": "/branding/logo"})
     db.commit()
-    request.session["flash"] = f"Logo uploaded ({len(data) // 1024} KB)."
+    _flash_mod.flash(request, f"Logo uploaded ({len(data) // 1024} KB).")
     return RedirectResponse("/settings", status_code=303)
 
 
@@ -192,7 +193,7 @@ def delete_logo(request: Request, db: Session = Depends(get_db)):
     if str(values.get("app.logo_url") or "") == "/branding/logo":
         runtime.save_settings(db, {"app.logo_url": ""})
     db.commit()
-    request.session["flash"] = "Logo removed."
+    _flash_mod.flash(request, "Logo removed.")
     return RedirectResponse("/settings", status_code=303)
 
 
@@ -259,9 +260,10 @@ def settings_test(request: Request, db: Session = Depends(get_db)):
         return RedirectResponse("/login", status_code=303)
     channels = active_channels(runtime.load_settings(db))
     if not channels:
-        request.session["flash"] = (
+        _flash_mod.error(
+            request,
             "No channels enabled -- turn on Email, FreeScout, Teams, Slack, "
-            "or Webhook above, then save first."
+            "or Webhook above, then save first.",
         )
         return RedirectResponse("/settings", status_code=303)
     note = Notification(
@@ -276,5 +278,17 @@ def settings_test(request: Request, db: Session = Depends(get_db)):
     summary = "; ".join(
         f"{name}: {'OK' if res.ok else 'FAILED'} ({res.detail})" for name, res in results
     )
-    request.session["flash"] = f"Test sent -- {summary}"
+    # "Test sent" in the success colour was the answer even when every channel
+    # had FAILED -- the summary said so in text nobody reads once the box is
+    # green. The level is now derived from the results: all good is a success,
+    # none good is a failure, and a partial is a warning, because a test that
+    # reaches two channels out of three has told you something you must act on.
+    ok_count = sum(1 for _, res in results if res.ok)
+    if ok_count == len(results) and results:
+        level = "success"
+    elif ok_count == 0:
+        level = "error"
+    else:
+        level = "warning"
+    _flash_mod.flash(request, f"Test sent -- {summary}", level=level)
     return RedirectResponse("/settings", status_code=303)

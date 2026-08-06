@@ -5,10 +5,6 @@
 {% block body %}
 {{ c.page_title("Machines", "Workstations running the print client, and the keys that let them enroll.") }}
 
-{% if flash %}
-  <div class="{{ c.note('info', 'mb-4') }}">{{ flash }}</div>
-{% endif %}
-
 {% if not client %}
   <div class="{{ c.note('info') }}">No clients yet. Create one before enrolling workstations.</div>
 {% else %}

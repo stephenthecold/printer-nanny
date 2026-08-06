@@ -19,10 +19,6 @@
 </div>
 {% endif %}
 
-{% if flash %}
-<div role="status" class="{{ note('info', 'mb-4') }}">{{ flash }}</div>
-{% endif %}
-
 <div class="grid md:grid-cols-2 gap-6">
   <section class="{{ card_cls('lg') }}">
     {{ section_title('Profile') }}

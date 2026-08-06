@@ -181,13 +181,13 @@ def rate_card_create(
         return _redirect("/login")
     client = _resolve_client(db, client_id)
     if client is None:
-        _flash(request, "Create a client before adding a rate card.")
+        _flash(request, "Create a client before adding a rate card.", level="error")
         return _redirect("/manage/billing")
     back = f"/manage/billing?client_id={client.id}"
 
     label = name.strip()
     if not label:
-        _flash(request, "Rate card name is required.")
+        _flash(request, "Rate card name is required.", level="error")
         return _redirect(back)
     try:
         card = m.BillingRateCard(
@@ -210,7 +210,7 @@ def rate_card_create(
             active=billing.active_rate_card(db, client.id) is None,
         )
     except ValueError as exc:
-        _flash(request, f"Rate card not created — {exc}")
+        _flash(request, f"Rate card not created — {exc}", level="error")
         return _redirect(back)
 
     if db.scalar(
@@ -219,7 +219,7 @@ def rate_card_create(
             m.BillingRateCard.name == label,
         )
     ):
-        _flash(request, f"{client.name} already has a rate card called '{label}'.")
+        _flash(request, f"{client.name} already has a rate card called '{label}'.", level="error")
         return _redirect(back)
 
     db.add(card)
@@ -258,7 +258,7 @@ def rate_card_update(
     back = f"/manage/billing?client_id={client.id}" if client else "/manage/billing"
     card = _card_for_client(db, card_id, client.id if client else None)
     if card is None:
-        _flash(request, "That rate card does not belong to the selected client.")
+        _flash(request, "That rate card does not belong to the selected client.", level="error")
         return _redirect(back)
 
     before = (
@@ -294,7 +294,7 @@ def rate_card_update(
             card.unsplit_policy = m.UnsplitPolicy(unsplit_policy)
     except ValueError as exc:
         db.rollback()
-        _flash(request, f"Rate card unchanged — {exc}")
+        _flash(request, f"Rate card unchanged — {exc}", level="error")
         return _redirect(back)
 
     record(
@@ -332,7 +332,7 @@ def rate_card_activate(
     back = f"/manage/billing?client_id={client.id}" if client else "/manage/billing"
     card = _card_for_client(db, card_id, client.id if client else None)
     if card is None:
-        _flash(request, "That rate card does not belong to the selected client.")
+        _flash(request, "That rate card does not belong to the selected client.", level="error")
         return _redirect(back)
 
     current = billing.active_rate_card(db, card.client_id)
@@ -364,7 +364,7 @@ def rate_card_delete(
     back = f"/manage/billing?client_id={client.id}" if client else "/manage/billing"
     card = _card_for_client(db, card_id, client.id if client else None)
     if card is None:
-        _flash(request, "That rate card does not belong to the selected client.")
+        _flash(request, "That rate card does not belong to the selected client.", level="error")
         return _redirect(back)
     name = card.name
     record(
@@ -395,25 +395,29 @@ def tier_create(
     back = f"/manage/billing?client_id={client.id}" if client else "/manage/billing"
     card = _card_for_client(db, card_id, client.id if client else None)
     if card is None:
-        _flash(request, "That rate card does not belong to the selected client.")
+        _flash(request, "That rate card does not belong to the selected client.", level="error")
         return _redirect(back)
     if kind not in {c.value for c in m.MeterClass}:
-        _flash(request, "Volume band needs a meter class (mono or colour).")
+        _flash(request, "Volume band needs a meter class (mono or colour).", level="error")
         return _redirect(back)
     try:
         ceiling = int(up_to.strip())
     except (TypeError, ValueError):
         ceiling = 0
     if ceiling <= 0:
-        _flash(request, "Volume band ceiling must be a positive number of pages.")
+        _flash(request, "Volume band ceiling must be a positive number of pages.", level="error")
         return _redirect(back)
     try:
         band_rate = parse_rate(rate, field="band rate")
     except ValueError as exc:
-        _flash(request, f"Volume band not added — {exc}")
+        _flash(request, f"Volume band not added — {exc}", level="error")
         return _redirect(back)
     if any(t.kind.value == kind and t.up_to == ceiling for t in card.tiers):
-        _flash(request, f"That card already has a {kind} band ending at {ceiling:,}.")
+        _flash(
+            request,
+            f"That card already has a {kind} band ending at {ceiling:,}.",
+            level="error",
+        )
         return _redirect(back)
 
     db.add(
@@ -445,7 +449,7 @@ def tier_delete(
     back = f"/manage/billing?client_id={client.id}" if client else "/manage/billing"
     tier = db.get(m.BillingRateTier, tier_id)
     if tier is None or (client is not None and tier.rate_card.client_id != client.id):
-        _flash(request, "That volume band does not belong to the selected client.")
+        _flash(request, "That volume band does not belong to the selected client.", level="error")
         return _redirect(back)
     detail = f"{tier.kind.value} up_to:{tier.up_to} rate:{format_rate(tier.rate)}"
     record(
@@ -481,7 +485,7 @@ def invoice_download(
     try:
         invoice = billing.build_invoice(db, client.id, period_start, period_end)
     except billing.BillingError as exc:
-        _flash(request, str(exc))
+        _flash(request, str(exc), level="error")
         return _redirect(f"/manage/billing?client_id={client.id}")
 
     body = billing.invoice_csv(invoice)

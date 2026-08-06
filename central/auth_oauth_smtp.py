@@ -23,6 +23,7 @@ from sqlalchemy.orm import Session
 
 from central import models as m
 from central import runtime
+from central.dashboard import flash as _flash_mod
 from central.db import get_db
 from central.deps import session_user
 
@@ -233,7 +234,8 @@ async def callback(
         "smtp.oauth_access_token_expires_at": str(now + int(payload.get("expires_in", 3600))),
     }
     runtime.save_settings(db, updates)
-    request.session["flash"] = (
-        f"Connected to {cfg['name']} — outbound email now uses OAuth (XOAUTH2)."
+    _flash_mod.flash(
+        request,
+        f"Connected to {cfg['name']} — outbound email now uses OAuth (XOAUTH2).",
     )
     return RedirectResponse("/settings", status_code=303)

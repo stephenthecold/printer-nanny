@@ -26,10 +26,6 @@
      'Cartridge yield',
      'Pages each cartridge actually delivered, measured between one replacement and the next.') }}
 
-{% if flash %}
-  <div class="{{ c.note('info', 'mb-4') }}">{{ flash }}</div>
-{% endif %}
-
 <div class="grid sm:grid-cols-2 lg:grid-cols-4 gap-4 mb-5">
   <div class="{{ c.card_cls('sm') }}">
     <div class="text-2xl font-semibold tabular-nums {{ 'text-red-700' if summary.below else 'text-slate-800' }}">{{ summary.below }}</div>

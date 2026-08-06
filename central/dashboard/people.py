@@ -181,14 +181,14 @@ def people_create(
         return _redirect("/login")
     client = db.get(m.Client, client_id)
     if client is None:
-        _flash(request, "Client not found.")
+        _flash(request, "Client not found.", level="error")
         return _redirect("/manage/people")
 
     email = email.strip() or None
     display_name = display_name.strip() or None
     upn = upn.strip() or None
     if not (email or upn or display_name):
-        _flash(request, "Give the person at least a name, email, or username.")
+        _flash(request, "Give the person at least a name, email, or username.", level="error")
         return _redirect(f"/manage/people?client_id={client.id}")
 
     if email and db.scalar(
@@ -196,7 +196,7 @@ def people_create(
             m.EndUser.client_id == client.id, m.EndUser.email == email
         )
     ):
-        _flash(request, f"{email} is already on this client's staff list.")
+        _flash(request, f"{email} is already on this client's staff list.", level="error")
         return _redirect(f"/manage/people?client_id={client.id}")
 
     person = m.EndUser(
@@ -231,7 +231,7 @@ def people_set_active(
         return _redirect("/login")
     person = db.get(m.EndUser, person_id)
     if person is None:
-        _flash(request, "Person not found.")
+        _flash(request, "Person not found.", level="error")
         return _redirect("/manage/people")
 
     person.active = bool(active.strip())
@@ -266,7 +266,7 @@ def people_assign(
 
     printer = db.get(m.Printer, printer_id)
     if printer is None:
-        _flash(request, "Printer not found.")
+        _flash(request, "Printer not found.", level="error")
         return _redirect("/manage/people")
 
     person = db.get(m.EndUser, int(end_user_id)) if end_user_id.strip() else None
@@ -274,7 +274,7 @@ def people_assign(
     back = f"/manage/people?client_id={printer.client_id}"
 
     if (person is None) == (group is None):
-        _flash(request, "Pick exactly one person or one group.")
+        _flash(request, "Pick exactly one person or one group.", level="error")
         return _redirect(back)
 
     try:
@@ -286,7 +286,8 @@ def people_assign(
         record(db, request, user, "printer_assignment.refused",
                target=f"printer:{printer.id}", detail=f"cross-tenant: {exc}")
         db.commit()
-        _flash(request, "That printer and that person belong to different clients.")
+        _flash(request, "That printer and that person belong to different clients.",
+               level="error")
         return _redirect(back)
 
     target = (f"end_user:{person.id}" if person else f"group:{group.id}")
@@ -309,7 +310,7 @@ def people_unassign(
         return _redirect("/login")
     row = db.get(m.PrinterAssignment, assignment_id)
     if row is None:
-        _flash(request, "Assignment not found.")
+        _flash(request, "Assignment not found.", level="error")
         return _redirect("/manage/people")
 
     printer = db.get(m.Printer, row.printer_id)
@@ -336,17 +337,17 @@ def group_create(
         return _redirect("/login")
     client = db.get(m.Client, client_id)
     if client is None:
-        _flash(request, "Client not found.")
+        _flash(request, "Client not found.", level="error")
         return _redirect("/manage/people")
 
     name = name.strip()
     if not name:
-        _flash(request, "A group needs a name.")
+        _flash(request, "A group needs a name.", level="error")
         return _redirect(f"/manage/people?client_id={client.id}")
     if db.scalar(select(m.EndUserGroup).where(
         m.EndUserGroup.client_id == client.id, m.EndUserGroup.name == name
     )):
-        _flash(request, f"'{name}' already exists for this client.")
+        _flash(request, f"'{name}' already exists for this client.", level="error")
         return _redirect(f"/manage/people?client_id={client.id}")
 
     group = m.EndUserGroup(client_id=client.id, name=name,
@@ -383,7 +384,7 @@ def group_members(
         return _redirect("/login")
     group = db.get(m.EndUserGroup, group_id)
     if group is None:
-        _flash(request, "Group not found.")
+        _flash(request, "Group not found.", level="error")
         return _redirect("/manage/people")
 
     wanted = []
@@ -403,7 +404,7 @@ def group_members(
         record(db, request, user, "end_user_group.refused",
                target=f"group:{group.id}", detail=f"cross-tenant: {exc}")
         db.commit()
-        _flash(request, "Those people belong to a different client.")
+        _flash(request, "Those people belong to a different client.", level="error")
         return _redirect(f"/manage/people?client_id={group.client_id}")
 
     record(db, request, user, "end_user_group.members",
@@ -451,17 +452,18 @@ def directory_save(
         return _redirect("/login")
     client = db.get(m.Client, client_id)
     if client is None:
-        _flash(request, "Client not found.")
+        _flash(request, "Client not found.", level="error")
         return _redirect("/manage/people")
     back = f"/manage/people?client_id={client.id}"
 
     try:
         source = m.DirectorySource(provider)
     except ValueError:
-        _flash(request, "Unknown directory provider.")
+        _flash(request, "Unknown directory provider.", level="error")
         return _redirect(back)
     if source is m.DirectorySource.manual:
-        _flash(request, "'manual' is a provenance, not a directory you connect to.")
+        _flash(request, "'manual' is a provenance, not a directory you connect to.",
+               level="error")
         return _redirect(back)
 
     submitted = {
@@ -524,7 +526,7 @@ def directory_sync_now(
         return _redirect("/login")
     conn = db.get(m.DirectoryConnection, conn_id)
     if conn is None:
-        _flash(request, "Connection not found.")
+        _flash(request, "Connection not found.", level="error")
         return _redirect("/manage/people")
 
     result = run_connection(db, conn)
@@ -535,8 +537,16 @@ def directory_sync_now(
     db.commit()
 
     if result.get("error"):
-        _flash(request, f"Sync failed: {result['error']}")
+        _flash(request, f"Sync failed: {result['error']}", level="error")
     else:
+        # Computed, not static: the caveats this message appends are conditional,
+        # so a fixed level would either paint every clean sync amber or announce a
+        # partial application in the colour that means "that worked". A partial
+        # fetch applied NO deactivations, so a leaver is still active and still
+        # holds their printers; conflicts are rows deliberately not adopted. The
+        # connection row right above this box already renders both in amber
+        # (people.html), and the flash must not contradict it. Same shape as the
+        # maintenance-log flash in manage.py.
         _flash(request, (
             f"Synced: {result.get('created', 0)} added, "
             f"{result.get('updated', 0)} updated, "
@@ -544,7 +554,8 @@ def directory_sync_now(
             + (f", {result['conflicts']} conflict(s)" if result.get("conflicts") else "")
             + ("" if result.get("complete", True)
                else " — partial fetch, no deactivations applied")
-        ))
+        ), level=("warning" if result.get("conflicts")
+                  or not result.get("complete", True) else "success"))
     return _redirect(f"/manage/people?client_id={conn.client_id}")
 
 
@@ -566,7 +577,7 @@ def directory_delete(
         return _redirect("/login")
     conn = db.get(m.DirectoryConnection, conn_id)
     if conn is None:
-        _flash(request, "Connection not found.")
+        _flash(request, "Connection not found.", level="error")
         return _redirect("/manage/people")
 
     client_id, provider = conn.client_id, conn.provider.value

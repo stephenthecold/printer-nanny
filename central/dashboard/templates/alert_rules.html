@@ -7,10 +7,6 @@
 {{ page_title('Alert rules',
    'What raises an alert. Every condition here except the last asks “is this true right now”; an occurrence-rate rule asks “has this happened too often lately”.') }}
 
-{% if flash %}
-<div role="status" class="{{ note('warning', 'mb-4') }}">{{ flash }}</div>
-{% endif %}
-
 <div class="grid lg:grid-cols-3 gap-6">
   <section class="{{ card_cls('none', 'lg:col-span-2') }}">
     <div class="px-4 py-3 border-b font-semibold">Rules</div>

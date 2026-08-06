@@ -1,4 +1,4 @@
-﻿"""Failed-sign-in throttling for the local password login.
+"""Failed-sign-in throttling for the local password login.
 
 Audit logging already recorded every failure with the attempted username, which
 tells an operator afterwards that they were attacked. Nothing slowed the attack

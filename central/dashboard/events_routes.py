@@ -361,6 +361,7 @@ def rotate_secret(sub_id: int, request: Request, db: Session = Depends(get_db)):
     _flash(
         request,
         "New signing secret for '%s'. The previous one stopped working now." % sub.name,
+        level="warning",
     )
     return _redirect("/manage/events")
 

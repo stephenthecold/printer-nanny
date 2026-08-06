@@ -161,7 +161,7 @@ def save_definition(
 
     row = db.get(m.DeviceDefinition, int(definition_id)) if definition_id.strip() else None
     if definition_id.strip() and row is None:
-        _flash(request, "That definition no longer exists.")
+        _flash(request, "That definition no longer exists.", level="error")
         return _redirect("/manage/definitions")
 
     scope: Optional[int] = None
@@ -169,18 +169,18 @@ def save_definition(
         try:
             scope = int(client_id)
         except (TypeError, ValueError):
-            _flash(request, "Unknown client.")
+            _flash(request, "Unknown client.", level="error")
             return _redirect("/manage/definitions")
         if db.get(m.Client, scope) is None:
             # A scope naming a client that does not exist would be served to
             # nobody and look, in the list, like it was working.
-            _flash(request, "That client no longer exists.")
+            _flash(request, "That client no longer exists.", level="error")
             return _redirect("/manage/definitions")
 
     try:
         parsed = _parse_spec(spec)
     except DefinitionError as exc:
-        _flash(request, f"Refused: {exc}")
+        _flash(request, f"Refused: {exc}", level="error")
         return _redirect(f"/manage/definitions?edit={row.id}" if row else "/manage/definitions")
 
     # The checkbox is authoritative over whatever the JSON said, because the
@@ -203,6 +203,7 @@ def save_definition(
         _flash(
             request,
             f"A definition with key {parsed['key']!r} already exists in that scope.",
+            level="error",
         )
         return _redirect("/manage/definitions")
 
@@ -257,7 +258,7 @@ def delete_definition(
 
     row = db.get(m.DeviceDefinition, definition_id)
     if row is None:
-        _flash(request, "That definition no longer exists.")
+        _flash(request, "That definition no longer exists.", level="error")
         return _redirect("/manage/definitions")
 
     record(

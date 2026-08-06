@@ -1,3 +1,8 @@
+{#- base.html previously imported nothing from the component layer and grew its
+    own parallel set of class strings -- a second, undeclared component library
+    inside the layout. This import is the first step back: the flash box below
+    uses note() rather than a hand-rolled copy of it. -#}
+{% import "_components.html" as c %}
 <!doctype html>
 <html lang="en" class="h-full bg-slate-50">
 <head>
@@ -202,8 +207,19 @@
      is made unusable. dashboard.js writes here only when the freshness STATE
      changes, so a transition is announced once and a steady state is silent. #}
   <span id="pn-freshness-live" role="status" aria-live="polite" class="sr-only"></span>
-  {% if flash %}
-  <div class="mb-4 rounded bg-emerald-50 border border-emerald-200 text-emerald-800 text-sm px-3 py-2">{{ flash }}</div>
+  {#- The ONE place a flash renders. Ten page templates used to render it a
+      second time inside {% block body %} in their own colour, so the same
+      sentence appeared twice, in two colours, on nine pages.
+
+      The box is no longer hardcoded emerald. It was, which meant every refusal
+      the channel carried -- "no changes saved", "Rate card name is required",
+      "Refused: {exc}" -- was delivered in the colour this interface uses for
+      success. Tone comes from the level the writer set (central/dashboard/
+      flash.py), and role follows severity: a refusal interrupts a screen reader
+      (alert), a confirmation does not (status). -#}
+  {% if flash and flash.text %}
+  <div class="{{ c.note(flash.level|default('info')) }} mb-4"
+       role="{{ 'alert' if flash.level in ('error', 'warning') else 'status' }}">{{ flash.text }}</div>
   {% endif %}
   {% block body %}{% endblock %}
 </main>

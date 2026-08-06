@@ -10,9 +10,8 @@
   their next request.
 </p>
 
-{% if error %}
-<div role="alert" class="{{ note('error', 'mb-4') }}">{{ error }}</div>
-{% endif %}
+{# The former ``error`` block lived here because the flash channel could not
+   carry a severity. It can now, and base.html renders it with role="alert". #}
 
 <div class="grid md:grid-cols-2 gap-6 max-w-4xl">
   <section class="{{ card_cls() }}">

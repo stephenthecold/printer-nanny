@@ -146,10 +146,11 @@ def save_expectation(
             request,
             "A model tag needs at least %d characters -- a shorter one would "
             "match half the fleet." % _yield.MIN_MODEL_TAG,
+            level="error",
         )
         return _redirect("/supplies/yield")
     if supply_type not in SUPPLY_TYPES:
-        _flash(request, "Unknown supply type.")
+        _flash(request, "Unknown supply type.", level="error")
         return _redirect("/supplies/yield")
     try:
         pages = int((expected_pages or "").strip())
@@ -159,6 +160,7 @@ def save_expectation(
         _flash(
             request,
             "Expected pages must be between 1 and %s." % f"{MAX_EXPECTED_PAGES:,}",
+            level="error",
         )
         return _redirect("/supplies/yield")
 
@@ -216,7 +218,7 @@ def delete_expectation(
 
     row = db.get(m.SupplyYieldExpectation, expectation_id)
     if row is None:
-        _flash(request, "That expected yield no longer exists.")
+        _flash(request, "That expected yield no longer exists.", level="error")
         return _redirect("/supplies/yield")
 
     record(

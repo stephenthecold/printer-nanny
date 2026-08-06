@@ -15,6 +15,7 @@ from central import queries
 from central import supplies as supplies_lib
 from central.branding import branding_for
 from central.csrf import rotate_token
+from central.dashboard import flash as _flash_mod
 from central.dashboard.templating import templates
 from central.db import get_db
 from central.deps import SESSION_EPOCH_KEY, session_user
@@ -191,6 +192,9 @@ def _render(
     # frozen data. Returns None when healthy; never raises.
     if db is not None and "worker_banner" not in ctx:
         ctx["worker_banner"] = worker_banner(db, ctx.get("user"))
+    # See manage._tpl: the queued message is taken here, not by each route, so a
+    # handler that forgets to pass it cannot silently swallow it.
+    ctx.setdefault("flash", _flash_mod.pop(request))
     return _templates.TemplateResponse(request, template, ctx)
 
 
@@ -411,7 +415,8 @@ def customer_portal(request: Request, db: Session = Depends(get_db)):
         reorder_summary=reorder_mod.summarize(reorder_recs),
         urgency_now=reorder_mod.URGENCY_NOW,
         printer_label=_printer_label,
-        portal_flash=request.session.pop("portal_flash", None),
+        # One channel, not a portal-private second copy. base.html renders it.
+        flash=_flash_mod.pop(request),
         # Scoped to this client, and labelled with their own name rather than
         # "Fleet" -- the portal is the one surface where "the fleet" means
         # theirs. This is also the only view whose reader is never shown the
@@ -435,7 +440,7 @@ def portal_report(
     if user is None or user.role != m.UserRole.client_readonly:
         return RedirectResponse("/", status_code=303)
     if not subject.strip() or not body.strip():
-        request.session["portal_flash"] = "Subject and description are required."
+        _flash_mod.error(request, "Subject and description are required.")
         return RedirectResponse("/portal", status_code=303)
     client = db.get(m.Client, user.client_id) if user.client_id else None
     printer = None
@@ -479,10 +484,18 @@ def portal_report(
            target=f"client:{client.id} {client.name}" if client else "no-client",
            detail=f"via:{sent_via or 'none'}; subject={subject[:80]}")
     db.commit()
-    request.session["portal_flash"] = (
-        "Thanks -- your request was sent to support." if sent_via
-        else "Could not deliver the report. Your operator has not configured a ticket channel yet."
-    )
+    # The severity is the point. This branch is why the typed channel exists: a
+    # customer whose report was NOT delivered was told so in the green success
+    # box, which is the UI committing exactly the sin ChannelResult.sent forbids
+    # the delivery layer -- reporting success without transmitting.
+    if sent_via:
+        _flash_mod.flash(request, "Thanks -- your request was sent to support.")
+    else:
+        _flash_mod.error(
+            request,
+            "Could not deliver the report. Your operator has not configured a "
+            "ticket channel yet.",
+        )
     return RedirectResponse("/portal", status_code=303)
 
 
@@ -830,7 +843,7 @@ def approvals(request: Request, db: Session = Depends(get_db)):
     return _render(
         request, "approvals.html", db=db, user=user,
         pending=pending, agents_by_id=agents_by_id,
-        approvals_flash=request.session.pop("approvals_flash", None),
+        flash=_flash_mod.pop(request),
     )
 
 
@@ -908,12 +921,20 @@ def approval_bulk(
         record(db, request, user, f"printer.bulk_{action}",
                target=f"{len(changed)} printers", detail=detail)
         db.commit()
-        request.session["approvals_flash"] = (
+        _flash_mod.flash(
+            request,
             f"{len(changed)} device{'s' if len(changed) != 1 else ''} "
-            f"{'approved' if action == 'approve' else 'ignored'}."
+            f"{'approved' if action == 'approve' else 'ignored'}.",
         )
     else:
-        request.session["approvals_flash"] = "Nothing to do — those devices are no longer pending."
+        # Neither a success nor a failure: the operator asked for something that
+        # had already happened. Green would claim work was done; red would report
+        # a problem that does not exist.
+        _flash_mod.flash(
+            request,
+            "Nothing to do — those devices are no longer pending.",
+            level="info",
+        )
     return RedirectResponse("/approvals", status_code=303)
 
 
@@ -984,7 +1005,7 @@ def account_view(request: Request, db: Session = Depends(get_db)):
         return _login_redirect()
     return _render(
         request, "account.html", db=db, user=user,
-        flash=request.session.pop("account_flash", None),
+        flash=_flash_mod.pop(request),
         error=request.session.pop("account_error", None),
         must_change_password=bool(user.must_change_password),
     )
@@ -1039,7 +1060,7 @@ def account_change_password(
     record(db, request, user, "account.password_change",
            detail="forced rotation of a generated password" if was_forced else "")
     db.commit()
-    request.session["account_flash"] = "Password changed."
+    _flash_mod.flash(request, "Password changed.")
     return RedirectResponse("/account", status_code=303)
 
 

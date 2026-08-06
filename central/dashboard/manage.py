@@ -28,6 +28,7 @@ from central import suppression
 from central.audit import record
 from central.branding import branding_for
 from central.dashboard import _keystore
+from central.dashboard import flash as _flash_mod
 from central.dashboard.templating import templates
 from central.db import get_db
 from central.deps import session_user
@@ -74,8 +75,26 @@ def _redirect(path: str) -> RedirectResponse:
     return RedirectResponse(path, status_code=303)
 
 
-def _flash(request: Request, message: str) -> None:
-    request.session["flash"] = message
+def _flash(request: Request, message: str, level: str = "success") -> None:
+    """Queue a message for the next render. See central/dashboard/flash.py.
+
+    Kept as a thin local name because ~113 call sites in this module use it, but
+    the definition now lives in one place shared with every other dashboard
+    module -- ``auth_oauth_smtp`` and ``backup_routes`` were assigning
+    ``session["flash"]`` directly, which is how a second spelling of a channel
+    starts.
+
+    Pass ``level="error"`` for anything that refused, changed nothing, or lost
+    the operator's input. The default stays ``success`` so an unclassified call
+    renders exactly as it did before this refactor rather than being quietly
+    restyled.
+    """
+    _flash_mod.flash(request, message, level=level)
+
+
+def _flash_error(request: Request, message: str) -> None:
+    """The case the old string-only channel could not express at all."""
+    _flash_mod.flash(request, message, level="error")
 
 
 def _site_belongs_to(db: Session, site_id: int, client_id: Optional[int]) -> bool:
@@ -100,8 +119,13 @@ def _site_belongs_to(db: Session, site_id: int, client_id: Optional[int]) -> boo
     return site is not None and site.client_id == client_id
 
 
-def _pop_flash(request: Request) -> Optional[str]:
-    return request.session.pop("flash", None)
+def _pop_flash(request: Request) -> Optional[dict]:
+    """The queued message as ``{"level", "text"}``, or None.
+
+    The shape changed from a bare string. Templates read ``flash.text`` /
+    ``flash.level``; ``base.html`` is the only place that renders it.
+    """
+    return _flash_mod.pop(request)
 
 
 def _tpl(request: Request, template: str, db: Session, **ctx) -> HTMLResponse:
@@ -130,6 +154,13 @@ def _tpl(request: Request, template: str, db: Session, **ctx) -> HTMLResponse:
     # Stalled-worker banner (base.html) -- see central.health.worker_banner.
     if "worker_banner" not in ctx:
         ctx["worker_banner"] = worker_banner(db, ctx.get("user"))
+    # The queued message, taken here rather than by each route. base.html renders
+    # ``flash`` from the context, so a page whose handler forgot to pass it
+    # DROPPED the message silently -- and the pages most likely to forget are the
+    # ones a refusal redirects to, which is exactly when the operator needs to be
+    # told something. ``setdefault`` keeps the routes that already pop it working
+    # and stops this popping a second time on the same render.
+    ctx.setdefault("flash", _flash_mod.pop(request))
     return _templates.TemplateResponse(request, template, ctx)
 
 
@@ -237,7 +268,7 @@ def update_client(
     if client:
         tz = client_timezone.strip()
         if tz and not suppression.valid_timezone(tz):
-            _flash(request, f"'{tz}' isn't a recognised timezone — left unchanged.")
+            _flash(request, f"'{tz}' isn't a recognised timezone — left unchanged.", level="error")
             return _redirect(f"/manage/clients/{client_id}")
         client.name = name.strip() or client.name
         client.notes = notes.strip() or None
@@ -286,7 +317,8 @@ def update_client_branding(
     color_raw = (brand_primary_color or "").strip()
     color = branding_lib.normalise_hex_color(color_raw) if color_raw else None
     if color_raw and color is None:
-        _flash(request, f"'{color_raw[:40]}' is not a #RRGGBB colour — branding unchanged.")
+        _flash(request, f"'{color_raw[:40]}' is not a #RRGGBB colour — branding unchanged.",
+               level="error")
         record(db, request, actor, "client.branding.refused",
                target=f"client:{client.id} {client.name}",
                detail="primary_color rejected (not #rrggbb)")
@@ -298,7 +330,8 @@ def update_client_branding(
     # equally valid, so there is nothing to special-case here.
     url = branding_lib.safe_logo_url(url_raw) if url_raw else None
     if url_raw and url is None:
-        _flash(request, "Logo URL must be an https:// address or a /path — branding unchanged.")
+        _flash(request, "Logo URL must be an https:// address or a /path — branding unchanged.",
+               level="error")
         record(db, request, actor, "client.branding.refused",
                target=f"client:{client.id} {client.name}",
                detail="logo_url rejected (scheme or length)")
@@ -352,7 +385,7 @@ async def upload_client_branding_logo(
     data = await logo.read()
     content_type, error = branding_lib.validate_logo(logo.content_type or "", data)
     if error:
-        _flash(request, f"Logo upload: {error}")
+        _flash(request, f"Logo upload: {error}", level="error")
         record(db, request, actor, "client.branding.logo.refused",
                target=f"client:{client.id} {client.name}", detail=error[:200])
         db.commit()
@@ -484,7 +517,7 @@ def delete_client(client_id: int, request: Request, db: Session = Depends(get_db
     """
     user = _manager(request, db)
     if user is None or user.role != m.UserRole.admin:
-        _flash(request, "Only admins can delete clients.")
+        _flash(request, "Only admins can delete clients.", level="error")
         return _redirect(f"/manage/clients/{client_id}")
     client = db.get(m.Client, client_id)
     if client:
@@ -496,7 +529,7 @@ def delete_client(client_id: int, request: Request, db: Session = Depends(get_db
                    target=f"client:{client.id} {client.name}",
                    detail=blocked["detail"])
             db.commit()
-            _flash(request, blocked["message"])
+            _flash(request, blocked["message"], level="error")
             return _redirect(f"/manage/clients/{client_id}")
         record(db, request, user, "client.delete",
                target=f"client:{client.id} {client.name}")
@@ -552,7 +585,7 @@ def delete_site(site_id: int, request: Request, db: Session = Depends(get_db)):
         return _redirect("/manage")
     client_id = site.client_id
     if user.role != m.UserRole.admin:
-        _flash(request, "Only admins can delete sites.")
+        _flash(request, "Only admins can delete sites.", level="error")
         return _redirect(f"/manage/clients/{client_id}")
     blocked = _printer_delete_blockers(db, site_id=site_id)
     if blocked:
@@ -565,7 +598,8 @@ def delete_site(site_id: int, request: Request, db: Session = Depends(get_db)):
             request,
             f"Can't delete this site: it still has {blocked['total']} {noun} "
             f"({blocked['breakdown']}). Move them to another site or delete "
-            "them first — deleting a printer also deletes its reading history."
+            "them first — deleting a printer also deletes its reading history.",
+            level="error",
         )
         return _redirect(f"/manage/clients/{client_id}")
     record(db, request, user, "site.delete",
@@ -585,6 +619,8 @@ def delete_site(site_id: int, request: Request, db: Session = Depends(get_db)):
 #: makes the browser post its FIRST option, which is how editing an asset tag
 #: silently rewrote a v3 printer to v2c.
 SNMP_VERSION_CHOICES = ("1", "2c", "3")
+
+
 @router.get("/printers/new", response_class=HTMLResponse)
 def printer_new(
     request: Request, client_id: int, site_id: Optional[int] = None, db: Session = Depends(get_db)
@@ -637,7 +673,8 @@ def printer_create(
     if _manager(request, db) is None:
         return _redirect("/login")
     if not _site_belongs_to(db, site_id, client_id):
-        _flash(request, "That site does not belong to this client; printer not added.")
+        _flash(request, "That site does not belong to this client; printer not added.",
+               level="error")
         return _redirect(f"/manage/clients/{client_id}")
     printer = m.Printer(
         client_id=client_id, site_id=site_id, ip=ip.strip(),
@@ -680,7 +717,8 @@ def printer_update(
             # Refused rather than clamped to the printer's current site: a form
             # that silently ignores the field the operator just changed is its
             # own kind of lie.
-            _flash(request, "That site belongs to a different client; no changes saved.")
+            _flash(request, "That site belongs to a different client; no changes saved.",
+                   level="error")
             # ``/manage/printers/{id}`` is POST-only, so the old target answered
             # this refusal with a 405 and lost the form. Send them back to the
             # editor they submitted from.
@@ -698,7 +736,8 @@ def printer_update(
         # on the security posture report, so a value we do not understand must
         # not overwrite one we do.
         if snmp_version not in SNMP_VERSION_CHOICES:
-            _flash(request, f"{snmp_version!r} is not an SNMP version; no changes saved.")
+            _flash(request, f"{snmp_version!r} is not an SNMP version; no changes saved.",
+                   level="error")
             return _redirect(f"/manage/printers/{printer.id}/edit")
         printer.snmp_version = snmp_version
         printer.snmp_community = snmp_community.strip() or "public"
@@ -803,10 +842,11 @@ def printer_driver_tier_override(
         try:
             candidate = m.DriverTier(raw)
         except ValueError:
-            _flash(request, f"Unknown driver tier {raw!r}.")
+            _flash(request, f"Unknown driver tier {raw!r}.", level="error")
             return _redirect(f"/printers/{printer.id}")
         if candidate not in m.OVERRIDABLE_DRIVER_TIERS:
-            _flash(request, f"{candidate.value} describes a probe failure and cannot be pinned.")
+            _flash(request, f"{candidate.value} describes a probe failure and cannot be pinned.",
+                   level="error")
             return _redirect(f"/printers/{printer.id}")
         new_value = candidate
 
@@ -850,7 +890,7 @@ def printer_poll_now(printer_id: int, request: Request, db: Session = Depends(ge
         agent = db.scalar(select(m.Agent).where(m.Agent.site_id == printer.site_id))
         agent_id = agent.id if agent else None
     if agent_id is None:
-        _flash(request, "No agent is assigned to this site -- cannot poll.")
+        _flash(request, "No agent is assigned to this site -- cannot poll.", level="error")
         return _redirect(f"/printers/{printer.id}")
 
     db.add(m.Command(
@@ -1027,12 +1067,13 @@ def onboard_submit(
     client_name = client_name.strip()
     site_name = site_name.strip()
     if not client_name or not site_name:
-        _flash(request, "Client and site names are both required.")
+        _flash(request, "Client and site names are both required.", level="error")
         return _redirect("/manage/onboard")
 
     tz = client_timezone.strip()
     if tz and not suppression.valid_timezone(tz):
-        _flash(request, f"'{tz}' isn't a recognised timezone — pick one from the list.")
+        _flash(request, f"'{tz}' isn't a recognised timezone — pick one from the list.",
+               level="error")
         return _redirect("/manage/onboard")
 
     client = db.scalar(select(m.Client).where(m.Client.name == client_name))
@@ -1119,7 +1160,7 @@ def agent_claim_code(
         return _redirect("/login")
     site = db.get(m.Site, site_id)
     if site is None:
-        _flash(request, "Pick a site for the claim code.")
+        _flash(request, "Pick a site for the claim code.", level="error")
         return _redirect("/manage/agents")
 
     token, code = services.mint_claim_token(
@@ -1179,7 +1220,7 @@ def agent_build_msi(
         return _redirect("/login")
     agent = db.get(m.Agent, agent_id)
     if agent is None:
-        _flash(request, "Agent not found.")
+        _flash(request, "Agent not found.", level="error")
         return _redirect("/manage/agents")
 
     from central.msi_builder import build_msi, msi_build_available
@@ -1189,7 +1230,7 @@ def agent_build_msi(
         record(db, request, user, "agent.msi_build",
                target=f"agent:{agent.id} {agent.name}", detail=f"unavailable: {cap.reason}")
         db.commit()
-        _flash(request, cap.reason)
+        _flash(request, cap.reason, level="error")
         return _redirect("/manage/agents")
 
     from central.runtime import load_settings
@@ -1210,7 +1251,7 @@ def agent_build_msi(
         record(db, request, user, "agent.msi_build",
                target=f"agent:{agent.id} {agent.name}", detail=f"failed: {exc}")
         db.commit()
-        _flash(request, f"MSI build failed: {exc}")
+        _flash(request, f"MSI build failed: {exc}", level="error")
         return _redirect("/manage/agents")
 
     record(db, request, user, "agent.msi_build", target=f"agent:{agent.id} {agent.name}",
@@ -1269,7 +1310,7 @@ def agent_build_claim_msi(
     if token is None or token.used_at is not None:
         # Already redeemed, or never existed. Same message either way, matching
         # the redemption endpoint -- no oracle here either.
-        _flash(request, "That claim code is no longer valid. Mint a fresh one.")
+        _flash(request, "That claim code is no longer valid. Mint a fresh one.", level="error")
         return _redirect("/manage/agents")
 
     cap = msi_build_available()
@@ -1278,7 +1319,7 @@ def agent_build_claim_msi(
                target=f"claim_token:{token.id} site:{token.site_id}",
                detail=f"unavailable: {cap.reason}")
         db.commit()
-        _flash(request, cap.reason)
+        _flash(request, cap.reason, level="error")
         return _redirect("/manage/agents")
 
     from central.runtime import load_settings
@@ -1301,7 +1342,7 @@ def agent_build_claim_msi(
                target=f"claim_token:{token.id} site:{token.site_id}",
                detail=f"failed: {exc}")
         db.commit()
-        _flash(request, f"MSI build failed: {exc}")
+        _flash(request, f"MSI build failed: {exc}", level="error")
         return _redirect("/manage/agents")
 
     record(db, request, user, "agent.msi_build",
@@ -1334,7 +1375,7 @@ def agent_update_command(agent_id: int, request: Request, db: Session = Depends(
         return _redirect("/login")
     agent = db.get(m.Agent, agent_id)
     if agent is None:
-        _flash(request, "Agent not found.")
+        _flash(request, "Agent not found.", level="error")
         return _redirect("/manage/agents")
     from central.runtime import load_settings
     rt = load_settings(db)
@@ -1344,6 +1385,7 @@ def agent_update_command(agent_id: int, request: Request, db: Session = Depends(
             request,
             "Set Settings -> Agent install -> Pip source to your real repo "
             "before pushing updates; the placeholder won't install.",
+            level="error",
         )
         return _redirect("/manage/agents")
     db.add(m.Command(
@@ -1373,7 +1415,7 @@ def agents_update_outdated(request: Request, db: Session = Depends(get_db)):
     """
     user = _manager(request, db)
     if user is None or user.role != m.UserRole.admin:
-        _flash(request, "Only admins can mass-update agents.")
+        _flash(request, "Only admins can mass-update agents.", level="error")
         return _redirect("/manage/agents")
     from central.agent_release import bundled_agent_version, needs_update
     from central.runtime import load_settings
@@ -1383,6 +1425,7 @@ def agents_update_outdated(request: Request, db: Session = Depends(get_db)):
         _flash(
             request,
             "Set Settings -> Agent install -> Pip source to your real repo first.",
+            level="error",
         )
         return _redirect("/manage/agents")
     target = bundled_agent_version()
@@ -1419,7 +1462,7 @@ def agents_update_outdated(request: Request, db: Session = Depends(get_db)):
         msg = f"No new updates queued -- {skipped_pending} already pending."
     else:
         msg = f"All agents are up to date (target {target}); nothing to update."
-    _flash(request, msg)
+    _flash(request, msg, level="success" if queued else "info")
     return _redirect("/manage/agents")
 
 
@@ -1434,7 +1477,7 @@ def agent_rescan(agent_id: int, request: Request, db: Session = Depends(get_db))
         return _redirect("/login")
     agent = db.get(m.Agent, agent_id)
     if agent is None:
-        _flash(request, "Agent not found.")
+        _flash(request, "Agent not found.", level="error")
         return _redirect("/manage/agents")
     db.add(m.Command(agent_id=agent.id, type=m.CommandType.rescan, payload=None))
     record(db, request, _manager(request, db), "agent.rescan",
@@ -1459,7 +1502,7 @@ def agent_poll_now(agent_id: int, request: Request, db: Session = Depends(get_db
         return _redirect("/login")
     agent = db.get(m.Agent, agent_id)
     if agent is None:
-        _flash(request, "Agent not found.")
+        _flash(request, "Agent not found.", level="error")
         return _redirect("/manage/agents")
     db.add(m.Command(agent_id=agent.id, type=m.CommandType.poll_now, payload=None))
     record(db, request, _manager(request, db), "agent.poll_now",
@@ -1476,7 +1519,7 @@ def agent_poll_now(agent_id: int, request: Request, db: Session = Depends(get_db
 def agent_delete(agent_id: int, request: Request, db: Session = Depends(get_db)):
     user = _manager(request, db)
     if user is None or user.role != m.UserRole.admin:
-        _flash(request, "Only admins can delete agents.")
+        _flash(request, "Only admins can delete agents.", level="error")
         return _redirect("/manage/agents")
     agent = db.get(m.Agent, agent_id)
     if agent:
@@ -1746,10 +1789,11 @@ def _apply_standby(
         if candidate is None:
             return ""
         if subnet.agent_id is None:
-            _flash(request, f"Assign a collector to {subnet.cidr} before adding a standby.")
+            _flash(request, f"Assign a collector to {subnet.cidr} before adding a standby.",
+                   level="error")
             return ""
         if candidate.id == subnet.agent_id:
-            _flash(request, f"{candidate.name} already collects {subnet.cidr}.")
+            _flash(request, f"{candidate.name} already collects {subnet.cidr}.", level="error")
             return ""
         new_id = candidate.id
     if new_id == subnet.standby_agent_id:
@@ -1805,10 +1849,10 @@ def subnet_handback(subnet_id: int, request: Request, db: Session = Depends(get_
         return _redirect("/manage/agents")
     holder = subnet.collector_agent_id
     if holder is None or holder == subnet.agent_id:
-        _flash(request, f"{subnet.cidr} is already collected by its primary.")
+        _flash(request, f"{subnet.cidr} is already collected by its primary.", level="info")
         return _redirect("/manage/agents")
     if subnet.agent_id is None:
-        _flash(request, f"{subnet.cidr} has no primary agent to hand back to.")
+        _flash(request, f"{subnet.cidr} has no primary agent to hand back to.", level="error")
         return _redirect("/manage/agents")
     collector.release_lease(db, subnet.id, holder_id=holder, now=datetime.now(timezone.utc))
     db.expire(subnet)
@@ -1911,7 +1955,7 @@ def schedule_create(
         return _redirect("/login")
     name = name.strip()
     if not name:
-        _flash(request, "Schedule name is required.")
+        _flash(request, "Schedule name is required.", level="error")
         return _redirect("/manage/maintenance")
     pid: Optional[int] = None
     if printer_id.strip():
@@ -2138,7 +2182,7 @@ def schedule_log_service(
                   f"next_due:{sched.next_due.date().isoformat() if sched.next_due else '-'} "
                   f"page_target:{sched.page_target() or '-'}")
     db.commit()
-    _flash(request, " ".join(msg))
+    _flash(request, " ".join(msg), level="warning" if (notices or not recurs) else "success")
     return _redirect("/manage/maintenance")
 
 
@@ -2146,7 +2190,7 @@ def schedule_log_service(
 def record_delete(rec_id: int, request: Request, db: Session = Depends(get_db)):
     actor = _manager(request, db)
     if actor is None or actor.role != m.UserRole.admin:
-        _flash(request, "Only admins can remove service records.")
+        _flash(request, "Only admins can remove service records.", level="error")
         return _redirect("/manage/maintenance")
     rec = db.get(m.MaintenanceRecord, rec_id)
     if rec is not None:
@@ -2267,10 +2311,10 @@ def user_create(
         return _redirect("/login")
     username = username.strip()
     if not username:
-        _flash(request, "Username is required.")
+        _flash(request, "Username is required.", level="error")
         return _redirect("/manage/users")
     if db.scalar(select(m.User).where(m.User.username == username)) is not None:
-        _flash(request, f"Username '{username}' is already taken.")
+        _flash(request, f"Username '{username}' is already taken.", level="error")
         return _redirect("/manage/users")
     role_enum = _coerce_role(role)
     # client_readonly users MUST be pinned to a client -- otherwise they'd see
@@ -2282,7 +2326,7 @@ def user_create(
         except ValueError:
             pinned_client_id = None
     if role_enum == m.UserRole.client_readonly and pinned_client_id is None:
-        _flash(request, "client_readonly users must be assigned to a client.")
+        _flash(request, "client_readonly users must be assigned to a client.", level="error")
         return _redirect("/manage/users")
     # The same floor the reset and self-service paths already enforce. Without it
     # this route -- the one that can mint an ADMIN -- was the only way into the
@@ -2290,7 +2334,8 @@ def user_create(
     # and means "SSO-only account", which is why this tests the length rather
     # than truthiness.
     if password and len(password) < MIN_PASSWORD_LENGTH:
-        _flash(request, f"Password must be at least {MIN_PASSWORD_LENGTH} characters.")
+        _flash(request, f"Password must be at least {MIN_PASSWORD_LENGTH} characters.",
+               level="error")
         return _redirect("/manage/users")
     new_user = m.User(
         username=username,
@@ -2326,7 +2371,8 @@ def user_update(
     # Last-admin guard: refuse to demote the only remaining admin (lockout).
     if (target.role == m.UserRole.admin and new_role != m.UserRole.admin
             and db.query(m.User).filter_by(role=m.UserRole.admin).count() <= 1):
-        _flash(request, "Refused: this is the only admin. Promote another user first.")
+        _flash(request, "Refused: this is the only admin. Promote another user first.",
+               level="error")
         return _redirect(f"/manage/users/{user_id}/edit")
     pinned_client_id: Optional[int] = None
     if client_id.strip():
@@ -2335,7 +2381,7 @@ def user_update(
         except ValueError:
             pinned_client_id = None
     if new_role == m.UserRole.client_readonly and pinned_client_id is None:
-        _flash(request, "client_readonly users must be assigned to a client.")
+        _flash(request, "client_readonly users must be assigned to a client.", level="error")
         return _redirect(f"/manage/users/{user_id}/edit")
     target.email = email.strip() or None
     target.role = new_role
@@ -2359,7 +2405,8 @@ def user_reset_password(
     if target is None:
         return _redirect("/manage/users")
     if len(new_password) < MIN_PASSWORD_LENGTH:
-        _flash(request, f"Password must be at least {MIN_PASSWORD_LENGTH} characters.")
+        _flash(request, f"Password must be at least {MIN_PASSWORD_LENGTH} characters.",
+               level="error")
         return _redirect(f"/manage/users/{user_id}/edit")
     target.password_hash = hash_password(new_password)
     target.auth_provider = "local"  # they can now sign in locally
@@ -2390,11 +2437,11 @@ def user_delete(user_id: int, request: Request, db: Session = Depends(get_db)):
     if target is None:
         return _redirect("/manage/users")
     if actor.id == target.id:
-        _flash(request, "Refused: you can't delete the account you're logged in as.")
+        _flash(request, "Refused: you can't delete the account you're logged in as.", level="error")
         return _redirect("/manage/users")
     if (target.role == m.UserRole.admin
             and db.query(m.User).filter_by(role=m.UserRole.admin).count() <= 1):
-        _flash(request, "Refused: this is the only admin.")
+        _flash(request, "Refused: this is the only admin.", level="error")
         return _redirect("/manage/users")
     record(db, request, actor, "user.delete",
            target=f"user:{target.username}", detail=f"role={target.role.value}")
@@ -2573,7 +2620,7 @@ def suppression_create(
         return _redirect("/login")
     name = name.strip()
     if not name:
-        _flash(request, "Window name is required.")
+        _flash(request, "Window name is required.", level="error")
         return _redirect("/manage/suppression")
 
     try:
@@ -2603,7 +2650,7 @@ def suppression_create(
 
     scope_enum, target = _window_scope(scope, scope_id)
     if scope_enum is None:
-        _flash(request, "Pick a target for a client/site/printer-scoped window.")
+        _flash(request, "Pick a target for a client/site/printer-scoped window.", level="error")
         return _redirect("/manage/suppression")
 
     start = end = None
@@ -2613,17 +2660,17 @@ def suppression_create(
         start = _parse_hhmm(start_time)
         end = _parse_hhmm(end_time)
         if start is None or end is None:
-            _flash(request, "Quiet hours need a start and end time (HH:MM).")
+            _flash(request, "Quiet hours need a start and end time (HH:MM).", level="error")
             return _redirect("/manage/suppression")
         days = _parse_weekdays(weekdays)
     else:
         begins = _parse_local_dt(starts_at)
         finishes = _parse_local_dt(ends_at)
         if begins is None or finishes is None:
-            _flash(request, "A maintenance window needs a start and end date/time.")
+            _flash(request, "A maintenance window needs a start and end date/time.", level="error")
             return _redirect("/manage/suppression")
         if finishes <= begins:
-            _flash(request, "The maintenance window must end after it starts.")
+            _flash(request, "The maintenance window must end after it starts.", level="error")
             return _redirect("/manage/suppression")
 
     window = m.SuppressionWindow(
@@ -2658,7 +2705,7 @@ def suppression_toggle(window_id: int, request: Request, db: Session = Depends(g
         return _redirect("/login")
     window = db.get(m.SuppressionWindow, window_id)
     if window is None:
-        _flash(request, "That window no longer exists.")
+        _flash(request, "That window no longer exists.", level="error")
         return _redirect("/manage/suppression")
     window.enabled = not window.enabled
     record(db, request, actor, "suppression_window.update",
@@ -2676,7 +2723,7 @@ def suppression_delete(window_id: int, request: Request, db: Session = Depends(g
         return _redirect("/login")
     window = db.get(m.SuppressionWindow, window_id)
     if window is None:
-        _flash(request, "That window no longer exists.")
+        _flash(request, "That window no longer exists.", level="error")
         return _redirect("/manage/suppression")
     record(db, request, actor, "suppression_window.delete",
            target=f"window:{window.name}",
@@ -2809,7 +2856,7 @@ def alert_rules_create(
         return _redirect("/login")
     name = name.strip()
     if not name:
-        _flash(request, "Rule name is required.")
+        _flash(request, "Rule name is required.", level="error")
         return _redirect("/manage/alert-rules")
 
     try:
@@ -2817,7 +2864,7 @@ def alert_rules_create(
     except ValueError:
         condition = None
     if condition not in _CONDITION_LABELS:
-        _flash(request, "That condition type cannot be created here.")
+        _flash(request, "That condition type cannot be created here.", level="error")
         return _redirect("/manage/alert-rules")
 
     try:
@@ -2827,7 +2874,7 @@ def alert_rules_create(
 
     scope_enum, target = _window_scope(scope, scope_id)
     if scope_enum is None:
-        _flash(request, "Pick a target for a client/site/printer-scoped rule.")
+        _flash(request, "Pick a target for a client/site/printer-scoped rule.", level="error")
         return _redirect("/manage/alert-rules")
 
     limit: Optional[float] = None
@@ -2836,7 +2883,7 @@ def alert_rules_create(
         try:
             limit = float(raw_threshold)
         except ValueError:
-            _flash(request, "The threshold must be a number.")
+            _flash(request, "The threshold must be a number.", level="error")
             return _redirect("/manage/alert-rules")
 
     window = None
@@ -2844,13 +2891,13 @@ def alert_rules_create(
     floor = None
     if condition == m.AlertConditionType.occurrence_rate:
         if limit is None or limit < 1:
-            _flash(request, "An occurrence-rate rule needs a count of 1 or more.")
+            _flash(request, "An occurrence-rate rule needs a count of 1 or more.", level="error")
             return _redirect("/manage/alert-rules")
         window = _parse_window_minutes(window_amount, window_unit)
         if window is None:
             _flash(request,
                    "An occurrence-rate rule needs a window between 1 minute and "
-                   f"{_MAX_RULE_WINDOW_MINUTES // 1440} days.")
+                   f"{_MAX_RULE_WINDOW_MINUTES // 1440} days.", level="error")
             return _redirect("/manage/alert-rules")
         # Free text from an operator. It reaches SQL only as a bound LIKE
         # parameter with the metacharacters escaped (worker.jobs._like_contains)
@@ -2869,7 +2916,7 @@ def alert_rules_create(
         m.AlertConditionType.printer_offline,
     ):
         if limit is None:
-            _flash(request, "That condition type needs a threshold.")
+            _flash(request, "That condition type needs a threshold.", level="error")
             return _redirect("/manage/alert-rules")
 
     rule = m.AlertRule(
@@ -2911,7 +2958,7 @@ def alert_rules_toggle(rule_id: int, request: Request, db: Session = Depends(get
         return _redirect("/login")
     rule = db.get(m.AlertRule, rule_id)
     if rule is None:
-        _flash(request, "That rule no longer exists.")
+        _flash(request, "That rule no longer exists.", level="error")
         return _redirect("/manage/alert-rules")
     rule.enabled = not rule.enabled
     record(db, request, actor, "alert_rule.update",
@@ -2928,7 +2975,7 @@ def alert_rules_delete(rule_id: int, request: Request, db: Session = Depends(get
         return _redirect("/login")
     rule = db.get(m.AlertRule, rule_id)
     if rule is None:
-        _flash(request, "That rule no longer exists.")
+        _flash(request, "That rule no longer exists.", level="error")
         return _redirect("/manage/alert-rules")
     record(db, request, actor, "alert_rule.delete",
            target=f"rule:{rule.name}",

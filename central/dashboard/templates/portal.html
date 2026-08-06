@@ -4,9 +4,6 @@
 {% from "base.html" import status_badge, level_bar %}
 {% block title %}{{ client.name }} · {{ app.name or 'Printer Nanny' }}{% endblock %}
 {% block body %}
-{% if portal_flash %}
-<div class="mb-4 rounded bg-emerald-50 border border-emerald-200 text-emerald-800 text-sm px-3 py-2">{{ portal_flash }}</div>
-{% endif %}
 
 <div class="flex items-baseline gap-3 mb-4 flex-wrap">
   <h1 class="text-2xl font-semibold">{{ client.name }}</h1>

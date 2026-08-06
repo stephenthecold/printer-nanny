@@ -337,7 +337,12 @@ focus:border-sky-500 {{ _focus }} {{ extra }}
 {#- ------------------------------------------------------------------ notes -#}
 {#  Inline explanatory panels. `tone` matches badge tones. #}
 {% macro note(tone='info', extra='') -%}
+{#- 'success' exists because its absence is what made base.html hand-roll an
+    emerald box outside the component layer -- and that hand-rolled box is what
+    rendered every refusal in the colour of "that worked". A missing tone and a
+    lying feedback channel were the same defect. -#}
 {%- set tones = {
+  'success': 'bg-emerald-50 border-emerald-200 text-emerald-800',
   'info':    'bg-sky-50 border-sky-200 text-sky-900',
   'warning': 'bg-amber-50 border-amber-200 text-amber-900',
   'error':   'bg-red-50 border-red-200 text-red-900',

@@ -9,10 +9,6 @@
   install command rather than four separate forms.
 </p>
 
-{% if flash %}
-<div class="mb-4 rounded border border-sky-200 bg-sky-50 text-sky-900 px-3 py-2 text-sm">{{ flash }}</div>
-{% endif %}
-
 <form method="post" action="/manage/onboard" class="max-w-3xl space-y-5">
   {{ csrf_field() }}
 

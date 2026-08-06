@@ -9,10 +9,6 @@
      'Billing',
      'Cost-per-page contract terms and the invoice they produce. Rates are priced per page to six decimals; every invoice line is rounded half-up to two.') }}
 
-{% if flash %}
-<div class="{{ note('warning', 'mb-4') }}">{{ flash }}</div>
-{% endif %}
-
 {% if not clients %}
 <div class="{{ card_cls('lg', 'text-sm text-slate-600') }}">
   No clients yet. <a href="/manage/onboard" class="text-sky-700 hover:underline">Onboard one</a> first.

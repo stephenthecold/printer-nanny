@@ -11,9 +11,6 @@
   <a href="/manage/agents" class="text-sky-700 hover:underline rounded">trusted</a>.
 </p>
 
-{% if approvals_flash %}
-<div role="status" class="{{ note('info', 'mb-3') }}">{{ approvals_flash }}</div>
-{% endif %}
 
 <form method="post" action="/approvals/bulk" id="bulk-form">
   {{ csrf_field() }}

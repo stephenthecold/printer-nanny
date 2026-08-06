@@ -174,7 +174,7 @@ def _refuse(db: Session, request: Request, user, printer, action: str, reason: s
         detail=f"{action}: {reason}"[:4000],
     )
     db.commit()
-    _flash(request, reason)
+    _flash(request, reason, level="error")
     return _redirect(f"/printers/{printer.id}#remote")
 
 

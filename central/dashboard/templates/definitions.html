@@ -6,10 +6,6 @@
 {{ c.page_title("Device definitions",
    "How to read a printer model's private MIB, served to agents as data — so a new model does not need an agent release.") }}
 
-{% if flash %}
-  <div class="{{ c.note('info', 'mb-4') }}">{{ flash }}</div>
-{% endif %}
-
 {# ------------------------------------------------------------- existing -- #}
 <div class="{{ c.card_cls() }} mb-8">
   {{ c.section_title("Definitions") }}

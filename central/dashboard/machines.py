@@ -182,7 +182,7 @@ def create_enroll_key(
 
     client = db.get(m.Client, client_id)
     if client is None:
-        _flash(request, "That client no longer exists.")
+        _flash(request, "That client no longer exists.", level="error")
         return _redirect("/manage/machines")
 
     key = generate_enroll_key()
@@ -230,7 +230,7 @@ def revoke_enroll_key(
 
     row = db.get(m.WorkstationEnrollKey, key_id)
     if row is None:
-        _flash(request, "That key no longer exists.")
+        _flash(request, "That key no longer exists.", level="error")
         return _redirect("/manage/machines")
 
     if row.revoked_at is None:
@@ -263,7 +263,7 @@ def set_machine_active(
 
     machine = db.get(m.Machine, machine_id)
     if machine is None:
-        _flash(request, "That machine no longer exists.")
+        _flash(request, "That machine no longer exists.", level="error")
         return _redirect("/manage/machines")
 
     machine.active = active == "1"
@@ -304,7 +304,7 @@ def set_default_wins(
 
     machine = db.get(m.Machine, machine_id)
     if machine is None:
-        _flash(request, "That machine no longer exists.")
+        _flash(request, "That machine no longer exists.", level="error")
         return _redirect("/manage/machines")
 
     machine.default_wins = default_wins == "1"
@@ -343,7 +343,7 @@ def assign_to_machine(
     machine = db.get(m.Machine, machine_id)
     printer = db.get(m.Printer, printer_id)
     if machine is None or printer is None:
-        _flash(request, "That machine or printer no longer exists.")
+        _flash(request, "That machine or printer no longer exists.", level="error")
         return _redirect("/manage/machines")
 
     try:
@@ -368,7 +368,7 @@ def assign_to_machine(
             str(exc),
         )
         db.commit()
-        _flash(request, "That printer belongs to a different client.")
+        _flash(request, "That printer belongs to a different client.", level="error")
         return _redirect(f"/manage/machines?client_id={machine.client_id}")
 
     record(
@@ -397,7 +397,7 @@ def unassign_from_machine(
 
     machine = db.get(m.Machine, machine_id)
     if machine is None:
-        _flash(request, "That machine no longer exists.")
+        _flash(request, "That machine no longer exists.", level="error")
         return _redirect("/manage/machines")
 
     row = db.scalar(
@@ -446,7 +446,7 @@ def build_workstation_msi_route(
 
     client = db.get(m.Client, client_id)
     if client is None:
-        _flash(request, "That client no longer exists.")
+        _flash(request, "That client no longer exists.", level="error")
         return _redirect("/manage/machines")
 
     from central.msi_builder import build_workstation_msi, msi_build_available
@@ -460,7 +460,7 @@ def build_workstation_msi_route(
         record(db, request, user, "workstation.msi_build",
                target=f"client:{client.id}", detail=f"unavailable: {cap.reason}")
         db.commit()
-        _flash(request, cap.reason)
+        _flash(request, cap.reason, level="error")
         return _redirect(f"/manage/machines?client_id={client.id}")
 
     from central.runtime import load_settings
@@ -501,7 +501,7 @@ def build_workstation_msi_route(
         record(db, request, user, "workstation.msi_build",
                target=f"client:{client.id}", detail=f"failed: {exc}")
         db.commit()
-        _flash(request, f"MSI build failed: {exc}")
+        _flash(request, f"MSI build failed: {exc}", level="error")
         return _redirect(f"/manage/machines?client_id={client.id}")
 
     record(
@@ -556,7 +556,7 @@ def download_macos_pkg_bundle(
 
     client = db.get(m.Client, client_id)
     if client is None:
-        _flash(request, "That client no longer exists.")
+        _flash(request, "That client no longer exists.", level="error")
         return _redirect("/manage/machines")
 
     cap = pkg_bundle_available()
@@ -564,7 +564,7 @@ def download_macos_pkg_bundle(
         record(db, request, user, "workstation.pkg_bundle",
                target=f"client:{client.id}", detail=f"unavailable: {cap.reason}")
         db.commit()
-        _flash(request, cap.reason)
+        _flash(request, cap.reason, level="error")
         return _redirect(f"/manage/machines?client_id={client.id}")
 
     from central.runtime import load_settings
@@ -602,7 +602,7 @@ def download_macos_pkg_bundle(
         record(db, request, user, "workstation.pkg_bundle",
                target=f"client:{client.id}", detail=f"failed: {exc}")
         db.commit()
-        _flash(request, f"macOS bundle build failed: {exc}")
+        _flash(request, f"macOS bundle build failed: {exc}", level="error")
         return _redirect(f"/manage/machines?client_id={client.id}")
 
     record(
@@ -660,32 +660,33 @@ async def upload_driver_package(
 
     client = db.get(m.Client, client_id)
     if client is None:
-        _flash(request, "That client no longer exists.")
+        _flash(request, "That client no longer exists.", level="error")
         return _redirect("/manage/machines")
 
     plat = (platform or "windows").strip().lower()
     if plat not in ("windows", "macos"):
-        _flash(request, "Unknown platform.")
+        _flash(request, "Unknown platform.", level="error")
         return _redirect(f"/manage/machines?client_id={client.id}")
 
     kind = (macos_kind or "").strip().lower() if plat == "macos" else ""
     ref = (macos_ref or "").strip()
     if plat == "macos":
         if kind not in ("ppd", "pkg", "system"):
-            _flash(request, "Choose how the macOS driver is supplied.")
+            _flash(request, "Choose how the macOS driver is supplied.", level="error")
             return _redirect(f"/manage/machines?client_id={client.id}")
         if not ref:
             _flash(
                 request,
                 "A macOS package needs the PPD path: inside the archive for a "
                 "PPD, or the absolute installed path for MDM/.pkg.",
+                level="error",
             )
             return _redirect(f"/manage/machines?client_id={client.id}")
         # `system` records a path to a driver an MDM already installed, so there
         # is nothing to upload -- and requiring a file would make the operator
         # invent one.
         if kind != "system" and package is None:
-            _flash(request, "That macOS driver kind needs a package file.")
+            _flash(request, "That macOS driver kind needs a package file.", level="error")
             return _redirect(f"/manage/machines?client_id={client.id}")
         # `pkg` as well as `system`: for both, `ref` is the path of the PPD that
         # ends up INSTALLED on the Mac, and the client validates it the same way.
@@ -698,17 +699,21 @@ async def upload_driver_package(
         if kind in ("system", "pkg") and (
             ref.startswith("..") or not ref.startswith("/")
         ):
-            _flash(request, "An installed PPD path must be absolute.")
+            _flash(request, "An installed PPD path must be absolute.", level="error")
             return _redirect(f"/manage/machines?client_id={client.id}")
     elif package is None or not inf_relpath.strip():
-        _flash(request, "A Windows package needs a file and an INF path.")
+        _flash(request, "A Windows package needs a file and an INF path.", level="error")
         return _redirect(f"/manage/machines?client_id={client.id}")
 
     tag = (model or "").strip()
     if tag and len(tag) < services.MIN_DRIVER_MODEL_TAG:
         # A 1-2 character tag is a substring of nearly every model string, so it
         # would bind this driver to the client's whole fleet.
-        _flash(request, "Model match needs at least 3 characters, or leave it blank.")
+        _flash(
+            request,
+            "Model match needs at least 3 characters, or leave it blank.",
+            level="error",
+        )
         return _redirect(f"/manage/machines?client_id={client.id}")
 
     row = m.DriverPackage(
@@ -747,7 +752,7 @@ async def upload_driver_package(
         record(db, request, user, "driver_package.upload",
                f"client:{client_id}", f"failed: {exc}")
         db.commit()
-        _flash(request, f"Upload failed: {exc}")
+        _flash(request, f"Upload failed: {exc}", level="error")
         return _redirect(f"/manage/machines?client_id={client_id}")
 
     row.sha256, row.size = sha, size
@@ -779,7 +784,7 @@ def delete_driver_package(
 
     row = db.get(m.DriverPackage, package_id)
     if row is None:
-        _flash(request, "That package no longer exists.")
+        _flash(request, "That package no longer exists.", level="error")
         return _redirect("/manage/machines")
 
     client_id = row.client_id
