@@ -93,15 +93,23 @@
   {%- set _ = g_admin.append({'href': '/supplies/yield', 'label': 'Yield'}) -%}
   {%- set _ = g_admin.append({'href': '/security/posture', 'label': 'Security'}) -%}
 {%- endif -%}
-{%- if user.role.value == 'admin' -%}
+{#- People / Machines / Definitions are gated on the SAME predicate their routes
+    use (``_manager`` -- admin or tech), not on admin. They were admin-only here
+    while the routes admitted tech, so a technician could reach all three by
+    typing the URL but was never shown a link -- and once there the nav lit up
+    *Manage*, positively misreporting where they were. A nav that disagrees with
+    its own authorization is worse than either answer alone. -#}
+{%- if user.role.value != 'client_readonly' -%}
   {%- set _ = g_admin.append({'href': '/manage/people', 'label': 'People'}) -%}
   {%- set _ = g_admin.append({'href': '/manage/machines', 'label': 'Machines'}) -%}
+  {%- set _ = g_admin.append({'href': '/manage/definitions', 'label': 'Definitions'}) -%}
+{%- endif -%}
+{%- if user.role.value == 'admin' -%}
   {#- Billing sits with the admin group because the route is admin-only: a rate
       card is a customer's commercial terms, not fleet operations. A link that
       303s for half the operators who can see it is worse than no link. -#}
   {%- set _ = g_admin.append({'href': '/manage/billing', 'label': 'Billing'}) -%}
   {%- set _ = g_admin.append({'href': '/manage/events', 'label': 'Events'}) -%}
-  {%- set _ = g_admin.append({'href': '/manage/definitions', 'label': 'Definitions'}) -%}
   {%- set _ = g_admin.append({'href': '/manage/users', 'label': 'Users'}) -%}
   {%- set _ = g_admin.append({'href': '/manage/audit', 'label': 'Audit'}) -%}
   {%- set _ = g_admin.append({'href': '/admin/backup', 'label': 'Backup'}) -%}

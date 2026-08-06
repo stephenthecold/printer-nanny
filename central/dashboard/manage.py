@@ -579,6 +579,12 @@ def delete_site(site_id: int, request: Request, db: Session = Depends(get_db)):
 # --------------------------------------------------------------------------- #
 # Printers (manual add / edit)
 # --------------------------------------------------------------------------- #
+#: SNMP versions a printer row may carry, in the canonical spelling
+#: ``queries._normalize_snmp_version`` produces. The edit form must be able to
+#: express every one of them: a <select> that omits the row's current value
+#: makes the browser post its FIRST option, which is how editing an asset tag
+#: silently rewrote a v3 printer to v2c.
+SNMP_VERSION_CHOICES = ("1", "2c", "3")
 @router.get("/printers/new", response_class=HTMLResponse)
 def printer_new(
     request: Request, client_id: int, site_id: Optional[int] = None, db: Session = Depends(get_db)
@@ -675,7 +681,10 @@ def printer_update(
             # that silently ignores the field the operator just changed is its
             # own kind of lie.
             _flash(request, "That site belongs to a different client; no changes saved.")
-            return _redirect(f"/manage/printers/{printer.id}")
+            # ``/manage/printers/{id}`` is POST-only, so the old target answered
+            # this refusal with a 405 and lost the form. Send them back to the
+            # editor they submitted from.
+            return _redirect(f"/manage/printers/{printer.id}/edit")
         printer.site_id = site_id
         printer.ip = ip.strip()
         printer.display_name = display_name.strip() or None
@@ -684,6 +693,13 @@ def printer_update(
         printer.model = model.strip() or None
         printer.serial = serial.strip() or None
         printer.location = location.strip() or None
+        # Refuse an unrecognised version rather than assigning it. This field
+        # decides how the agent talks to the device AND how queries.py grades it
+        # on the security posture report, so a value we do not understand must
+        # not overwrite one we do.
+        if snmp_version not in SNMP_VERSION_CHOICES:
+            _flash(request, f"{snmp_version!r} is not an SNMP version; no changes saved.")
+            return _redirect(f"/manage/printers/{printer.id}/edit")
         printer.snmp_version = snmp_version
         printer.snmp_community = snmp_community.strip() or "public"
         printer.asset_tag = asset_tag.strip() or None

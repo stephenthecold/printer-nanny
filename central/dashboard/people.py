@@ -81,7 +81,12 @@ def people_home(
     clients = list(db.scalars(select(m.Client).order_by(m.Client.name)))
     client = _resolve_client(db, client_id)
     if client is None:
-        return _tpl(request, "people.html", db, clients=[], client=None,
+        # ``user=`` is not optional. ``_tpl`` reads ctx.get("user") but never
+        # injects it, and base.html wraps the whole nav -- plus the skip link,
+        # the account chip and Logout -- in ``{% if user %}``. Omitting it here
+        # rendered the flagship print-management page with ZERO navigation and
+        # no way to sign out.
+        return _tpl(request, "people.html", db, user=user, clients=[], client=None,
                     people=[], groups=[], printers=[], resolved={},
                     memberships={}, providers=[], flash=_pop_flash(request))
 
@@ -148,7 +153,7 @@ def people_home(
     ]
 
     return _tpl(
-        request, "people.html", db,
+        request, "people.html", db, user=user,
         clients=clients, client=client, people=people, groups=groups,
         printers=printers, resolved=resolved, memberships=memberships,
         group_assignments=group_assignments, providers=providers,

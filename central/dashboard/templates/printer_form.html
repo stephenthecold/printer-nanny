@@ -86,9 +86,17 @@
     <label class="block">
       <span class="text-xs text-slate-500">SNMP version</span>
       <select name="snmp_version" class="w-full border rounded px-3 py-2 text-sm">
+        {# v3 MUST be listed. It is a value the model stores and seed data
+           creates, and when the select cannot express the row's current value
+           the browser posts the FIRST option instead -- so editing an asset tag
+           on a v3 printer silently rewrote it to v2c, changed how the agent
+           polls the device, and flipped it from encrypted to cleartext in the
+           security posture report. USM credentials are not edited here: they
+           come from the subnet, or from this printer's own snmp_v3 override. #}
         {% set v = printer.snmp_version if printer else '2c' %}
         <option value="2c" {{ 'selected' if v == '2c' else '' }}>v2c</option>
         <option value="1" {{ 'selected' if v == '1' else '' }}>v1</option>
+        <option value="3" {{ 'selected' if v == '3' else '' }}>v3 (USM credentials from the subnet)</option>
       </select>
     </label>
     <label class="block">
