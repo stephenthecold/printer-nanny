@@ -1,0 +1,30 @@
+{% extends "base.html" %}
+{% from "_components.html" import card_cls, note, page_title %}
+{% block title %}Not permitted · {{ app.name or 'Printer Nanny' }}{% endblock %}
+{% block body %}
+{#- Deliberately NOT the sign-in form. This page exists because every guard in
+    the dashboard answered "you may not do this" with /login, which reads as
+    "your session expired" -- so an operator signed in again, succeeded, and
+    arrived back at the same refusal with nothing having explained it. -#}
+{{ page_title('Not permitted') }}
+<div class="{{ card_cls() }} max-w-xl">
+  <div class="p-4 space-y-3">
+    <div role="alert" class="{{ note('error') }}">
+      Your account does not have permission to open this page.
+    </div>
+    <p class="text-sm text-slate-600">
+      You are signed in as <span class="font-medium">{{ user.username }}</span>
+      ({{ user.role.value }}). Nothing was changed.
+    </p>
+    <p class="text-sm text-slate-500">
+      If you need access, an administrator can change your role from
+      <span class="font-medium">Manage &rarr; Users</span>.
+    </p>
+    <div class="pt-1">
+      {#- Somewhere to go. A refusal page whose only exit is the back button is
+          the dead end this is meant to replace. -#}
+      <a href="/" class="text-sm text-sky-700 hover:underline focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-sky-500 focus-visible:ring-offset-1 rounded">Back to the dashboard</a>
+    </div>
+  </div>
+</div>
+{% endblock %}

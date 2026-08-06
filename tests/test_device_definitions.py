@@ -384,17 +384,19 @@ def test_the_page_is_closed_to_client_readonly_users(db):
     cli = TestClient(app)
     cli.post("/login", data={"username": "cust", "password": "pw12345678"},
              follow_redirects=False)
-    assert cli.get("/manage/definitions", follow_redirects=False).status_code == 303
+    # 403: signed in, not permitted. Not the sign-in form.
+    assert cli.get("/manage/definitions", follow_redirects=False).status_code == 403
     resp = cli.post("/manage/definitions/save", data={
         "name": "x", "spec": json.dumps(GOOD_SPEC), "client_id": "",
     }, follow_redirects=False)
-    assert resp.status_code == 303
+    assert resp.status_code == 403
     assert db.scalar(select(m.DeviceDefinition)) is None
 
 
 def test_logged_out_users_get_nothing(db):
     cli = TestClient(app)
-    assert cli.get("/manage/definitions", follow_redirects=False).status_code == 303
+    # 403: signed in, not permitted. Not the sign-in form.
+    assert cli.get("/manage/definitions", follow_redirects=False).status_code == 403
 
 
 def test_a_hostile_definition_field_is_escaped_in_the_page(db):

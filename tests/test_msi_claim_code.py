@@ -165,8 +165,8 @@ def test_route_requires_a_manager(db):
     resp = _login("viewer").post("/manage/agents/claim-msi",
                                  data={"claim_code": code, "site_label": "x"},
                                  follow_redirects=False)
-    assert resp.status_code in (302, 303)
-    assert "/login" in resp.headers.get("location", "")
+    # Refused outright: this user is signed in, they simply may not do it.
+    assert resp.status_code == 403
 
 
 def test_the_claim_code_is_never_audited(db):

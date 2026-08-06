@@ -75,6 +75,44 @@ def _redirect(path: str) -> RedirectResponse:
     return RedirectResponse(path, status_code=303)
 
 
+def _deny(request: Request, db: Session):
+    """What to answer when a guard said no. THE one place that decides.
+
+    ``_manager`` and ``_admin`` both return None for two entirely different
+    situations -- nobody is signed in, and somebody IS signed in who may not do
+    this -- and every call site collapsed them into ``_redirect("/login")``. So
+    a technician who followed a link the application itself rendered was shown
+    the sign-in form, which reads as "your session expired": they sign in again,
+    succeed, land back where they started, and follow the same link to the same
+    page. Nothing in that loop ever tells them the answer is no.
+
+    It loses work too. A POST answered with the login form has discarded the
+    submission, and the operator has no way to tell whether it was applied.
+
+    So: anonymous keeps the redirect -- there is a real action to take and the
+    login page is where it is taken. Authenticated-but-unauthorised gets a 403
+    that says so. The status matters as much as the page: a 303 to /login tells
+    a script, a monitor and the browser's history that the request was fine, and
+    it was not.
+    """
+    if _user(request, db) is None:
+        return _redirect("/login")
+    return _forbidden(request, db)
+
+
+def _forbidden(request: Request, db: Session) -> HTMLResponse:
+    """A 403 that keeps the operator's chrome, so it is not a dead end.
+
+    Rendered through ``_tpl`` rather than as a bare string: a refusal page with
+    no navigation strands the operator exactly the way ``/manage/people`` used
+    to, and they would have nowhere to go but the back button.
+    """
+    user = _user(request, db)
+    response = _tpl(request, "403.html", db, user=user)
+    response.status_code = 403
+    return response
+
+
 def _flash(
     request: Request,
     message: str,
@@ -224,7 +262,7 @@ def _tpl(request: Request, template: str, db: Session, **ctx) -> HTMLResponse:
 def manage_home(request: Request, db: Session = Depends(get_db)):
     user = _manager(request, db)
     if user is None:
-        return _redirect("/login")
+        return _deny(request, db)
     clients = list(db.scalars(select(m.Client).order_by(m.Client.name)))
     # All clients are exposed in a top-level "Add site" form, so we always need
     # the full list -- even when the operator just wants to click into a client.
@@ -240,7 +278,7 @@ def create_client(
 ):
     actor = _manager(request, db)
     if actor is None:
-        return _redirect("/login")
+        return _deny(request, db)
     if name.strip():
         db.add(m.Client(name=name.strip(), notes=notes.strip() or None))
         record(db, request, actor, "client.create", target=f"client:{name.strip()}")
@@ -271,7 +309,7 @@ def _timezone_choices() -> list:
 def client_manage(client_id: int, request: Request, db: Session = Depends(get_db)):
     user = _manager(request, db)
     if user is None:
-        return _redirect("/login")
+        return _deny(request, db)
     client = db.get(m.Client, client_id)
     if client is None:
         return _redirect("/manage")
@@ -316,7 +354,7 @@ def update_client(
     someone's quiet hours by hours without telling them."""
     actor = _manager(request, db)
     if actor is None:
-        return _redirect("/login")
+        return _deny(request, db)
     client = db.get(m.Client, client_id)
     if client:
         tz = client_timezone.strip()
@@ -360,7 +398,7 @@ def update_client_branding(
     """
     actor = _manager(request, db)
     if actor is None:
-        return _redirect("/login")
+        return _deny(request, db)
     client = db.get(m.Client, client_id)
     if client is None:
         return _redirect("/manage")
@@ -430,7 +468,7 @@ async def upload_client_branding_logo(
     """
     actor = _manager(request, db)
     if actor is None:
-        return _redirect("/login")
+        return _deny(request, db)
     client = db.get(m.Client, client_id)
     if client is None:
         return _redirect("/manage")
@@ -472,7 +510,7 @@ def delete_client_branding_logo(
 ):
     actor = _manager(request, db)
     if actor is None:
-        return _redirect("/login")
+        return _deny(request, db)
     client = db.get(m.Client, client_id)
     if client is None:
         return _redirect("/manage")
@@ -608,7 +646,7 @@ def create_site(
 ):
     actor = _manager(request, db)
     if actor is None:
-        return _redirect("/login")
+        return _deny(request, db)
     if name.strip():
         db.add(m.Site(
             client_id=client_id, name=name.strip(),
@@ -680,7 +718,7 @@ def printer_new(
 ):
     user = _manager(request, db)
     if user is None:
-        return _redirect("/login")
+        return _deny(request, db)
     client = db.get(m.Client, client_id)
     if client is None:
         return _redirect("/manage")
@@ -699,7 +737,7 @@ def printer_edit(
 ):
     user = _manager(request, db)
     if user is None:
-        return _redirect("/login")
+        return _deny(request, db)
     printer = db.get(m.Printer, printer_id)
     if printer is None:
         return _redirect("/manage")
@@ -724,7 +762,7 @@ def printer_create(
     db: Session = Depends(get_db),
 ):
     if _manager(request, db) is None:
-        return _redirect("/login")
+        return _deny(request, db)
     if not _site_belongs_to(db, site_id, client_id):
         _flash(request, "That site does not belong to this client; printer not added.",
                level="error")
@@ -763,7 +801,7 @@ def printer_update(
 ):
     """Save printer edits. If ``approve=1`` and the printer is pending, also approve it."""
     if _manager(request, db) is None:
-        return _redirect("/login")
+        return _deny(request, db)
     printer = db.get(m.Printer, printer_id)
     if printer:
         if not _site_belongs_to(db, site_id, printer.client_id):
@@ -833,7 +871,7 @@ def printer_delete(printer_id: int, request: Request, db: Session = Depends(get_
 def printer_ignore(printer_id: int, request: Request, db: Session = Depends(get_db)):
     """Move a printer back to the ignored state so the agent stops polling it."""
     if _manager(request, db) is None:
-        return _redirect("/login")
+        return _deny(request, db)
     printer = db.get(m.Printer, printer_id)
     if printer:
         printer.discovery_state = m.DiscoveryState.ignored
@@ -849,7 +887,7 @@ def printer_ignore(printer_id: int, request: Request, db: Session = Depends(get_
 def printer_approve(printer_id: int, request: Request, db: Session = Depends(get_db)):
     """One-click approve from the detail page (no field edits)."""
     if _manager(request, db) is None:
-        return _redirect("/login")
+        return _deny(request, db)
     printer = db.get(m.Printer, printer_id)
     if printer:
         printer.discovery_state = m.DiscoveryState.approved
@@ -883,7 +921,7 @@ def printer_driver_tier_override(
     """
     user = _manager(request, db)
     if user is None:
-        return _redirect("/login")
+        return _deny(request, db)
     printer = db.get(m.Printer, printer_id)
     if printer is None:
         return _redirect("/manage")
@@ -933,7 +971,7 @@ def printer_poll_now(printer_id: int, request: Request, db: Session = Depends(ge
     cycle. Falls back to any agent at the printer's site if no discoverer is set.
     """
     if _manager(request, db) is None:
-        return _redirect("/login")
+        return _deny(request, db)
     printer = db.get(m.Printer, printer_id)
     if printer is None:
         return _redirect("/manage")
@@ -970,7 +1008,7 @@ def agents_home(request: Request, db: Session = Depends(get_db)):
 
     user = _manager(request, db)
     if user is None:
-        return _redirect("/login")
+        return _deny(request, db)
     msi_cap = msi_build_available()
     agents = list(db.scalars(select(m.Agent).order_by(m.Agent.id)))
     # Version the central server serves -> what each agent should be at. Compare
@@ -1048,7 +1086,7 @@ def agent_create(
     db: Session = Depends(get_db),
 ):
     if _manager(request, db) is None:
-        return _redirect("/login")
+        return _deny(request, db)
     api_key = generate_api_key()
     agent = m.Agent(site_id=site_id, name=name.strip() or "agent", api_key_hash=hash_api_key(api_key))
     db.add(agent)
@@ -1075,7 +1113,7 @@ def onboard_form(request: Request, db: Session = Depends(get_db)):
     """
     user = _manager(request, db)
     if user is None:
-        return _redirect("/login")
+        return _deny(request, db)
     runtime = load_settings(db)
     return _tpl(
         request, "onboard.html", db, user=user,
@@ -1115,7 +1153,7 @@ def onboard_submit(
     """
     user = _manager(request, db)
     if user is None:
-        return _redirect("/login")
+        return _deny(request, db)
 
     client_name = client_name.strip()
     site_name = site_name.strip()
@@ -1210,7 +1248,7 @@ def agent_claim_code(
     """
     user = _manager(request, db)
     if user is None:
-        return _redirect("/login")
+        return _deny(request, db)
     site = db.get(m.Site, site_id)
     if site is None:
         _flash(request, "Pick a site for the claim code.", level="error")
@@ -1238,7 +1276,7 @@ def agent_claim_code(
 def agent_rotate_key(agent_id: int, request: Request, db: Session = Depends(get_db)):
     """Issue a fresh API key for an agent (e.g. if the original was lost)."""
     if _manager(request, db) is None:
-        return _redirect("/login")
+        return _deny(request, db)
     agent = db.get(m.Agent, agent_id)
     if agent:
         api_key = generate_api_key()
@@ -1270,7 +1308,7 @@ def agent_build_msi(
     """
     user = _manager(request, db)
     if user is None:
-        return _redirect("/login")
+        return _deny(request, db)
     agent = db.get(m.Agent, agent_id)
     if agent is None:
         _flash(request, "Agent not found.", level="error")
@@ -1345,7 +1383,7 @@ def agent_build_claim_msi(
     """
     user = _manager(request, db)
     if user is None:
-        return _redirect("/login")
+        return _deny(request, db)
 
     from central.msi_builder import build_msi, msi_build_available
 
@@ -1425,7 +1463,7 @@ def agent_update_command(agent_id: int, request: Request, db: Session = Depends(
     eventually). A confirmation dialog is in the template.
     """
     if _manager(request, db) is None:
-        return _redirect("/login")
+        return _deny(request, db)
     agent = db.get(m.Agent, agent_id)
     if agent is None:
         _flash(request, "Agent not found.", level="error")
@@ -1527,7 +1565,7 @@ def agent_rescan(agent_id: int, request: Request, db: Session = Depends(get_db))
     so the operator doesn't have to leave the Agents page to trigger a sweep.
     """
     if _manager(request, db) is None:
-        return _redirect("/login")
+        return _deny(request, db)
     agent = db.get(m.Agent, agent_id)
     if agent is None:
         _flash(request, "Agent not found.", level="error")
@@ -1552,7 +1590,7 @@ def agent_poll_now(agent_id: int, request: Request, db: Session = Depends(get_db
     around.
     """
     if _manager(request, db) is None:
-        return _redirect("/login")
+        return _deny(request, db)
     agent = db.get(m.Agent, agent_id)
     if agent is None:
         _flash(request, "Agent not found.", level="error")
@@ -1649,7 +1687,7 @@ def subnet_add(
     and the safe one.
     """
     if _manager(request, db) is None:
-        return _redirect("/login")
+        return _deny(request, db)
     agent = db.get(m.Agent, agent_id)
     if agent and cidr.strip():
         effective_site_id = agent.site_id
@@ -1696,7 +1734,7 @@ def subnet_add(
 @router.post("/subnets/{subnet_id}/delete")
 def subnet_delete(subnet_id: int, request: Request, db: Session = Depends(get_db)):
     if _manager(request, db) is None:
-        return _redirect("/login")
+        return _deny(request, db)
     subnet = db.get(m.Subnet, subnet_id)
     if subnet:
         record(db, request, _manager(request, db), "subnet.delete",
@@ -1753,7 +1791,7 @@ def subnet_update(
     nobody would notice until the day it was needed.
     """
     if _manager(request, db) is None:
-        return _redirect("/login")
+        return _deny(request, db)
     subnet = db.get(m.Subnet, subnet_id)
     if subnet:
         standby_note, standby_refusal = _apply_standby(
@@ -1921,7 +1959,7 @@ def subnet_handback(subnet_id: int, request: Request, db: Session = Depends(get_
 
     user = _manager(request, db)
     if user is None:
-        return _redirect("/login")
+        return _deny(request, db)
     subnet = db.get(m.Subnet, subnet_id)
     if subnet is None:
         return _redirect("/manage/agents")
@@ -1977,7 +2015,7 @@ def maintenance_home(request: Request, db: Session = Depends(get_db)):
     """
     user = _manager(request, db)
     if user is None:
-        return _redirect("/login")
+        return _deny(request, db)
     schedules = list(
         db.scalars(
             select(m.MaintenanceSchedule).order_by(
@@ -2030,7 +2068,7 @@ def schedule_create(
     Supply row (fuser / drum / belt / laser / PF kit) drops to/below that %."""
     actor = _manager(request, db)
     if actor is None:
-        return _redirect("/login")
+        return _deny(request, db)
     name = name.strip()
     if not name:
         _flash(request, "Schedule name is required.", level="error")
@@ -2104,7 +2142,7 @@ def schedule_update(
 ):
     actor = _manager(request, db)
     if actor is None:
-        return _redirect("/login")
+        return _deny(request, db)
     sched = db.get(m.MaintenanceSchedule, sched_id)
     if sched is None:
         return _redirect("/manage/maintenance")
@@ -2163,7 +2201,7 @@ def schedule_update(
 def schedule_delete(sched_id: int, request: Request, db: Session = Depends(get_db)):
     actor = _manager(request, db)
     if actor is None:
-        return _redirect("/login")
+        return _deny(request, db)
     sched = db.get(m.MaintenanceSchedule, sched_id)
     if sched is not None:
         record(db, request, actor, "maintenance_schedule.delete",
@@ -2213,7 +2251,7 @@ def schedule_log_service(
 
     actor = _manager(request, db)
     if actor is None:
-        return _redirect("/login")
+        return _deny(request, db)
     sched = db.get(m.MaintenanceSchedule, sched_id)
     if sched is None:
         return _redirect("/manage/maintenance")
@@ -2337,7 +2375,7 @@ def _coerce_role(raw: str) -> "Optional[m.UserRole]":
 @router.get("/users", response_class=HTMLResponse)
 def users_home(request: Request, db: Session = Depends(get_db)):
     if _admin(request, db) is None:
-        return _redirect("/login" if _user(request, db) is None else "/")
+        return _deny(request, db)
     users = list(db.scalars(select(m.User).order_by(m.User.username)))
     clients = list(db.scalars(select(m.Client).order_by(m.Client.name)))
     return _tpl(
@@ -2364,7 +2402,7 @@ def user_unlock(user_id: int, request: Request, db: Session = Depends(get_db)):
     """
     actor = _admin(request, db)
     if actor is None:
-        return _redirect("/login" if _user(request, db) is None else "/")
+        return _deny(request, db)
     target = db.get(m.User, user_id)
     if target is None:
         return _redirect("/manage/users")
@@ -2395,7 +2433,7 @@ def audit_home(
     """
     admin = _admin(request, db)
     if admin is None:
-        return _redirect("/login" if _user(request, db) is None else "/")
+        return _deny(request, db)
     result = queries.audit_page(db, q=q, page=page)
     return _tpl(
         request, "audit.html", db,
@@ -2406,7 +2444,7 @@ def audit_home(
 @router.get("/users/{user_id}/edit", response_class=HTMLResponse)
 def user_edit(user_id: int, request: Request, db: Session = Depends(get_db)):
     if _admin(request, db) is None:
-        return _redirect("/login" if _user(request, db) is None else "/")
+        return _deny(request, db)
     target = db.get(m.User, user_id)
     if target is None:
         return _redirect("/manage/users")
@@ -2429,7 +2467,7 @@ def user_create(
     db: Session = Depends(get_db),
 ):
     if _admin(request, db) is None:
-        return _redirect("/login")
+        return _deny(request, db)
     username = username.strip()
     if not username:
         _flash(request, "Username is required.", level="error")
@@ -2489,7 +2527,7 @@ def user_update(
 ):
     actor = _admin(request, db)
     if actor is None:
-        return _redirect("/login")
+        return _deny(request, db)
     target = db.get(m.User, user_id)
     if target is None:
         return _redirect("/manage/users")
@@ -2530,7 +2568,7 @@ def user_reset_password(
     db: Session = Depends(get_db),
 ):
     if _admin(request, db) is None:
-        return _redirect("/login")
+        return _deny(request, db)
     target = db.get(m.User, user_id)
     if target is None:
         return _redirect("/manage/users")
@@ -2562,7 +2600,7 @@ def user_reset_password(
 def user_delete(user_id: int, request: Request, db: Session = Depends(get_db)):
     actor = _admin(request, db)
     if actor is None:
-        return _redirect("/login")
+        return _deny(request, db)
     target = db.get(m.User, user_id)
     if target is None:
         return _redirect("/manage/users")
@@ -2674,7 +2712,7 @@ def suppression_home(request: Request, db: Session = Depends(get_db)):
     """Quiet hours + maintenance windows, with a live 'active now' indicator."""
     user = _manager(request, db)
     if user is None:
-        return _redirect("/login")
+        return _deny(request, db)
     windows = list(db.scalars(
         select(m.SuppressionWindow).order_by(
             m.SuppressionWindow.kind, m.SuppressionWindow.id.desc()
@@ -2747,7 +2785,7 @@ def suppression_create(
     believes they are covered."""
     actor = _manager(request, db)
     if actor is None:
-        return _redirect("/login")
+        return _deny(request, db)
     name = name.strip()
     if not name:
         _flash(request, "Window name is required.", level="error")
@@ -2832,7 +2870,7 @@ def suppression_toggle(window_id: int, request: Request, db: Session = Depends(g
     """Enable/disable without deleting -- the usual way a seasonal policy is parked."""
     actor = _manager(request, db)
     if actor is None:
-        return _redirect("/login")
+        return _deny(request, db)
     window = db.get(m.SuppressionWindow, window_id)
     if window is None:
         _flash(request, "That window no longer exists.", level="error")
@@ -2850,7 +2888,7 @@ def suppression_toggle(window_id: int, request: Request, db: Session = Depends(g
 def suppression_delete(window_id: int, request: Request, db: Session = Depends(get_db)):
     actor = _manager(request, db)
     if actor is None:
-        return _redirect("/login")
+        return _deny(request, db)
     window = db.get(m.SuppressionWindow, window_id)
     if window is None:
         _flash(request, "That window no longer exists.", level="error")
@@ -2934,7 +2972,7 @@ def alert_rules_home(request: Request, db: Session = Depends(get_db)):
     """List every alert rule, with the occurrence-rate ones fully spelled out."""
     user = _manager(request, db)
     if user is None:
-        return _redirect("/login")
+        return _deny(request, db)
     rules = list(db.scalars(
         select(m.AlertRule).order_by(m.AlertRule.condition_type, m.AlertRule.id)
     ))
@@ -2983,7 +3021,7 @@ def alert_rules_create(
     """
     actor = _manager(request, db)
     if actor is None:
-        return _redirect("/login")
+        return _deny(request, db)
     name = name.strip()
     if not name:
         _flash(request, "Rule name is required.", level="error")
@@ -3085,7 +3123,7 @@ def alert_rules_toggle(rule_id: int, request: Request, db: Session = Depends(get
     """
     actor = _manager(request, db)
     if actor is None:
-        return _redirect("/login")
+        return _deny(request, db)
     rule = db.get(m.AlertRule, rule_id)
     if rule is None:
         _flash(request, "That rule no longer exists.", level="error")
@@ -3102,7 +3140,7 @@ def alert_rules_toggle(rule_id: int, request: Request, db: Session = Depends(get
 def alert_rules_delete(rule_id: int, request: Request, db: Session = Depends(get_db)):
     actor = _manager(request, db)
     if actor is None:
-        return _redirect("/login")
+        return _deny(request, db)
     rule = db.get(m.AlertRule, rule_id)
     if rule is None:
         _flash(request, "That rule no longer exists.", level="error")

@@ -311,8 +311,9 @@ def test_a_hostile_machine_name_is_stored_as_text(db):
 def test_machines_page_needs_a_manager(db):
     _user(db, "readonly", m.UserRole.client_readonly)
     r = _login("readonly").get("/manage/machines", follow_redirects=False)
-    assert r.status_code in (302, 303, 307)
-    assert "/login" in r.headers.get("location", "")
+    # A signed-in customer is refused with 403; only anonymous gets the
+    # sign-in redirect (asserted by the test below).
+    assert r.status_code == 403
 
 
 def test_anonymous_cannot_reach_the_machines_page(db):

@@ -1078,7 +1078,8 @@ def test_a_customer_user_cannot_write_an_expectation(db):
               "expected_pages": "3000"},
         follow_redirects=False,
     )
-    assert resp.status_code == 303
+    # 403: signed in as a customer, refused. Not asked to sign in again.
+    assert resp.status_code == 403
     assert db.query(m.SupplyYieldExpectation).count() == 0
 
 

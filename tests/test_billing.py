@@ -841,11 +841,14 @@ def test_billing_page_is_admin_only(db):
     _seed_client(db)
     db.commit()
     tech = _admin_client(db, "tech", "techpw", role=m.UserRole.tech)
-    assert tech.get("/manage/billing", follow_redirects=False).status_code == 303
+    # 403, not a redirect: a signed-in tech is refused, not asked to sign in
+    # again. See central/dashboard/manage.py::_deny -- the redirect read as an
+    # expired session and sent operators round a loop with no explanation.
+    assert tech.get("/manage/billing", follow_redirects=False).status_code == 403
     assert tech.post("/manage/billing/rate-cards",
                      data={"client_id": "1", "name": "x", "mono_rate": "0.01",
                            "color_rate": "0.02"},
-                     follow_redirects=False).status_code == 303
+                     follow_redirects=False).status_code == 403
     assert db.scalar(select(m.BillingRateCard.id)) is None
 
 

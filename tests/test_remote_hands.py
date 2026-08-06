@@ -242,8 +242,8 @@ def test_client_readonly_cannot_reach_any_remote_route(db):
         (f"/manage/printers/{printer.id}/remote/pin-read-only", {"disabled": "1"}),
     ):
         resp = cli.post(path, data=data, follow_redirects=False)
-        assert resp.status_code == 303
-        assert resp.headers["location"] == "/login"
+        # Refused, not redirected to sign in -- they already are.
+        assert resp.status_code == 403
     assert db.scalars(select(m.Command)).all() == []
 
 

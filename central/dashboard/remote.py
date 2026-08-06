@@ -87,7 +87,7 @@ from sqlalchemy.orm import Session
 from central import models as m
 from central import remote as policy
 from central.audit import record
-from central.dashboard.manage import _flash, _manager, _redirect
+from central.dashboard.manage import _deny, _flash, _manager, _redirect
 from central.db import get_db
 from central.runtime import load_settings
 
@@ -198,7 +198,7 @@ def remote_fetch(
     """
     user = _manager(request, db)
     if user is None:
-        return _redirect("/login")
+        return _deny(request, db)
     printer = _printer(db, printer_id)
     if printer is None:
         return _redirect("/manage")
@@ -289,7 +289,7 @@ def remote_probe(printer_id: int, request: Request, db: Session = Depends(get_db
     """Ask the agent whether this device accepts a write, by trying a no-op one."""
     user = _manager(request, db)
     if user is None:
-        return _redirect("/login")
+        return _deny(request, db)
     printer = _printer(db, printer_id)
     if printer is None:
         return _redirect("/manage")
@@ -337,7 +337,7 @@ def remote_pin_read_only(
     """
     user = _manager(request, db)
     if user is None:
-        return _redirect("/login")
+        return _deny(request, db)
     printer = _printer(db, printer_id)
     if printer is None:
         return _redirect("/manage")
@@ -371,7 +371,7 @@ def remote_write(
     """Perform one named write. Every gate is checked here, in order."""
     user = _manager(request, db)
     if user is None:
-        return _redirect("/login")
+        return _deny(request, db)
     printer = _printer(db, printer_id)
     if printer is None:
         return _redirect("/manage")

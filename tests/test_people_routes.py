@@ -61,7 +61,8 @@ def test_readonly_users_get_nothing_here(db):
         ("/manage/people/groups/create", {"client_id": 1, "name": "G"}),
     ]:
         r = _login("viewer").post(path, data=data, follow_redirects=False)
-        assert r.status_code == 303 and "/login" in r.headers.get("location", "")
+        # 403, not the sign-in form: they are signed in and simply may not.
+        assert r.status_code == 403
     assert db.query(m.EndUser).count() == 0
     assert db.query(m.PrinterAssignment).count() == 0
 

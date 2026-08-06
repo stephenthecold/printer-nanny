@@ -42,7 +42,7 @@ from sqlalchemy.orm import Session
 from central import models as m
 from central import supply_yield as _yield
 from central.audit import record
-from central.dashboard.manage import _flash, _manager, _pop_flash, _redirect, _tpl
+from central.dashboard.manage import _deny, _flash, _manager, _pop_flash, _redirect, _tpl
 from central.db import get_db
 
 router = APIRouter(tags=["dashboard"])
@@ -138,7 +138,7 @@ def save_expectation(
     """
     user = _manager(request, db)
     if user is None:
-        return _redirect("/login")
+        return _deny(request, db)
 
     tag = (model_tag or "").strip()[:200]
     if len(tag) < _yield.MIN_MODEL_TAG:
@@ -214,7 +214,7 @@ def delete_expectation(
     """
     user = _manager(request, db)
     if user is None:
-        return _redirect("/login")
+        return _deny(request, db)
 
     row = db.get(m.SupplyYieldExpectation, expectation_id)
     if row is None:

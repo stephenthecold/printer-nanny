@@ -449,9 +449,10 @@ def test_a_customer_cannot_brand_their_own_portal(db, two_clients):
                      data={"brand_name": "Self Service", "brand_primary_color": "",
                            "brand_logo_url": ""},
                      follow_redirects=False)
-    assert resp.status_code == 303 and resp.headers["location"] == "/login"
+    # Refused (403), not bounced to the sign-in form -- they ARE signed in.
+    assert resp.status_code == 403
     upload = _upload(http, a.id, "logo.png", PNG_BYTES, "image/png")
-    assert upload.headers["location"] == "/login"
+    assert upload.status_code == 403
     db.expire_all()
     assert db.get(m.Client, a.id).brand_name is None
     assert db.get(m.AppAsset, branding.client_logo_asset_name(a.id)) is None

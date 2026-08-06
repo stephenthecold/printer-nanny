@@ -31,6 +31,7 @@ from central.directory.sync import run_connection
 from central.secrets import encrypt_value
 from central.db import get_db
 from central.dashboard.manage import (
+    _deny,
     _flash,
     _manager,
     _pop_flash,
@@ -76,7 +77,7 @@ def people_home(
     """
     user = _manager(request, db)
     if user is None:
-        return _redirect("/login")
+        return _deny(request, db)
 
     clients = list(db.scalars(select(m.Client).order_by(m.Client.name)))
     client = _resolve_client(db, client_id)
@@ -178,7 +179,7 @@ def people_create(
     """
     user = _manager(request, db)
     if user is None:
-        return _redirect("/login")
+        return _deny(request, db)
     client = db.get(m.Client, client_id)
     if client is None:
         _flash(request, "Client not found.", level="error")
@@ -228,7 +229,7 @@ def people_set_active(
     """
     user = _manager(request, db)
     if user is None:
-        return _redirect("/login")
+        return _deny(request, db)
     person = db.get(m.EndUser, person_id)
     if person is None:
         _flash(request, "Person not found.", level="error")
@@ -262,7 +263,7 @@ def people_assign(
     """
     user = _manager(request, db)
     if user is None:
-        return _redirect("/login")
+        return _deny(request, db)
 
     printer = db.get(m.Printer, printer_id)
     if printer is None:
@@ -307,7 +308,7 @@ def people_unassign(
 ):
     user = _manager(request, db)
     if user is None:
-        return _redirect("/login")
+        return _deny(request, db)
     row = db.get(m.PrinterAssignment, assignment_id)
     if row is None:
         _flash(request, "Assignment not found.", level="error")
@@ -334,7 +335,7 @@ def group_create(
 ):
     user = _manager(request, db)
     if user is None:
-        return _redirect("/login")
+        return _deny(request, db)
     client = db.get(m.Client, client_id)
     if client is None:
         _flash(request, "Client not found.", level="error")
@@ -381,7 +382,7 @@ def group_members(
     """
     user = _manager(request, db)
     if user is None:
-        return _redirect("/login")
+        return _deny(request, db)
     group = db.get(m.EndUserGroup, group_id)
     if group is None:
         _flash(request, "Group not found.", level="error")
@@ -449,7 +450,7 @@ def directory_save(
     """
     user = _manager(request, db)
     if user is None:
-        return _redirect("/login")
+        return _deny(request, db)
     client = db.get(m.Client, client_id)
     if client is None:
         _flash(request, "Client not found.", level="error")
@@ -523,7 +524,7 @@ def directory_sync_now(
     """
     user = _manager(request, db)
     if user is None:
-        return _redirect("/login")
+        return _deny(request, db)
     conn = db.get(m.DirectoryConnection, conn_id)
     if conn is None:
         _flash(request, "Connection not found.", level="error")
@@ -574,7 +575,7 @@ def directory_delete(
     """
     user = _manager(request, db)
     if user is None:
-        return _redirect("/login")
+        return _deny(request, db)
     conn = db.get(m.DirectoryConnection, conn_id)
     if conn is None:
         _flash(request, "Connection not found.", level="error")

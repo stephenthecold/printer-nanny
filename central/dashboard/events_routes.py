@@ -35,6 +35,7 @@ from central import models as m
 from central.audit import record
 from central.dashboard import _keystore
 from central.dashboard.manage import (
+    _deny,
     _admin,
     _flash,
     _pop_flash,
@@ -128,7 +129,7 @@ def _client_id(raw: str) -> Optional[int]:
 def events_home(request: Request, db: Session = Depends(get_db)):
     user = _admin(request, db)
     if user is None:
-        return _redirect("/login")
+        return _deny(request, db)
 
     clients = list(db.scalars(select(m.Client).order_by(m.Client.name)))
     subs = list(db.scalars(
@@ -187,7 +188,7 @@ def create_subscription(
 ):
     actor = _admin(request, db)
     if actor is None:
-        return _redirect("/login")
+        return _deny(request, db)
 
     label = (name or "").strip()
     if not label:
@@ -266,7 +267,7 @@ def update_subscription(
     """
     actor = _admin(request, db)
     if actor is None:
-        return _redirect("/login")
+        return _deny(request, db)
     sub = db.get(m.EventSubscription, sub_id)
     if sub is None:
         return _redirect("/manage/events")
@@ -316,7 +317,7 @@ def update_subscription(
 def toggle_subscription(sub_id: int, request: Request, db: Session = Depends(get_db)):
     actor = _admin(request, db)
     if actor is None:
-        return _redirect("/login")
+        return _deny(request, db)
     sub = db.get(m.EventSubscription, sub_id)
     if sub is not None:
         sub.enabled = not sub.enabled
@@ -344,7 +345,7 @@ def rotate_secret(sub_id: int, request: Request, db: Session = Depends(get_db)):
     """
     actor = _admin(request, db)
     if actor is None:
-        return _redirect("/login")
+        return _deny(request, db)
     sub = db.get(m.EventSubscription, sub_id)
     if sub is None:
         return _redirect("/manage/events")
@@ -370,7 +371,7 @@ def rotate_secret(sub_id: int, request: Request, db: Session = Depends(get_db)):
 def delete_subscription(sub_id: int, request: Request, db: Session = Depends(get_db)):
     actor = _admin(request, db)
     if actor is None:
-        return _redirect("/login")
+        return _deny(request, db)
     sub = db.get(m.EventSubscription, sub_id)
     if sub is not None:
         name = sub.name
@@ -407,7 +408,7 @@ def send_test(sub_id: int, request: Request, db: Session = Depends(get_db)):
     """
     actor = _admin(request, db)
     if actor is None:
-        return _redirect("/login")
+        return _deny(request, db)
     sub = db.get(m.EventSubscription, sub_id)
     if sub is None:
         return _redirect("/manage/events")

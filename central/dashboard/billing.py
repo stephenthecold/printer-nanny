@@ -34,6 +34,7 @@ from central import billing
 from central import models as m
 from central.audit import record
 from central.dashboard.manage import (
+    _deny,
     _admin,
     _flash,
     _pop_flash,
@@ -119,7 +120,7 @@ def billing_home(
 ):
     user = _admin(request, db)
     if user is None:
-        return _redirect("/login")
+        return _deny(request, db)
     clients = list(db.scalars(select(m.Client).order_by(m.Client.name)))
     client = _resolve_client(db, client_id)
 
@@ -178,7 +179,7 @@ def rate_card_create(
 ):
     actor = _admin(request, db)
     if actor is None:
-        return _redirect("/login")
+        return _deny(request, db)
     client = _resolve_client(db, client_id)
     if client is None:
         _flash(request, "Create a client before adding a rate card.", level="error")
@@ -253,7 +254,7 @@ def rate_card_update(
 ):
     actor = _admin(request, db)
     if actor is None:
-        return _redirect("/login")
+        return _deny(request, db)
     client = _resolve_client(db, client_id)
     back = f"/manage/billing?client_id={client.id}" if client else "/manage/billing"
     card = _card_for_client(db, card_id, client.id if client else None)
@@ -327,7 +328,7 @@ def rate_card_activate(
     """
     actor = _admin(request, db)
     if actor is None:
-        return _redirect("/login")
+        return _deny(request, db)
     client = _resolve_client(db, client_id)
     back = f"/manage/billing?client_id={client.id}" if client else "/manage/billing"
     card = _card_for_client(db, card_id, client.id if client else None)
@@ -359,7 +360,7 @@ def rate_card_delete(
 ):
     actor = _admin(request, db)
     if actor is None:
-        return _redirect("/login")
+        return _deny(request, db)
     client = _resolve_client(db, client_id)
     back = f"/manage/billing?client_id={client.id}" if client else "/manage/billing"
     card = _card_for_client(db, card_id, client.id if client else None)
@@ -390,7 +391,7 @@ def tier_create(
 ):
     actor = _admin(request, db)
     if actor is None:
-        return _redirect("/login")
+        return _deny(request, db)
     client = _resolve_client(db, client_id)
     back = f"/manage/billing?client_id={client.id}" if client else "/manage/billing"
     card = _card_for_client(db, card_id, client.id if client else None)
@@ -444,7 +445,7 @@ def tier_delete(
 ):
     actor = _admin(request, db)
     if actor is None:
-        return _redirect("/login")
+        return _deny(request, db)
     client = _resolve_client(db, client_id)
     back = f"/manage/billing?client_id={client.id}" if client else "/manage/billing"
     tier = db.get(m.BillingRateTier, tier_id)
@@ -477,7 +478,7 @@ def invoice_download(
     """
     actor = _admin(request, db)
     if actor is None:
-        return _redirect("/login")
+        return _deny(request, db)
     client = _resolve_client(db, client_id)
     if client is None:
         return _redirect("/manage/billing")

@@ -36,7 +36,7 @@ from sqlalchemy.orm import Session
 
 from central import models as m
 from central.audit import record
-from central.dashboard.manage import _flash, _manager, _pop_flash, _redirect, _tpl
+from central.dashboard.manage import _deny, _flash, _manager, _pop_flash, _redirect, _tpl
 from central.db import get_db
 from central.device_definitions import (
     MAX_PAYLOAD_BYTES,
@@ -103,7 +103,7 @@ def definitions_page(
 ):
     user = _manager(request, db)
     if user is None:
-        return _redirect("/login")
+        return _deny(request, db)
 
     rows = list(
         db.scalars(
@@ -157,7 +157,7 @@ def save_definition(
     """
     user = _manager(request, db)
     if user is None:
-        return _redirect("/login")
+        return _deny(request, db)
 
     row = db.get(m.DeviceDefinition, int(definition_id)) if definition_id.strip() else None
     if definition_id.strip() and row is None:
@@ -254,7 +254,7 @@ def delete_definition(
 ):
     user = _manager(request, db)
     if user is None:
-        return _redirect("/login")
+        return _deny(request, db)
 
     row = db.get(m.DeviceDefinition, definition_id)
     if row is None:

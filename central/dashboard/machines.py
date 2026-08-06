@@ -25,6 +25,7 @@ from central import services
 from central.audit import record
 from central.dashboard import _keystore
 from central.dashboard.manage import (
+    _deny,
     _flash,
     _manager,
     _pop_flash,
@@ -85,7 +86,7 @@ def machines_page(
 ):
     user = _manager(request, db)
     if user is None:
-        return _redirect("/login")
+        return _deny(request, db)
 
     client = _resolve_client(db, client_id)
     clients = list(db.scalars(select(m.Client).order_by(m.Client.name)))
@@ -178,7 +179,7 @@ def create_enroll_key(
 ):
     user = _manager(request, db)
     if user is None:
-        return _redirect("/login")
+        return _deny(request, db)
 
     client = db.get(m.Client, client_id)
     if client is None:
@@ -226,7 +227,7 @@ def revoke_enroll_key(
 ):
     user = _manager(request, db)
     if user is None:
-        return _redirect("/login")
+        return _deny(request, db)
 
     row = db.get(m.WorkstationEnrollKey, key_id)
     if row is None:
@@ -259,7 +260,7 @@ def set_machine_active(
 ):
     user = _manager(request, db)
     if user is None:
-        return _redirect("/login")
+        return _deny(request, db)
 
     machine = db.get(m.Machine, machine_id)
     if machine is None:
@@ -300,7 +301,7 @@ def set_default_wins(
     """
     user = _manager(request, db)
     if user is None:
-        return _redirect("/login")
+        return _deny(request, db)
 
     machine = db.get(m.Machine, machine_id)
     if machine is None:
@@ -338,7 +339,7 @@ def assign_to_machine(
 ):
     user = _manager(request, db)
     if user is None:
-        return _redirect("/login")
+        return _deny(request, db)
 
     machine = db.get(m.Machine, machine_id)
     printer = db.get(m.Printer, printer_id)
@@ -393,7 +394,7 @@ def unassign_from_machine(
 ):
     user = _manager(request, db)
     if user is None:
-        return _redirect("/login")
+        return _deny(request, db)
 
     machine = db.get(m.Machine, machine_id)
     if machine is None:
@@ -442,7 +443,7 @@ def build_workstation_msi_route(
     """
     user = _manager(request, db)
     if user is None:
-        return _redirect("/login")
+        return _deny(request, db)
 
     client = db.get(m.Client, client_id)
     if client is None:
@@ -550,7 +551,7 @@ def download_macos_pkg_bundle(
     """
     user = _manager(request, db)
     if user is None:
-        return _redirect("/login")
+        return _deny(request, db)
 
     from central.pkg_builder import build_workstation_pkg_bundle, pkg_bundle_available
 
@@ -654,7 +655,7 @@ async def upload_driver_package(
     """
     user = _manager(request, db)
     if user is None:
-        return _redirect("/login")
+        return _deny(request, db)
 
     from central import driver_store
 
@@ -778,7 +779,7 @@ def delete_driver_package(
 ):
     user = _manager(request, db)
     if user is None:
-        return _redirect("/login")
+        return _deny(request, db)
 
     from central import driver_store
 
