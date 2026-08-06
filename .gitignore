@@ -41,6 +41,11 @@ docker-compose.yml.bak.*
 .coverage
 htmlcov/
 
+# Graphify knowledge-graph output (`graphify extract .`). Regenerable from the
+# tree in one command, ~21MB per build, and rewritten wholesale on every run --
+# so it is pure merge conflict with no history worth keeping.
+graphify-out/
+
 # OS / editors
 .DS_Store
 .idea/
