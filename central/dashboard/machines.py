@@ -467,6 +467,7 @@ def build_workstation_msi_route(
     rt = load_settings(db)
     central_url = (rt.get("app.public_url") or str(request.base_url)).rstrip("/")
     embed_url = str(rt.get("agent.python_embed_url") or "").strip() or None
+    embed_sha256 = str(rt.get("agent.python_embed_sha256") or "").strip() or None
 
     key = generate_enroll_key()
     row = m.WorkstationEnrollKey(
@@ -489,6 +490,7 @@ def build_workstation_msi_route(
             slug=f"client-{client.id}",
             out_dir=out_dir,
             embed_url=embed_url,
+            embed_sha256=embed_sha256,
         )
     except Exception as exc:  # noqa: BLE001 - a build failure is a flash, not a 500
         shutil.rmtree(out_dir, ignore_errors=True)

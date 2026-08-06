@@ -1,4 +1,4 @@
-"""Failed-sign-in throttling for the local password login.
+﻿"""Failed-sign-in throttling for the local password login.
 
 Audit logging already recorded every failure with the attempted username, which
 tells an operator afterwards that they were attacked. Nothing slowed the attack
@@ -246,7 +246,19 @@ def record_failure(
     counts = _counts(db, username=key, ip=ip, since=now - policy.window)
     for scope, threshold in ((USER_SCOPE, policy.user_threshold),
                              (IP_SCOPE, policy.ip_threshold)):
-        if counts.get(scope, 0) == threshold:
+        # ``>=``, not ``==``. Two failures racing can both read ``threshold - 1``
+        # and then both commit, so the bucket crosses its limit with equality
+        # never observed -- and the transition goes unaudited precisely during
+        # the burst that makes it worth auditing.
+        #
+        # This cannot flood the audit log, which is what the equality was
+        # protecting: ``check`` runs BEFORE this and refuses without calling
+        # ``record_failure`` at all once the bucket is full, so a failure only
+        # reaches this line when it was let through. Past the threshold the only
+        # way here is the race itself, which is bounded by the number of
+        # in-flight requests -- and a duplicate audit row for one real
+        # transition is strictly better than no row for it.
+        if counts.get(scope, 0) >= threshold:
             return scope
     return None
 

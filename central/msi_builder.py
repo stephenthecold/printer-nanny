@@ -50,6 +50,8 @@ from xml.sax.saxutils import escape, quoteattr
 
 import httpx
 
+from central import artifact_integrity as ai
+
 log = logging.getLogger("printer_nanny.msi")
 
 # --------------------------------------------------------------------------- #
@@ -209,47 +211,97 @@ def _embed_version_from_url(url: str) -> str:
     return DEFAULT_PYTHON_EMBED_VERSION
 
 
-def _ensure_python_embed(url: str, cache: Path) -> Path:
+def _ensure_python_embed(
+    url: str, cache: Path, expected_sha256: Optional[str] = None
+) -> Path:
     """Resolve the Python embeddable zip, downloading + caching if needed.
 
     Air-gapped deployments can point ``agent.python_embed_url`` at a local path
     or ``file://`` URL (or just drop the zip in the cache dir under its expected
     name) so the build never reaches out to python.org.
+
+    Integrity: this zip becomes the interpreter of a LocalSystem service on every
+    workstation the MSI reaches, so it is verified rather than trusted for
+    existing. ``expected_sha256`` (the ``agent.python_embed_sha256`` setting, or
+    ``PN_PYTHON_EMBED_SHA256``) is enforced on the download *and* on every later
+    cache read; with no pin configured the first fetch is pinned on arrival and
+    checked from then on. See ``central.artifact_integrity`` for why there is no
+    hardcoded constant here -- python.org publishes no SHA-256 to hardcode.
+
+    The size floor is kept, but it is now a *diagnostic* rather than the check:
+    it names an HTML error page as such instead of reporting a checksum mismatch
+    for a captive portal's login form.
     """
+    expected = ai.normalise_pin(
+        expected_sha256 or os.environ.get("PN_PYTHON_EMBED_SHA256")
+    )
+    label = "the Python embeddable runtime"
     version = _embed_version_from_url(url)
-    # Local path / file:// -> use the operator-staged zip directly.
+    # Local path / file:// -> use the operator-staged zip directly. No sidecar is
+    # written beside an operator's own file, but a configured pin still applies:
+    # staging a file on the server is inside the trust boundary, pinning it is a
+    # deliberate instruction.
     local = url[len("file://"):] if url.startswith("file://") else url
     if "://" not in url or url.startswith("file://"):
         p = Path(local)
         if p.is_file():
+            if expected:
+                ai.verify_or_pin_file(p, expected=expected, label=label, allow_pin=False)
             return p
+    ai.require_secure_url(url, label=label)
     cache.mkdir(parents=True, exist_ok=True)
     dest = cache / f"python-{version}-embed-amd64.zip"
     if dest.exists() and dest.stat().st_size > 1_000_000:
-        return dest
+        try:
+            ai.verify_or_pin_file(dest, expected=expected, label=label)
+            return dest
+        except ai.ArtifactIntegrityError:
+            # Discard and re-fetch rather than fail the build: a corrupted cache
+            # volume is an operational event, not an attack, far more often --
+            # and a mismatch that IS an attack is caught again on the new bytes,
+            # where it becomes fatal.
+            log.warning("cached %s failed verification; discarding and re-fetching", label)
+            ai.discard(dest)
     log.info("downloading Python embeddable runtime from %s", url)
     with httpx.Client(timeout=60.0, follow_redirects=True) as client:
         resp = client.get(url)
         resp.raise_for_status()
+    ai.assert_secure_response_url(resp.url, label=label)
     if len(resp.content) < 1_000_000:
         raise RuntimeError(
             f"Python embeddable download from {url} was suspiciously small "
             f"({len(resp.content)} bytes) -- likely an HTML error page."
         )
+    digest = ai.verify_bytes(resp.content, expected=expected, label=label)
     tmp = dest.with_suffix(".part")
     tmp.write_bytes(resp.content)
     tmp.replace(dest)
+    ai.write_pin(dest, digest)
     return dest
 
 
 def _ensure_nssm(cache: Path) -> Path:
-    """Reuse the dashboard installer's NSSM mirror (so we cache it once, shared)."""
+    """Reuse the dashboard installer's NSSM mirror (so we cache it once, shared).
+
+    Verified before use, not merely existence-checked: this binary *is* the
+    service host -- it runs the workstation agent as LocalSystem -- so a swapped
+    ``nssm.exe`` is SYSTEM code execution on every machine the MSI reaches. The
+    mirror pins each extracted binary when it populates the cache; here we check
+    it still matches before baking it into an installer.
+    """
     # Imported lazily to avoid a central.dashboard import at module load.
-    from central.dashboard.installer import _nssm_cache_path, _populate_nssm_cache
+    from central.dashboard.installer import (
+        _nssm_cache_path,
+        _nssm_expected_sha256,
+        _populate_nssm_cache,
+    )
 
     nssm = _nssm_cache_path("x64")
     if not nssm.exists():
         _populate_nssm_cache()
+    ai.verify_or_pin_file(
+        nssm, expected=_nssm_expected_sha256("x64"), label="nssm.exe (x64)"
+    )
     return nssm
 
 
@@ -315,7 +367,7 @@ def _runtime_cache_dir(cache: Path, agent_version: str, embed_version: str) -> P
 
 def _ensure_runtime_tree(
     *, cache: Path, embed_url: str, agent_src: Path, agent_version: str,
-    python_exe: str,
+    python_exe: str, embed_sha256: Optional[str] = None,
 ) -> Path:
     """Stage (and cache) the version-pinned runtime: extracted embeddable Python
     with the agent + deps installed, plus nssm.exe. Returns the runtime dir.
@@ -329,7 +381,7 @@ def _ensure_runtime_tree(
     if (rt / "python" / "python.exe").exists() and (rt / "nssm.exe").exists():
         return rt
 
-    embed_zip = _ensure_python_embed(embed_url, cache)
+    embed_zip = _ensure_python_embed(embed_url, cache, embed_sha256)
     nssm = _ensure_nssm(cache)
 
     # Stage into a UNIQUE dir per build (never a shared ``.building`` path): two
@@ -690,6 +742,10 @@ def build_msi(
     verify_tls: bool = True,
     out_dir: Path,
     embed_url: Optional[str] = None,
+    #: Pinned SHA-256 of the Python embeddable zip (``agent.python_embed_sha256``).
+    #: When set it is enforced on download and on every cache read; when unset the
+    #: first fetch is pinned on arrival. See ``central.artifact_integrity``.
+    embed_sha256: Optional[str] = None,
     cache_dir: Optional[Path] = None,
     agent_src: Optional[Path] = None,
     agent_version: Optional[str] = None,
@@ -742,6 +798,7 @@ def build_msi(
     runtime = _ensure_runtime_tree(
         cache=cache, embed_url=embed_url, agent_src=agent_src,
         agent_version=agent_version, python_exe=python_exe,
+        embed_sha256=embed_sha256,
     )
 
     # Assemble a per-agent payload: the cached runtime + a fresh config.toml.
@@ -1020,6 +1077,10 @@ def build_workstation_msi(
     verify_tls: bool = True,
     out_dir: Path,
     embed_url: Optional[str] = None,
+    #: Pinned SHA-256 of the Python embeddable zip (``agent.python_embed_sha256``).
+    #: When set it is enforced on download and on every cache read; when unset the
+    #: first fetch is pinned on arrival. See ``central.artifact_integrity``.
+    embed_sha256: Optional[str] = None,
     cache_dir: Optional[Path] = None,
     agent_src: Optional[Path] = None,
     agent_version: Optional[str] = None,
@@ -1062,6 +1123,7 @@ def build_workstation_msi(
     runtime = _ensure_runtime_tree(
         cache=cache, embed_url=embed_url, agent_src=agent_src,
         agent_version=agent_version, python_exe=python_exe,
+        embed_sha256=embed_sha256,
     )
 
     payload = out_dir / f"ws-payload-{safe_slug}"

@@ -85,7 +85,10 @@ def test_concurrent_cold_builds_do_not_collide(tmp_path, monkeypatch):
         zf.writestr("python.exe", b"MZ")
         zf.writestr("python312._pth", "python312.zip\n.\n")
 
-    monkeypatch.setattr(M, "_ensure_python_embed", lambda url, c: embed)
+    # Third parameter is the pinned SHA-256 (central.artifact_integrity); the
+    # fake must mirror the real arity or the race this test exists to exercise
+    # is never reached -- it dies in the fake instead.
+    monkeypatch.setattr(M, "_ensure_python_embed", lambda url, c, sha=None: embed)
 
     def fake_nssm(c):
         c.mkdir(parents=True, exist_ok=True)

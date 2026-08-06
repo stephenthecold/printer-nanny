@@ -1180,13 +1180,14 @@ def agent_build_msi(
     rt = load_settings(db)
     central_url = (rt.get("app.public_url") or str(request.base_url)).rstrip("/")
     embed_url = str(rt.get("agent.python_embed_url") or "").strip() or None
+    embed_sha256 = str(rt.get("agent.python_embed_sha256") or "").strip() or None
 
     out_dir = Path(tempfile.mkdtemp(prefix="pn-msi-"))
     try:
         result = build_msi(
             agent_id=agent.id, agent_name=agent.name,
             central_url=central_url, api_key=api_key, verify_tls=True,
-            out_dir=out_dir, embed_url=embed_url,
+            out_dir=out_dir, embed_url=embed_url, embed_sha256=embed_sha256,
         )
     except Exception as exc:  # noqa: BLE001 - any build failure -> flash, not a 500
         shutil.rmtree(out_dir, ignore_errors=True)
@@ -1268,6 +1269,7 @@ def agent_build_claim_msi(
     rt = load_settings(db)
     central_url = (rt.get("app.public_url") or str(request.base_url)).rstrip("/")
     embed_url = str(rt.get("agent.python_embed_url") or "").strip() or None
+    embed_sha256 = str(rt.get("agent.python_embed_sha256") or "").strip() or None
 
     out_dir = Path(tempfile.mkdtemp(prefix="pn-msi-"))
     try:
@@ -1275,7 +1277,7 @@ def agent_build_claim_msi(
             agent_name=token.agent_name or "Printer Nanny agent",
             central_url=central_url, claim_code=claim_code.strip(),
             slug=f"claim-{token.id}", verify_tls=True,
-            out_dir=out_dir, embed_url=embed_url,
+            out_dir=out_dir, embed_url=embed_url, embed_sha256=embed_sha256,
         )
     except Exception as exc:  # noqa: BLE001 - any build failure -> flash, not a 500
         shutil.rmtree(out_dir, ignore_errors=True)

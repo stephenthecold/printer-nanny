@@ -449,6 +449,14 @@ SPECS: List[Spec] = [
     Spec("agent.python_embed_url", "str", "Agent install", "Windows MSI: Python embeddable URL", "",
          "Where the MSI builder fetches the Python embeddable runtime. Blank = "
          "pinned python.org default. Use an internal mirror or file:// path for air-gapped sites."),
+    # The pin that goes with the URL above. Not a secret -- a checksum is public
+    # by nature -- so it is a plain str and is safe to render and to audit.
+    Spec("agent.python_embed_sha256", "str", "Agent install",
+         "Windows MSI: Python embeddable SHA-256", "",
+         "Optional pinned checksum for the runtime above. When set it is verified "
+         "on download and on every cache read, and a mismatch fails the build. "
+         "Blank = the first download is trusted and pinned, and later reads are "
+         "checked against it. Set this whenever you point the URL at a mirror."),
     # Onboarding defaults — what a newly onboarded client starts with, so a
     # fleet that appears is already monitored instead of merely visible.
     # Applied once at creation and then owned by the client: editing these
