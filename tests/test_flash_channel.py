@@ -67,14 +67,22 @@ def test_reading_is_permissive_where_writing_is_strict():
     """The value arrives from a signed cookie that an older build may have
     minted; a page that 500s on a stale cookie is worse than a neutral box."""
     req = _Req({fl.FLASH_KEY: {"level": "banana", "text": "hello"}})
-    assert fl.pop(req) == {"level": fl.FALLBACK_LEVEL, "text": "hello"}
+    # Asserted per key rather than as a whole dict: the payload later grew
+    # ``fields`` and ``errors`` for form repopulation, and a whole-dict equality
+    # turns every future addition into three unrelated test failures that say
+    # nothing about what broke.
+    got = fl.pop(req)
+    assert got["level"] == fl.FALLBACK_LEVEL
+    assert got["text"] == "hello"
 
 
 def test_a_legacy_plain_string_survives_the_upgrade():
     """A session written by the previous version holds a bare string. Dropping
     it would silently eat the one message an operator was waiting for."""
     req = _Req({fl.FLASH_KEY: "Client created."})
-    assert fl.pop(req) == {"level": fl.FALLBACK_LEVEL, "text": "Client created."}
+    got = fl.pop(req)
+    assert got["level"] == fl.FALLBACK_LEVEL
+    assert got["text"] == "Client created."
 
 
 def test_popping_is_one_shot():
@@ -119,7 +127,9 @@ def test_the_manage_helper_delegates_to_the_shared_channel():
 
     req = _Req()
     mg._flash(req, "refused", level="error")
-    assert fl.pop(req) == {"level": "error", "text": "refused"}
+    got = fl.pop(req)
+    assert got["level"] == "error"
+    assert got["text"] == "refused"
     mg._flash_error(req, "also refused")
     assert fl.pop(req)["level"] == "error"
 

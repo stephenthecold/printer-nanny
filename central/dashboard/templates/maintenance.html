@@ -130,7 +130,7 @@
           <span class="text-xs text-slate-500">Every N days</span>
           <input name="interval_days" type="{{ 'text' if ferr.get('interval_days') else 'number' }}"
                  min="1" placeholder="90" value="{{ sent.get('interval_days', '') }}"
-                 class="w-full border rounded px-3 py-2 text-sm {{ 'border-red-400 bg-red-50' if ferr.get('interval_days') else '' }}" />
+                 class="w-full border rounded px-3 py-2 text-sm {{ 'border-red-300 bg-red-50' if ferr.get('interval_days') else '' }}" />
           {% if ferr.get('interval_days') %}
           <span class="block text-xs text-red-700 mt-0.5">{{ ferr.get('interval_days') }}</span>
           {% endif %}
@@ -139,7 +139,7 @@
           <span class="text-xs text-slate-500">At page count</span>
           <input name="page_threshold" type="{{ 'text' if ferr.get('page_threshold') else 'number' }}"
                  min="1" placeholder="50000" value="{{ sent.get('page_threshold', '') }}"
-                 class="w-full border rounded px-3 py-2 text-sm {{ 'border-red-400 bg-red-50' if ferr.get('page_threshold') else '' }}" />
+                 class="w-full border rounded px-3 py-2 text-sm {{ 'border-red-300 bg-red-50' if ferr.get('page_threshold') else '' }}" />
           {% if ferr.get('page_threshold') %}
           <span class="block text-xs text-red-700 mt-0.5">{{ ferr.get('page_threshold') }}</span>
           {% endif %}

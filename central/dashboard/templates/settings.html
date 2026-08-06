@@ -102,7 +102,7 @@
             value="{{ shown if shown is not none else '' }}"
             {% if spec.type == 'secret' %}placeholder="•••• unchanged ••••"{% endif %}
             {% if err %}aria-invalid="true" aria-describedby="err-{{ loop.index0 }}-{{ spec.key | replace('.', '-') }}"{% endif %}
-            class="w-full border rounded px-3 py-2 text-sm {{ 'border-red-400 bg-red-50' if err else '' }}" />
+            class="w-full border rounded px-3 py-2 text-sm {{ 'border-red-300 bg-red-50' if err else '' }}" />
           {% if err %}
           <span id="err-{{ loop.index0 }}-{{ spec.key | replace('.', '-') }}"
                 class="block text-xs text-red-700 mt-0.5">{{ err }}</span>
