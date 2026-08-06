@@ -179,10 +179,14 @@
           <option value="printer">One printer</option>
         </select>
         <select name="scope_id" aria-label="Scope target" class="w-full border rounded px-2 py-1 mt-2">
+          {#- Qualified by customer -- see alert_rules.html for why. A quiet-hours
+              window aimed at the wrong tenant silences the wrong fleet. -#}
+          {% set cname = {} %}
+          {% for c in clients %}{% set _ = cname.update({c.id: c.name}) %}{% endfor %}
           <option value="">— target (for client/site/printer) —</option>
           {% for c in clients %}<option value="{{ c.id }}">client: {{ c.name }}</option>{% endfor %}
-          {% for s in sites %}<option value="{{ s.id }}">site: {{ s.name }}</option>{% endfor %}
-          {% for p in printers %}<option value="{{ p.id }}">printer: {{ p.display_name or p.model or p.ip }}</option>{% endfor %}
+          {% for s in sites %}<option value="{{ s.id }}">site: {{ cname.get(s.client_id, '?') }} / {{ s.name }}</option>{% endfor %}
+          {% for p in printers %}<option value="{{ p.id }}">printer: {{ cname.get(p.client_id, '?') }} / {{ p.display_name or p.model or p.ip }} ({{ p.ip }})</option>{% endfor %}
         </select>
       </div>
       <div>

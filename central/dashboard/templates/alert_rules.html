@@ -163,10 +163,18 @@
         <option value="printer">One printer</option>
       {% endcall %}
       {% call select_field('scope_id', 'Scope target') %}
+        {#- Every option is qualified by its customer. Unqualified, forty of the
+            same model across six customers produced forty identical entries,
+            and "Head office" is the most common site name an MSP owns -- so the
+            operator was picking a scope they could not distinguish. The lookup
+            is built from the `clients` list already in this context, so it
+            costs no extra query and no per-option lazy load. -#}
+        {% set cname = {} %}
+        {% for c in clients %}{% set _ = cname.update({c.id: c.name}) %}{% endfor %}
         <option value="">— target (for client/site/printer) —</option>
         {% for c in clients %}<option value="{{ c.id }}">client: {{ c.name }}</option>{% endfor %}
-        {% for s in sites %}<option value="{{ s.id }}">site: {{ s.name }}</option>{% endfor %}
-        {% for p in printers %}<option value="{{ p.id }}">printer: {{ p.display_name or p.model or p.ip }}</option>{% endfor %}
+        {% for s in sites %}<option value="{{ s.id }}">site: {{ cname.get(s.client_id, '?') }} / {{ s.name }}</option>{% endfor %}
+        {% for p in printers %}<option value="{{ p.id }}">printer: {{ cname.get(p.client_id, '?') }} / {{ p.display_name or p.model or p.ip }} ({{ p.ip }})</option>{% endfor %}
       {% endcall %}
 
       {% call select_field('severity', 'Raise the alert as',

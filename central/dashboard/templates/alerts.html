@@ -41,6 +41,12 @@
         <tr>
           <th class="{{ th_cls() }}">Severity</th>
           <th class="{{ th_cls() }}">Alert</th>
+          {#- The column this queue was missing. On a multi-tenant product the
+              customer is what makes an alert actionable, and without it an
+              operator had to open each row elsewhere to find out whose it was.
+              Site comes with it because "Head office" is the most common site
+              name an MSP owns, so the client alone still under-identifies. -#}
+          <th class="{{ th_cls() }}">Customer</th>
           <th class="{{ th_cls() }}">State</th>
           <th class="{{ th_cls() }}">Opened</th>
           <th class="{{ th_cls('right') }}">Action</th>
@@ -52,7 +58,18 @@
           <td class="{{ td_cls() }}">
             {{ badge(a.severity.value, 'error' if a.severity.value == 'critical' else 'warning') }}
           </td>
-          <td class="{{ td_cls() }}"><div class="font-medium">{{ a.title }}</div><div class="text-slate-500 text-xs">{{ a.detail or '' }}</div>
+          {%- set s = scope.get(a.id) if scope else None %}
+          <td class="{{ td_cls() }}">
+            {#- The row is now a way IN. It carried no anchor at all, so the
+                operator's primary queue could not reach the device it was
+                about. -#}
+            {% if s and s.printer_id %}
+            <a href="/printers/{{ s.printer_id }}"
+               class="font-medium text-sky-700 hover:underline focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-sky-500 focus-visible:ring-offset-1 rounded">{{ a.title }}</a>
+            {% else %}
+            <div class="font-medium">{{ a.title }}</div>
+            {% endif %}
+            <div class="text-slate-500 text-xs">{{ a.detail or '' }}</div>
             {% if a.notified_channels %}
             <div class="mt-1 flex flex-wrap gap-1">
               {# Three states, not two. A severity gate or an unconfigured channel
@@ -74,6 +91,18 @@
             <div class="mt-1 text-[10px] text-amber-700" title="This condition has cleared and re-fired repeatedly. It was folded back into this alert instead of raising a new one each time.">
               unstable — re-fired {{ a.flap_count }}×
             </div>
+            {% endif %}
+          </td>
+          <td class="{{ td_cls() }}">
+            {% if s %}
+            <a href="/clients/{{ s.client_id }}"
+               class="text-xs font-medium text-slate-700 hover:underline focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-sky-500 focus-visible:ring-offset-1 rounded">{{ s.client }}</a>
+            <div class="text-[11px] text-slate-500">{{ s.site }}{% if s.printer %} · {{ s.printer }}{% endif %}</div>
+            {% else %}
+            {#- Fleet-wide alerts (a stalled worker) genuinely belong to nobody.
+                Said explicitly rather than left blank, so an empty cell always
+                means "not scoped" and never "we failed to look it up". -#}
+            <span class="text-xs text-slate-400">fleet-wide</span>
             {% endif %}
           </td>
           <td class="{{ td_cls() }}"><span class="text-xs {{ 'text-amber-600' if a.state.value=='open' else 'text-slate-500' }}">{{ a.state.value }}</span></td>

@@ -6,8 +6,22 @@
 {% set can_manage = user and user.role.value in ('admin', 'tech') %}
 {% set is_pending = printer.discovery_state.value == 'pending' %}
 {% set is_ignored = printer.discovery_state.value == 'ignored' %}
+{#- A breadcrumb that NAMES the tenant, not a generic "<- Client" carrying an
+    id. This page identified the device by model and IP only -- and an RFC1918
+    address collides across an MSP's customers by design, so the page could not
+    tell you whose printer you were looking at. Single object, so the two
+    relationship loads here are two queries, not an N+1. -#}
+<nav aria-label="Breadcrumb" class="mb-2 text-sm">
+  <ol class="flex items-center gap-1.5 flex-wrap text-slate-500">
+    <li><a href="/clients/{{ printer.client_id }}"
+           class="text-sky-700 hover:underline focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-sky-500 focus-visible:ring-offset-1 rounded">{{ printer.client.name if printer.client else 'Client' }}</a></li>
+    <li aria-hidden="true">/</li>
+    <li>{{ printer.site.name if printer.site else 'Site' }}</li>
+    <li aria-hidden="true">/</li>
+    <li class="text-slate-700" aria-current="page">{{ printer.display_name or printer.model or printer.ip }}</li>
+  </ol>
+</nav>
 <div class="flex items-center gap-3 mb-4 flex-wrap">
-  <a href="/clients/{{ printer.client_id }}" class="text-sm text-sky-700 hover:underline"><- Client</a>
   <h1 class="text-2xl font-semibold">{{ printer.display_name or printer.model or printer.hostname or 'Printer' }}</h1>
   {{ status_badge(printer.status) }}
   {# Discovery-state badge only when it's actionable -- "approved" is the
@@ -34,9 +48,14 @@
     {# The IP came off a device on a customer LAN, so it is hostile input: it
        travels in a data- attribute and is read via `dataset`, never
        interpolated into the confirm() string. See CLAUDE.md. #}
+    {# The customer travels the same way as the IP, and for the same reason. An
+       RFC1918 address is not an identity in a multi-tenant fleet: "10.0.0.5"
+       names a device at every customer at once, so a confirm that says only
+       that is asking the operator to approve something it has not identified. #}
     <form method="post" action="/manage/printers/{{ printer.id }}/ignore" class="inline"
           data-ip="{{ printer.ip }}"
-          onsubmit="return confirm('Stop monitoring ' + this.dataset.ip + '? Agents will no longer poll it.')">
+          data-who="{{ printer.client.name if printer.client else '' }}"
+          onsubmit="return confirm('Stop monitoring ' + this.dataset.ip + ' (' + this.dataset.who + ')? Agents will no longer poll it.')">
       {{ csrf_field() }}
       <button class="{{ btn('warning', 'sm') }}">Stop monitoring</button>
     </form>
@@ -49,7 +68,8 @@
     {% if user.role.value == 'admin' %}
     <form method="post" action="/manage/printers/{{ printer.id }}/delete" class="inline"
           data-ip="{{ printer.ip }}"
-          onsubmit="return confirm('Delete printer ' + this.dataset.ip + ' and all its history? This cannot be undone.')">
+          data-who="{{ printer.client.name if printer.client else '' }}"
+          onsubmit="return confirm('Delete printer ' + this.dataset.ip + ' (' + this.dataset.who + ') and all its history? This cannot be undone.')">
       {{ csrf_field() }}
       <button class="{{ btn('danger', 'sm') }}">Delete</button>
     </form>

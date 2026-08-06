@@ -35,6 +35,10 @@
                    class="rounded border-slate-300 text-sky-600 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-offset-1 focus-visible:ring-sky-500"
                    onclick="document.querySelectorAll('.bulk-row').forEach(c => c.checked = this.checked); bulkCount();" />
           </th>
+          {#- Approving puts this device in a tenant's fleet, so the tenant is
+              part of the decision, not context to go and look up. First column
+              after the checkbox for that reason. -#}
+          <th class="{{ th_cls() }}">Customer</th>
           <th class="{{ th_cls() }}">IP</th>
           <th class="{{ th_cls() }}">Host / model</th>
           <th class="{{ th_cls() }}">MAC</th>
@@ -51,6 +55,15 @@
             <input type="checkbox" class="bulk-row rounded border-slate-300 text-sky-600 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-offset-1 focus-visible:ring-sky-500"
                    form="bulk-form" name="printer_ids"
                    value="{{ p.id }}" onclick="bulkCount()" aria-label="Select {{ p.ip }}" />
+          </td>
+          {%- set s = scope.get(p.id) if scope else None %}
+          <td class="{{ td_cls() }}">
+            {% if s %}
+            <div class="text-xs font-medium text-slate-700">{{ s.client }}</div>
+            <div class="text-[11px] text-slate-500">{{ s.site }}</div>
+            {% else %}
+            <span class="text-xs text-slate-400">unknown</span>
+            {% endif %}
           </td>
           <td class="{{ td_cls('left', 'tabular-nums') }}">{{ p.ip }}</td>
           <td class="{{ td_cls() }}">{{ p.hostname or '—' }} <span class="text-slate-400">{{ p.brand or '' }} {{ p.model or '' }}</span></td>
