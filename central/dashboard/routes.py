@@ -840,9 +840,22 @@ def approvals(request: Request, db: Session = Depends(get_db)):
         )
     )
     agents_by_id = {a.id: a for a in db.scalars(select(m.Agent))}
+    # Approving a device puts it in a SPECIFIC tenant's fleet, and the table
+    # showed IP / host / MAC / discovered-by / when -- none of which says whose.
+    # One agent can legitimately serve several clients (bridged-at-HQ networks),
+    # so "which agent found it" is not a stand-in for "whose is it".
+    scope = {
+        pid: {"client": client, "client_id": cid, "site": site}
+        for pid, site, client, cid in db.execute(
+            select(m.Printer.id, m.Site.name, m.Client.name, m.Client.id)
+            .join(m.Site, m.Printer.site_id == m.Site.id)
+            .join(m.Client, m.Printer.client_id == m.Client.id)
+            .where(m.Printer.discovery_state == m.DiscoveryState.pending)
+        ).all()
+    }
     return _render(
         request, "approvals.html", db=db, user=user,
-        pending=pending, agents_by_id=agents_by_id,
+        pending=pending, agents_by_id=agents_by_id, scope=scope,
         flash=_flash_mod.pop(request),
     )
 
@@ -938,6 +951,61 @@ def approval_bulk(
     return RedirectResponse("/approvals", status_code=303)
 
 
+def alert_scopes(db: Session, alerts: list) -> dict:
+    """``{alert_id: {client, client_id, site, printer, printer_id}}``.
+
+    The alerts inbox is the operator's primary working queue and it named no
+    customer at all: severity, title, detail, state, opened. On a multi-tenant
+    product that is the one attribute that makes the row actionable -- and the
+    row was not even a link, so there was no way to reach the device either.
+
+    Resolved in two queries rather than by lazy-loading per row. ``Alert`` has a
+    ``printer_id`` column but no ``printer`` relationship, and this inbox has no
+    pagination, so a per-row attribute access would be an N+1 over every open
+    alert in the fleet. An alert with no printer is an agent-level one (an agent
+    that stopped checking in), which still belongs to a tenant -- resolved
+    through the agent's site so those rows are labelled too rather than left as
+    the only anonymous ones.
+    """
+    out: dict = {}
+    printer_ids = {a.printer_id for a in alerts if a.printer_id}
+    if printer_ids:
+        rows = db.execute(
+            select(m.Printer.id, m.Printer.ip, m.Printer.display_name, m.Printer.model,
+                   m.Site.name, m.Client.name, m.Client.id)
+            .join(m.Site, m.Printer.site_id == m.Site.id)
+            .join(m.Client, m.Printer.client_id == m.Client.id)
+            .where(m.Printer.id.in_(printer_ids))
+        ).all()
+        by_printer = {
+            pid: {"printer_id": pid,
+                  "printer": display or model or ip,
+                  "site": site, "client": client, "client_id": cid}
+            for pid, ip, display, model, site, client, cid in rows
+        }
+        for a in alerts:
+            if a.printer_id in by_printer:
+                out[a.id] = by_printer[a.printer_id]
+
+    agent_ids = {a.agent_id for a in alerts if a.agent_id and a.id not in out}
+    if agent_ids:
+        rows = db.execute(
+            select(m.Agent.id, m.Agent.name, m.Site.name, m.Client.name, m.Client.id)
+            .join(m.Site, m.Agent.site_id == m.Site.id)
+            .join(m.Client, m.Site.client_id == m.Client.id)
+            .where(m.Agent.id.in_(agent_ids))
+        ).all()
+        by_agent = {
+            aid: {"printer_id": None, "printer": name,
+                  "site": site, "client": client, "client_id": cid}
+            for aid, name, site, client, cid in rows
+        }
+        for a in alerts:
+            if a.id not in out and a.agent_id in by_agent:
+                out[a.id] = by_agent[a.agent_id]
+    return out
+
+
 # --- Alerts inbox ----------------------------------------------------------- #
 @router.get("/alerts", response_class=HTMLResponse)
 def alerts_inbox(request: Request, db: Session = Depends(get_db)):
@@ -959,6 +1027,7 @@ def alerts_inbox(request: Request, db: Session = Depends(get_db)):
     # be". Surface them at the top of the inbox with the fix.
     return _render(
         request, "alerts.html", db=db, user=user, alerts=rows,
+        scope=alert_scopes(db, rows),
         undelivered=queries.undelivered_notifications(db),
         # An empty alerts inbox is the most reassuring screen in the product and
         # the one most worth qualifying: "no open alerts" over four-hour-old
