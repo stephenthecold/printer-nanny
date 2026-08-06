@@ -99,6 +99,14 @@ def test_install_nssm_populates_cache_from_upstream_zip(tmp_path, monkeypatch):
 
     class _StubResp:
         content = zip_bytes
+        # ``url`` is the URL the request ACTUALLY ended on, which is what the
+        # mirror checks to catch an https source redirecting to plaintext. A
+        # real httpx.Response always carries it; a double that omits it made the
+        # download raise AttributeError, which the route turned into a 503 --
+        # the fake being less capable than the thing it stands in for, which is
+        # the blind spot this repo keeps rediscovering one layer at a time.
+        url = "https://example.invalid/nssm-2.24.zip"
+
         def raise_for_status(self): pass
 
     class _StubClient:

@@ -659,6 +659,85 @@ def _coerce(spec: Spec, raw: Any) -> Any:
         return spec.default
 
 
+#: Spec types whose form value is parsed rather than stored verbatim, and which
+#: can therefore be *wrong* in a way an operator must be told about.
+NUMERIC_TYPES = ("int", "float")
+
+
+def check_settings(
+    form: Dict[str, Any], sections: "Optional[set]" = None
+) -> "tuple":
+    """Inspect a settings submission WITHOUT writing anything.
+
+    Returns ``(errors, cleared)``:
+
+    * ``errors`` -- ``{key: message}`` for values that cannot be parsed. The
+      caller refuses the whole save and hands the submission back.
+    * ``cleared`` -- ``{key: default}`` for numeric fields submitted **blank**,
+      which means "restore the default".
+
+    Why the two outcomes differ, given both are "the value is not a number":
+
+    A **blank** field is an intelligible instruction -- the operator wiped it,
+    and the only sensible reading is "put it back to how it shipped". Refusing
+    that would make resetting a setting impossible without knowing the default.
+    So it is honoured, and the caller *says which settings moved and to what*.
+    Silently doing the same thing is the defect this replaces: clearing the
+    supply threshold reverted the whole fleet to the shipped value and reported
+    "Settings saved." with no indication anything had changed.
+
+    A **non-blank unparseable** value ("30 days", "twenty") is not an
+    instruction, it is a mistake -- and substituting the default there discards
+    what they meant and applies something they did not ask for.
+
+    Deliberately separate from ``_coerce``, which stays forgiving because it is
+    on the READ path: ``load_settings`` coerces whatever is already stored, and
+    an install holding a bad value from before this check existed must keep
+    rendering rather than 500 on every page.
+    """
+    errors: Dict[str, str] = {}
+    cleared: Dict[str, Any] = {}
+    for spec in SPECS:
+        if sections is not None and spec.section not in sections:
+            continue
+        if spec.type not in NUMERIC_TYPES or spec.key not in form:
+            continue
+        raw = form[spec.key]
+        text = "" if raw is None else str(raw).strip()
+        if not text:
+            cleared[spec.key] = spec.default
+            continue
+        try:
+            int(text) if spec.type == "int" else float(text)
+        except (TypeError, ValueError):
+            errors[spec.key] = (
+                "%r is not a %s. Leave it empty to restore the default (%s)."
+                % (str(raw)[:60], "whole number" if spec.type == "int" else "number",
+                   spec.default)
+            )
+    return errors, cleared
+
+
+def without_secret_values(form: Dict[str, Any]) -> Dict[str, Any]:
+    """A settings submission with every secret-typed value removed.
+
+    Repopulating a refused form means carrying what was typed back to the
+    browser in the session cookie. A settings form carries the SMTP password,
+    the OIDC client secret, the FreeScout key and the SCIM token, and those must
+    not travel in a cookie, be echoed into HTML, or sit in a session store --
+    the same rule that keeps them out of ``directory_connections.config``, out
+    of audit detail and out of logs.
+
+    Dropping them rather than masking them is deliberate: a masked placeholder
+    round-tripping through the form is how a placeholder gets saved AS the
+    secret. Their inputs simply come back empty, which the form already treats
+    as "keep the stored value".
+    """
+    secret_keys = {s.key for s in SPECS if s.type == "secret"}
+    secret_keys.add(SCIM_TOKEN_HASH_KEY)
+    return {k: v for k, v in form.items() if k not in secret_keys}
+
+
 def default_settings() -> Dict[str, Any]:
     return {s.key: s.default for s in SPECS}
 

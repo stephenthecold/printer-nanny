@@ -72,7 +72,13 @@ class FlashLevelError(ValueError):
     """
 
 
-def flash(request: Any, text: str, level: str = "success") -> None:
+def flash(
+    request: Any,
+    text: str,
+    level: str = "success",
+    fields: Optional[Dict[str, Any]] = None,
+    errors: Optional[Dict[str, str]] = None,
+) -> None:
     """Queue one message for the next page this session renders.
 
     ``level`` defaults to ``success`` because the majority of these are
@@ -80,12 +86,28 @@ def flash(request: Any, text: str, level: str = "success") -> None:
     migration honest: a call site that has not been classified yet renders
     exactly as it did before, so this refactor cannot quietly restyle a message
     nobody has looked at. Every refusal must pass its level explicitly.
+
+    ``fields`` is what the operator typed and ``errors`` is what was wrong with
+    it, per field. They ride here rather than being re-rendered inline because
+    every refusing handler in this app answers with ``303 See Other`` -- which is
+    correct (a refresh must not re-submit) and which throws the POST body away.
+    Carrying the submission in the session is what lets the form come back
+    filled in instead of blank, and it is why a refusal can afford to be a
+    refusal: rejecting input the operator then has to retype is how a validation
+    rule gets worked around rather than obeyed.
     """
     if level not in LEVELS:
         raise FlashLevelError(
             "%r is not a flash level; use one of %s" % (level, ", ".join(LEVELS))
         )
-    request.session[FLASH_KEY] = {"level": level, "text": str(text)}
+    payload: Dict[str, Any] = {"level": level, "text": str(text)}
+    if fields:
+        # Stringified because this round-trips through a signed cookie as JSON,
+        # and because a form value is text by the time it comes back anyway.
+        payload["fields"] = {str(k): "" if v is None else str(v) for k, v in fields.items()}
+    if errors:
+        payload["errors"] = {str(k): str(v) for k, v in errors.items()}
+    request.session[FLASH_KEY] = payload
 
 
 def error(request: Any, text: str) -> None:
@@ -93,11 +115,29 @@ def error(request: Any, text: str) -> None:
     flash(request, text, level="error")
 
 
-def pop(request: Any) -> Optional[Dict[str, str]]:
+def refuse(
+    request: Any,
+    text: str,
+    fields: Optional[Dict[str, Any]] = None,
+    errors: Optional[Dict[str, str]] = None,
+) -> None:
+    """Refuse a submission: say why, per field, and hand back what was typed.
+
+    The counterpart to silently substituting a default. Nothing is written, the
+    operator is told which field and why, and the form is repopulated -- so the
+    refusal costs them a correction rather than a re-entry.
+    """
+    flash(request, text, level="error", fields=fields, errors=errors)
+
+
+def pop(request: Any) -> Optional[Dict[str, Any]]:
     """Take the queued message, or None. Never raises.
 
-    Returns ``{"level": ..., "text": ...}``. Jinja resolves ``flash.level`` on a
-    dict via item lookup, so templates read it as an attribute either way.
+    Returns ``{"level", "text", "fields", "errors"}``. ``fields`` and ``errors``
+    are always present as dicts, empty when nothing was carried, so a template
+    can write ``flash.fields.get(...)`` without guarding. Jinja resolves
+    ``flash.level`` on a dict via item lookup, so templates read it as an
+    attribute either way.
     """
     try:
         raw = request.session.pop(FLASH_KEY, None)
@@ -107,7 +147,7 @@ def pop(request: Any) -> Optional[Dict[str, str]]:
         return None
     # Written by a previous build, still in an unexpired cookie.
     if isinstance(raw, str):
-        return {"level": FALLBACK_LEVEL, "text": raw} if raw else None
+        return _shape(FALLBACK_LEVEL, raw) if raw else None
     if isinstance(raw, dict):
         text = raw.get("text")
         if not text:
@@ -115,8 +155,18 @@ def pop(request: Any) -> Optional[Dict[str, str]]:
         level = raw.get("level")
         if level not in LEVELS:
             level = FALLBACK_LEVEL
-        return {"level": level, "text": str(text)}
-    return {"level": FALLBACK_LEVEL, "text": str(raw)}
+        return _shape(level, text, raw.get("fields"), raw.get("errors"))
+    return _shape(FALLBACK_LEVEL, str(raw))
+
+
+def _shape(level: str, text: Any, fields: Any = None, errors: Any = None) -> Dict[str, Any]:
+    """Normalise to the shape templates expect, whatever the cookie held."""
+    return {
+        "level": level,
+        "text": str(text),
+        "fields": fields if isinstance(fields, dict) else {},
+        "errors": errors if isinstance(errors, dict) else {},
+    }
 
 
 def tone_for(level: Optional[str]) -> str:

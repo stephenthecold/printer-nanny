@@ -117,15 +117,49 @@ async def settings_save(request: Request, db: Session = Depends(get_db)):
     # group's sections so absent checkboxes elsewhere keep their values.
     active_group = _resolve_group(str(form.pop("_group", "")))
     _label, section_names = runtime.SETTINGS_GROUPS[active_group]
+    sections = set(section_names)
+
+    # Check before writing anything. A value that cannot be parsed used to be
+    # replaced by the spec default and reported as "Settings saved." -- so a
+    # typo in the low-supply threshold moved it for the whole fleet with no
+    # signal anywhere. Now nothing is written and the form comes back filled in.
+    errors, cleared = runtime.check_settings(form, sections=sections)
+    if errors:
+        record(db, request, user, "settings.refused", detail=", ".join(sorted(errors)))
+        db.commit()
+        _flash_mod.refuse(
+            request,
+            "Nothing was saved — check the %d highlighted field%s."
+            % (len(errors), "" if len(errors) == 1 else "s"),
+            # Secrets are stripped: repopulation travels in the session cookie,
+            # and the SMTP password does not belong there. See runtime.
+            fields=runtime.without_secret_values(form),
+            errors=errors,
+        )
+        return RedirectResponse(f"/settings?group={active_group}", status_code=303)
+
     before = runtime.load_settings(db)
-    runtime.save_settings(db, form, sections=set(section_names))
+    runtime.save_settings(db, form, sections=sections)
     after = runtime.load_settings(db)
     # Audit the key NAMES that changed -- never the values (secrets!).
     changed = sorted(k for k in after if before.get(k) != after.get(k))
     if changed:
         record(db, request, user, "settings.update", detail=", ".join(changed))
         db.commit()
-    _flash_mod.flash(request, "Settings saved.")
+    # A blank numeric field means "restore the default", which is honoured --
+    # and SAID. Doing it silently was the defect: the fleet-wide threshold moved
+    # and the page reported an unqualified success.
+    restored = sorted(k for k in cleared if k in changed)
+    if restored:
+        detail = ", ".join(f"{k} → {cleared[k]}" for k in restored)
+        _flash_mod.flash(
+            request,
+            f"Settings saved. {len(restored)} cleared field"
+            f"{'' if len(restored) == 1 else 's'} restored to the default: {detail}.",
+            level="warning",
+        )
+    else:
+        _flash_mod.flash(request, "Settings saved.")
     return RedirectResponse(f"/settings?group={active_group}", status_code=303)
 
 

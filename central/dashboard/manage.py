@@ -75,7 +75,13 @@ def _redirect(path: str) -> RedirectResponse:
     return RedirectResponse(path, status_code=303)
 
 
-def _flash(request: Request, message: str, level: str = "success") -> None:
+def _flash(
+    request: Request,
+    message: str,
+    level: str = "success",
+    fields: "Optional[dict]" = None,
+    errors: "Optional[dict]" = None,
+) -> None:
     """Queue a message for the next render. See central/dashboard/flash.py.
 
     Kept as a thin local name because ~113 call sites in this module use it, but
@@ -88,13 +94,60 @@ def _flash(request: Request, message: str, level: str = "success") -> None:
     the operator's input. The default stays ``success`` so an unclassified call
     renders exactly as it did before this refactor rather than being quietly
     restyled.
+
+    ``fields`` / ``errors`` carry the submission back so a refused form can be
+    repopulated across the 303 -- see ``central.dashboard.flash``. Never put a
+    secret in ``fields``: it rides in the session cookie.
     """
-    _flash_mod.flash(request, message, level=level)
+    _flash_mod.flash(request, message, level=level, fields=fields, errors=errors)
 
 
 def _flash_error(request: Request, message: str) -> None:
     """The case the old string-only channel could not express at all."""
     _flash_mod.flash(request, message, level="error")
+
+
+def _parse_optional_int(
+    raw: str, key: str, errors: dict, what: str
+) -> "Optional[int]":
+    """``int(raw)``, blank meaning "not set", an unparseable value refused.
+
+    Blank and unparseable are different answers to different questions. Blank is
+    an instruction -- clear this -- and is honoured. ``"30 days"`` is a mistake,
+    and the choice there is between refusing it and quietly keeping the old
+    value while reporting success; this codebase has been bitten by the second
+    often enough (the settings coercion, the SNMP version select) that refusing
+    is the house rule. ``errors`` is populated in place so a caller can collect
+    every bad field in one pass instead of stopping at the first.
+    """
+    text = (raw or "").strip()
+    if not text:
+        return None
+    try:
+        return int(text)
+    except (TypeError, ValueError):
+        errors[key] = (
+            "%r is not a whole number of %s. Leave it empty to clear it."
+            % (text[:40], what)
+        )
+        return None
+
+
+def _parse_optional_float(
+    raw: str, key: str, errors: dict, what: str
+) -> "Optional[float]":
+    """As ``_parse_optional_int``, for a fractional value."""
+    text = (raw or "").strip()
+    if not text:
+        return None
+    try:
+        return float(text)
+    except (TypeError, ValueError):
+        errors[key] = (
+            "%r is not a number for %s. Leave it empty to clear it."
+            % (text[:40], what)
+        )
+        return None
 
 
 def _site_belongs_to(db: Session, site_id: int, client_id: Optional[int]) -> bool:
@@ -1604,7 +1657,16 @@ def subnet_add(
             try:
                 effective_site_id = int(site_id)
             except ValueError:
-                pass
+                # Not "fall back to the agent's own site". A subnet carries SNMP
+                # credentials and decides which tenant a discovered device joins,
+                # so filing it under a site the operator did not choose is a
+                # tenancy decision made by an exception handler.
+                _flash(request, f"{site_id!r} is not a site; the subnet was not added.",
+                       level="error",
+                       fields={"cidr": cidr, "snmp_community": snmp_community,
+                               "bind_interface": bind_interface},
+                       errors={"site_id": "Choose a site from the list."})
+                return _redirect("/manage/agents")
         is_trusted = bool(trusted.strip())
         db.add(m.Subnet(
             site_id=effective_site_id, agent_id=agent.id, cidr=cidr.strip(),
@@ -1973,27 +2035,41 @@ def schedule_create(
     if not name:
         _flash(request, "Schedule name is required.", level="error")
         return _redirect("/manage/maintenance")
+    # Parsed before anything is created, and a value we cannot read is refused
+    # rather than dropped -- see _parse_optional_int. A schedule quietly created
+    # without the interval the operator typed is a maintenance rule that never
+    # fires, discovered months later by a device that was never serviced.
+    errors: dict = {}
+    submitted = {
+        "name": name, "printer_id": printer_id, "model": model,
+        "interval_days": interval_days, "page_threshold": page_threshold,
+        "component_type": component_type, "life_threshold": life_threshold,
+        "next_due": next_due,
+    }
     pid: Optional[int] = None
     if printer_id.strip():
         try:
             pid = int(printer_id)
         except ValueError:
-            pid = None
-    try:
-        interval = int(interval_days) if interval_days.strip() else None
-    except ValueError:
-        interval = None
-    try:
-        threshold = int(page_threshold) if page_threshold.strip() else None
-    except ValueError:
-        threshold = None
+            errors["printer_id"] = "That is not a printer selection."
+    interval = _parse_optional_int(interval_days, "interval_days", errors,
+                                   "days between services")
+    threshold = _parse_optional_int(page_threshold, "page_threshold", errors,
+                                    "page count")
+    life = _parse_optional_float(life_threshold, "life_threshold", errors,
+                                 "remaining life percentage")
     ctype = component_type.strip() or None
     if ctype is not None and ctype not in m.MaintenanceSchedule.COMPONENT_TYPES:
-        ctype = None
-    try:
-        life = float(life_threshold) if life_threshold.strip() else None
-    except ValueError:
-        life = None
+        errors["component_type"] = (
+            "%r is not a component type. Choose one of: %s."
+            % (ctype, ", ".join(sorted(m.MaintenanceSchedule.COMPONENT_TYPES)))
+        )
+    if errors:
+        _flash(request, f"Schedule '{name}' was not created — check the "
+                        f"{len(errors)} highlighted field"
+                        f"{'' if len(errors) == 1 else 's'}.",
+               level="error", fields=submitted, errors=errors)
+        return _redirect("/manage/maintenance")
     # Component trigger only fires when both halves are present.
     if ctype is None or life is None:
         ctype = life = None
@@ -2032,27 +2108,47 @@ def schedule_update(
     sched = db.get(m.MaintenanceSchedule, sched_id)
     if sched is None:
         return _redirect("/manage/maintenance")
-    if name.strip():
-        sched.name = name.strip()
-    try:
-        sched.interval_days = int(interval_days) if interval_days.strip() else None
-    except ValueError:
-        pass
-    try:
-        sched.page_threshold = int(page_threshold) if page_threshold.strip() else None
-    except ValueError:
-        pass
+    # Parse everything BEFORE writing anything. Each of these used to be
+    # ``except ValueError: pass``, which kept the old value and then reported
+    # "Schedule 'X' updated." in the success colour -- an edit the operator
+    # believed had applied and had not. The life-threshold one was worse: an
+    # unparseable value fell through to ``ctype = life = None``, clearing the
+    # component type they had NOT touched.
+    errors: dict = {}
+    submitted = {
+        "name": name, "interval_days": interval_days,
+        "page_threshold": page_threshold, "component_type": component_type,
+        "life_threshold": life_threshold, "next_due": next_due,
+    }
+    new_interval = _parse_optional_int(interval_days, "interval_days", errors,
+                                       "days between services")
+    new_pages = _parse_optional_int(page_threshold, "page_threshold", errors,
+                                    "page count")
+    new_life = _parse_optional_float(life_threshold, "life_threshold", errors,
+                                     "remaining life percentage")
     ctype = component_type.strip() or None
     if ctype is not None and ctype not in m.MaintenanceSchedule.COMPONENT_TYPES:
-        ctype = None
-    try:
-        life = float(life_threshold) if life_threshold.strip() else None
-    except ValueError:
-        life = None
-    if ctype is None or life is None:
-        ctype = life = None
+        errors["component_type"] = (
+            "%r is not a component type. Choose one of: %s."
+            % (ctype, ", ".join(sorted(m.MaintenanceSchedule.COMPONENT_TYPES)))
+        )
+    if errors:
+        _flash(request, f"Schedule '{sched.name}' was not changed — "
+                        f"check the {len(errors)} highlighted field"
+                        f"{'' if len(errors) == 1 else 's'}.",
+               level="error", fields=submitted, errors=errors)
+        return _redirect("/manage/maintenance")
+
+    if name.strip():
+        sched.name = name.strip()
+    sched.interval_days = new_interval
+    sched.page_threshold = new_pages
+    # A component threshold needs both halves; one without the other is not a
+    # rule. Stated rather than silently blanked, which is what it did before.
+    if ctype is None or new_life is None:
+        ctype = new_life = None
     sched.component_type = ctype
-    sched.life_threshold = life
+    sched.life_threshold = new_life
     parsed = _parse_date(next_due)
     if parsed is not None or next_due == "":
         sched.next_due = parsed
@@ -2221,11 +2317,20 @@ def record_delete(rec_id: int, request: Request, db: Session = Depends(get_db)):
 # --------------------------------------------------------------------------- #
 # Users (admin only)
 # --------------------------------------------------------------------------- #
-def _coerce_role(raw: str) -> m.UserRole:
+def _coerce_role(raw: str) -> "Optional[m.UserRole]":
+    """The submitted role, or None if it is not one.
+
+    Returns None rather than falling back to ``tech``. The old fallback was a
+    privilege decision made by an exception handler: an unrecognised value --
+    a renamed role after an upgrade, a stale form, a crafted POST -- silently
+    produced an operator account with fleet-wide visibility across every tenant.
+    "I did not understand what you asked for" must never resolve to granting
+    access; the caller refuses instead.
+    """
     try:
         return m.UserRole(raw)
     except ValueError:
-        return m.UserRole.tech
+        return None
 
 
 
@@ -2333,6 +2438,11 @@ def user_create(
         _flash(request, f"Username '{username}' is already taken.", level="error")
         return _redirect("/manage/users")
     role_enum = _coerce_role(role)
+    if role_enum is None:
+        _flash(request, f"{role!r} is not a role; no account was created.",
+               level="error", fields={"username": username, "client_id": client_id},
+               errors={"role": "Pick one of admin, tech or client_readonly."})
+        return _redirect("/manage/users")
     # client_readonly users MUST be pinned to a client -- otherwise they'd see
     # every client (defeating the role's purpose). Other roles ignore client_id.
     pinned_client_id: Optional[int] = None
@@ -2384,6 +2494,10 @@ def user_update(
     if target is None:
         return _redirect("/manage/users")
     new_role = _coerce_role(role)
+    if new_role is None:
+        _flash(request, f"{role!r} is not a role; nothing was changed.", level="error",
+               errors={"role": "Pick one of admin, tech or client_readonly."})
+        return _redirect(f"/manage/users/{user_id}/edit")
     # Last-admin guard: refuse to demote the only remaining admin (lockout).
     if (target.role == m.UserRole.admin and new_role != m.UserRole.admin
             and db.query(m.User).filter_by(role=m.UserRole.admin).count() <= 1):

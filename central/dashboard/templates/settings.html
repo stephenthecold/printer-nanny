@@ -75,6 +75,13 @@
     <div class="p-4 grid md:grid-cols-2 gap-4">
       {% for f in fields %}
       {% set spec = f.spec %}
+      {#- A refused save hands back what was typed (central/dashboard/flash.py).
+          Secrets are stripped from that payload before it reaches the session,
+          so a secret field always falls through to its stored value here. -#}
+      {% set submitted = (flash.fields if flash else {}) | default({}, true) %}
+      {% set field_error = (flash.errors if flash else {}) | default({}, true) %}
+      {% set shown = submitted[spec.key] if spec.key in submitted else f.value %}
+      {% set err = field_error[spec.key] if spec.key in field_error else None %}
       <label class="block {{ 'md:col-span-2' if spec.type == 'bool' else '' }}">
         {% if spec.type == 'bool' %}
           <span class="inline-flex items-center gap-2 text-sm">
@@ -83,13 +90,23 @@
           </span>
         {% else %}
           <span class="text-xs text-slate-500">{{ spec.label }}</span>
+          {#- ``type=text`` for numbers when a value has been refused: a
+              ``type=number`` input silently drops content it considers invalid,
+              so re-rendering the rejected text in one would hand back an EMPTY
+              box -- which under the blank rule means "restore the default", the
+              opposite of what a refusal is for. -#}
           <input
             name="{{ spec.key }}"
-            type="{{ 'password' if spec.type == 'secret' else ('number' if spec.type in ('int','float') else 'text') }}"
-            {{ 'step=any' if spec.type == 'float' else '' }}
-            value="{{ f.value if f.value is not none else '' }}"
+            type="{{ 'password' if spec.type == 'secret' else ('text' if (err and spec.type in ('int','float')) else ('number' if spec.type in ('int','float') else 'text')) }}"
+            {{ 'step=any' if spec.type == 'float' and not err else '' }}
+            value="{{ shown if shown is not none else '' }}"
             {% if spec.type == 'secret' %}placeholder="•••• unchanged ••••"{% endif %}
-            class="w-full border rounded px-3 py-2 text-sm" />
+            {% if err %}aria-invalid="true" aria-describedby="err-{{ loop.index0 }}-{{ spec.key | replace('.', '-') }}"{% endif %}
+            class="w-full border rounded px-3 py-2 text-sm {{ 'border-red-400 bg-red-50' if err else '' }}" />
+          {% if err %}
+          <span id="err-{{ loop.index0 }}-{{ spec.key | replace('.', '-') }}"
+                class="block text-xs text-red-700 mt-0.5">{{ err }}</span>
+          {% endif %}
         {% endif %}
         {% if spec.help %}<span class="block text-xs text-slate-400 mt-0.5">{{ spec.help }}</span>{% endif %}
       </label>
