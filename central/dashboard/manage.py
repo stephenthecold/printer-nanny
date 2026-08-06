@@ -1694,7 +1694,9 @@ def subnet_update(
         return _redirect("/login")
     subnet = db.get(m.Subnet, subnet_id)
     if subnet:
-        standby_note = _apply_standby(db, request, subnet, standby_agent_id, standby_present)
+        standby_note, standby_refusal = _apply_standby(
+            db, subnet, standby_agent_id, standby_present
+        )
         subnet.label = label.strip() or None
         if snmp_community.strip():
             subnet.snmp_community = snmp_community.strip()
@@ -1745,16 +1747,30 @@ def subnet_update(
                target=f"subnet:{subnet.id} {subnet.cidr}",
                detail=(trust_note + " " + standby_note).strip())
         db.commit()
-        _flash(request, f"Subnet {subnet.cidr} updated." + (
-            f" {standby_note.strip()}" if standby_note else ""
-        ))
+        _flash(
+            request,
+            f"Subnet {subnet.cidr} updated."
+            + (f" {standby_note.strip()}" if standby_note else "")
+            + (f" {standby_refusal}" if standby_refusal else ""),
+            # The other fields DID save, so this is not a bare refusal -- but the
+            # standby the operator picked was not set, and reporting the whole
+            # submission in green is how that gets missed. Same shape as
+            # ``schedule_log_service``: applied, with a caveat to act on.
+            level="warning" if standby_refusal else "success",
+        )
     return _redirect("/manage/agents")
 
 
 def _apply_standby(
-    db: Session, request: Request, subnet: m.Subnet, raw: str, present: str
-) -> str:
-    """Set or clear this subnet's standby collector. Returns a note for the audit.
+    db: Session, subnet: m.Subnet, raw: str, present: str
+) -> tuple[str, str]:
+    """Set or clear this subnet's standby collector.
+
+    Returns ``(audit_note, refusal)``. A refusal is **returned, not flashed**:
+    there is one flash per request and the caller writes it last, so flashing
+    here meant the caller's "Subnet 10.0.0.0/24 updated." overwrote the refusal
+    a moment later -- the operator was told in green that a submission had been
+    saved when the standby in it had been thrown away.
 
     Refusals rather than resolutions, because a standby that is wrong is worse
     than none: it hands a second agent this subnet's SNMP credentials and this
@@ -1778,7 +1794,7 @@ def _apply_standby(
     from central import collector
 
     if not present.strip():
-        return ""
+        return "", ""
     raw = (raw or "").strip()
     new_id: Optional[int] = None
     if raw:
@@ -1787,17 +1803,14 @@ def _apply_standby(
         except ValueError:
             candidate = None
         if candidate is None:
-            return ""
+            return "", ""
         if subnet.agent_id is None:
-            _flash(request, f"Assign a collector to {subnet.cidr} before adding a standby.",
-                   level="error")
-            return ""
+            return "", f"Assign a collector to {subnet.cidr} before adding a standby."
         if candidate.id == subnet.agent_id:
-            _flash(request, f"{candidate.name} already collects {subnet.cidr}.", level="error")
-            return ""
+            return "", f"{candidate.name} already collects {subnet.cidr}."
         new_id = candidate.id
     if new_id == subnet.standby_agent_id:
-        return ""
+        return "", ""
 
     now = datetime.now(timezone.utc)
     ttl, _after, _auto = collector.lease_settings(load_settings(db))
@@ -1805,7 +1818,10 @@ def _apply_standby(
     subnet.standby_agent_id = new_id
     if new_id is not None and previous is None:
         collector.seed_lease(db, subnet, now=now, ttl_seconds=ttl)
-        return f"standby=agent:{new_id} (redundancy on; lease seeded to agent:{subnet.agent_id})"
+        return (
+            f"standby=agent:{new_id} (redundancy on; lease seeded to agent:{subnet.agent_id})",
+            "",
+        )
     if new_id is None:
         holder = subnet.collector_agent_id
         if holder is not None:
@@ -1816,8 +1832,8 @@ def _apply_standby(
             db.flush()
             collector.release_lease(db, subnet.id, holder_id=holder, now=now)
             db.expire(subnet)
-        return f"standby cleared (was agent:{previous}); lease released"
-    return f"standby=agent:{new_id} (was agent:{previous})"
+        return f"standby cleared (was agent:{previous}); lease released", ""
+    return f"standby=agent:{new_id} (was agent:{previous})", ""
 
 
 @router.post("/subnets/{subnet_id}/handback")
