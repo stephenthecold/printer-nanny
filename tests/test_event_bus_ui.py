@@ -63,15 +63,14 @@ def test_the_page_is_admin_only(db):
     address. That is the same class of decision as adding an operator account."""
     tech = _login(db, role=m.UserRole.tech, username="tech")
     resp = tech.get("/manage/events", follow_redirects=False)
-    assert resp.status_code == 303
-    assert resp.headers["location"] == "/login"
+    assert resp.status_code == 403
 
     resp = tech.post(
         "/manage/events",
         data={"name": "sneaky", "url": "https://evil.example.com/h"},
         follow_redirects=False,
     )
-    assert resp.status_code == 303
+    assert resp.status_code == 403
     assert db.query(m.EventSubscription).count() == 0
 
 

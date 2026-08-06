@@ -411,9 +411,9 @@ def test_build_route_client_readonly_denied(db, monkeypatch):
         data={"agent_id": agent.id, "api_key": "k"},
         follow_redirects=False,
     )
-    # Bounced to login; nothing built, nothing audited.
-    assert resp.status_code in (302, 303)
-    assert resp.headers.get("location", "").endswith("/login")
+    # Refused with 403 -- they are signed in, they simply may not. Nothing
+    # built, nothing audited (asserted below, and that is the real property).
+    assert resp.status_code == 403
     assert _audit(db) == []
 
 

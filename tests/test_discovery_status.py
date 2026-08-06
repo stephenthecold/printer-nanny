@@ -146,12 +146,14 @@ def test_discovery_redirect_then_agents_bounces_client_readonly(db):
     _login(http, "ro", "ro")
     # /discovery is just a redirect now; the agents page it lands on is what
     # enforces the manager-only gate.
+    # /discovery itself has no guard -- it is a bare redirect to the page that
+    # does -- so it still answers 303 for everyone. Only the guarded page below
+    # distinguishes anonymous from unauthorised.
     resp = http.get("/discovery", follow_redirects=False)
     assert resp.status_code == 303
     assert resp.headers["location"] == "/manage/agents"
     resp = http.get("/manage/agents", follow_redirects=False)
-    assert resp.status_code == 303
-    assert resp.headers["location"] == "/login"
+    assert resp.status_code == 403
 
 
 def test_rescan_enqueues_command(env, db):

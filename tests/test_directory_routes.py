@@ -184,7 +184,8 @@ def test_readonly_users_cannot_touch_connections(db):
     db.commit()
     c = _client(db)
     r = _save(_login("viewer"), c.id, secret="x")
-    assert r.status_code == 303 and "/login" in r.headers.get("location", "")
+    # 403: signed in, not permitted -- not the sign-in form.
+    assert r.status_code == 403
     assert db.query(m.DirectoryConnection).count() == 0
 
 

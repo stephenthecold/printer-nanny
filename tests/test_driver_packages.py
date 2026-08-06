@@ -488,7 +488,9 @@ def test_a_readonly_user_cannot_upload_a_driver(db, tmp_path):
         "client_id": c.id, "driver_name": "X", "inf_relpath": "a.inf",
     }, files={"package": ("d.zip", _zip_bytes([("a", b"b")]), "application/zip")},
         follow_redirects=False)
-    assert "/login" in r.headers.get("location", "")
+    # 403: signed in, not permitted. Driver upload is deliberate fleet-wide code
+    # execution as LocalSystem, so the refusal is the point of this test.
+    assert r.status_code == 403
     assert db.scalar(select(m.DriverPackage)) is None
 
 

@@ -394,9 +394,13 @@ def test_the_page_is_closed_to_client_readonly_users(db):
 
 
 def test_logged_out_users_get_nothing(db):
+    """Anonymous is the case that KEEPS the redirect: there is a real action to
+    take and the sign-in page is where it is taken. Only an authenticated user
+    who lacks the permission gets a 403."""
     cli = TestClient(app)
-    # 403: signed in, not permitted. Not the sign-in form.
-    assert cli.get("/manage/definitions", follow_redirects=False).status_code == 403
+    resp = cli.get("/manage/definitions", follow_redirects=False)
+    assert resp.status_code == 303
+    assert resp.headers["location"] == "/login"
 
 
 def test_a_hostile_definition_field_is_escaped_in_the_page(db):

@@ -208,7 +208,7 @@ def test_audit_page_admin_only(db):
 
     tech_cli = _login("techie")
     resp = tech_cli.get("/manage/audit", follow_redirects=False)
-    assert resp.status_code == 303  # bounced away
+    assert resp.status_code == 403  # bounced away
 
 
 def test_audit_page_renders_rows_and_filters(db):

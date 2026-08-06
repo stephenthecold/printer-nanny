@@ -50,9 +50,11 @@ def test_users_page_forbidden_for_tech(db):
     http = TestClient(app)
     _login(http, "t", "t")
     resp = http.get("/manage/users", follow_redirects=False)
-    assert resp.status_code == 303
-    # Tech is bounced to "/" (logged in but not an admin), not /login.
-    assert resp.headers["location"] == "/"
+    # A tech is REFUSED (403), not bounced. This route used to redirect them to
+    # "/" -- better than the sign-in form and still no explanation, so they
+    # arrived at the dashboard with no idea why.
+    assert resp.status_code == 403
+    assert "Not permitted" in resp.text
 
 
 def test_create_local_user(env, db):

@@ -325,8 +325,8 @@ def test_a_readonly_user_cannot_build(db):
     db.commit()
     r = _login("ro").post("/manage/machines/msi", data={"client_id": c.id},
                           follow_redirects=False)
-    assert r.status_code in (302, 303, 307)
-    assert "/login" in r.headers.get("location", "")
+    # Refused, not redirected to sign in -- this user already is signed in.
+    assert r.status_code == 403
 
 
 @pytest.mark.skipif(not _HAVE_WIXL, reason="msitools/wixl not installed")

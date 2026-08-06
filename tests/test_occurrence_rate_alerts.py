@@ -631,8 +631,8 @@ def test_creating_a_rule_is_audited(db):
 def test_a_client_readonly_user_cannot_reach_the_rules_surface(db):
     """Alert rules govern the whole fleet; a customer must not see or edit them."""
     cli = _login(db, role=m.UserRole.client_readonly, username="customer")
-    assert cli.get("/manage/alert-rules", follow_redirects=False).status_code == 303
-    assert _post(cli).status_code == 303
+    assert cli.get("/manage/alert-rules", follow_redirects=False).status_code == 403
+    assert _post(cli).status_code == 403
     assert db.query(m.AlertRule).count() == 0
 
 
