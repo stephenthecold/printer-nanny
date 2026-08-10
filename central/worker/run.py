@@ -15,7 +15,11 @@ from typing import Optional
 from central import models as m
 from central.config import settings
 from central.db import SessionLocal, create_all, try_leader_lock
-from central.health import DEFAULT_CYCLE_SECONDS
+from central.health import (
+    DEFAULT_CYCLE_SECONDS,
+    clear_worker_starting,
+    mark_worker_starting,
+)
 from central.logging_config import configure_logging
 from central.reports import run_scheduled_reports
 from central.retention import roll_up_readings
@@ -219,8 +223,32 @@ def main(argv: Optional[list] = None) -> int:
     # Waiting rather than refusing, and giving up rather than waiting forever:
     # an install whose operator genuinely has not migrated must still come up,
     # because the dashboard is how they fix it.
+    #
+    # The marker either side of the wait is what stops this being reported as an
+    # outage. No liveness stamp is written while we are in here, so on an upgrade
+    # (where the previous worker's stamps are already in the table) a wait longer
+    # than health.stale_after_seconds -- 180s at the default cadence, against a
+    # 300s budget -- reads as every job having gone stale at once. A real install
+    # was paged for exactly that on 2026-08-10, on every restart. Saying "I am
+    # starting" costs one row and makes the difference between waiting and being
+    # wedged legible to /readyz, the container healthcheck and the banner alike.
     if args.schema_wait > 0:
-        wait_for_schema(timeout=args.schema_wait, where="worker")
+        _db = SessionLocal()
+        try:
+            mark_worker_starting(_db, args.schema_wait)
+        finally:
+            _db.close()
+        try:
+            wait_for_schema(timeout=args.schema_wait, where="worker")
+        finally:
+            # In a finally so a wait that raises cannot leave the deployment
+            # permanently described as "starting" -- the marker's own expiry
+            # would cover it eventually, but only after the whole budget.
+            _db = SessionLocal()
+            try:
+                clear_worker_starting(_db)
+            finally:
+                _db.close()
 
     if args.once:
         print(run_cycle(args.interval))

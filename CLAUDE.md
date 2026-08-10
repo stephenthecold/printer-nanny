@@ -130,6 +130,24 @@ enforced; none of them is optional.
     printed "Migrations … ran on container start" having checked nothing.
     Exit codes are 0 clean / 1 drifted / **2 could not check**, and 2 is not
     success — an unreachable database is not a migrated one.
+    Two corrections from a real install, 2026-08-10, where `app_assets` had gone
+    missing from a database **already stamped at head**. **Waiting only helps
+    while somebody is still migrating**, so `migrations_are_pending()` compares
+    the stamp against the script head and the wait gives up at once when they
+    match — 300s spent on drift fixes nothing, and this is the one legitimate
+    read of `alembic_version` here: it answers *is anybody still migrating*, not
+    *does the schema have what we need*, which remains the columns' question
+    alone. Reading the head **executes** every revision and 0001 imports
+    `migrations.guard`, so it puts the repo root on `sys.path` itself rather
+    than inheriting it from WORKDIR — that accident held in the container and
+    nowhere else. And **a worker that is waiting is not a worker that is
+    wedged**: it writes no liveness stamp while it waits, so a wait longer than
+    `health.stale_after_seconds` (180s at the default cadence, against a 300s
+    budget) made the dashboard report all fifteen jobs stalled on every restart.
+    It now declares itself through `health.WORKER_STARTING_JOB` and reads as
+    `starting`, which the banner, `/readyz` and the container probe all honour —
+    bounded by the marker's own deadline, because a `starting` that never
+    expires would hide a dead worker behind a reassuring word.
   - `dashboard/` — HTMX/Jinja:
     - `routes.py` — overview / client / printer drill-downs, approvals, alerts,
       account, **fleet-wide printer search**, security posture, reorder,
