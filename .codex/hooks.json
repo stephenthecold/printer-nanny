@@ -1,0 +1,26 @@
+{
+  "hooks": {
+    "SessionStart": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bash ./scripts/patch-launcher-hook.sh",
+            "timeout": 15
+          }
+        ]
+      }
+    ],
+    "Stop": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bash ./scripts/stop-hook-git-check.sh",
+            "timeout": 30
+          }
+        ]
+      }
+    ]
+  }
+}
