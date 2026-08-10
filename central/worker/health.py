@@ -28,7 +28,7 @@ import sys
 from typing import Optional
 
 from central.db import SessionLocal
-from central.health import STATE_OK, database_ok, worker_health
+from central.health import STATE_OK, STATE_STARTING, database_ok, worker_health
 
 
 def main(argv: Optional[list] = None) -> int:
@@ -41,6 +41,18 @@ def main(argv: Optional[list] = None) -> int:
         state = health["state"]
         if state == STATE_OK:
             print("healthy: {} job(s) fresh".format(len(health["jobs"])))
+            return 0
+        # A worker that has declared itself still in its pre-first-cycle schema
+        # wait is doing exactly what it should, so this is healthy rather than a
+        # grudging pass. It cannot be claimed indefinitely -- worker_health only
+        # honours the marker inside its stated budget -- so a worker that dies
+        # waiting still fails this probe, just at the deadline instead of
+        # immediately. Without this the compose start_period is the only thing
+        # standing between a slow migration and an unhealthy container, which
+        # makes a correct wait look like a fault the moment it outlasts a number
+        # in a YAML file.
+        if state == STATE_STARTING:
+            print("healthy: worker is starting (waiting for the database schema)")
             return 0
         # "unknown" means the table isn't there yet (stack mid-migration). The
         # worker genuinely has nowhere to stamp, so it can't be called healthy,

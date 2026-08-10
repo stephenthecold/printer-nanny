@@ -17,6 +17,7 @@ being built. Only the columns can be asked.
 from __future__ import annotations
 
 import logging
+import time
 
 import pytest
 from sqlalchemy import text
@@ -38,6 +39,14 @@ def _rebuild_schema_after_ddl():
     through it.
     """
     yield
+    # alembic_version is NOT in Base.metadata, so drop_all leaves it exactly
+    # where it was -- including whatever revision a test stamped into it. That
+    # leaks: a test that stamps head makes every later test look like a database
+    # with nothing left to migrate, which is now a load-bearing distinction
+    # (schema_check.migrations_are_pending). Same trap as the dropped columns
+    # above, one table over.
+    with engine.begin() as conn:
+        conn.execute(text("DROP TABLE IF EXISTS alembic_version"))
     Base.metadata.drop_all(bind=engine)
     Base.metadata.create_all(bind=engine)
 
@@ -220,3 +229,105 @@ def test_the_reporting_names_which_process_saw_it(db, caplog, where):
             timeout=0.2, interval=0.05, bind=db.get_bind(), where=where
         )
     assert any(where in r.getMessage() for r in caplog.records)
+
+
+# --------------------------------------------------------------------------- #
+# Waiting only helps while somebody is still migrating
+#
+# 2026-08-10, a real install: `app_assets` had gone missing from a database
+# already stamped at head, so every worker restart spent the whole 300s budget
+# waiting for a table no migration was going to create -- and, because the
+# worker writes no liveness stamp while it waits, the dashboard announced a
+# stalled worker with all fifteen jobs down for the duration. Once per restart,
+# for a single dropped table.
+# --------------------------------------------------------------------------- #
+def _stamp_alembic(db, revision: str) -> None:
+    db.execute(
+        text("CREATE TABLE IF NOT EXISTS alembic_version (version_num VARCHAR(32) NOT NULL)")
+    )
+    db.execute(text("DELETE FROM alembic_version"))
+    db.execute(text("INSERT INTO alembic_version (version_num) VALUES (:v)"), {"v": revision})
+    db.commit()
+
+
+def test_the_head_revision_is_readable_without_the_repo_root_on_syspath(monkeypatch):
+    """Reading the head EXECUTES every revision, and 0001 imports
+    ``migrations.guard`` -- so this fails with ModuleNotFoundError unless the
+    repo root is importable. In the container it is, by accident of WORKDIR and
+    ``python -m``; relying on that accident is how it degrades silently the
+    first time anything runs from another directory. Which is exactly what the
+    end-to-end smoke did, and how this was caught."""
+    import sys
+
+    root = str(schema_check.Path(schema_check.__file__).resolve().parent.parent)
+    monkeypatch.setattr(sys, "path", [p for p in sys.path if p not in ("", ".", root)])
+    assert schema_check._head_revision(), "head must be readable on its own"
+
+
+def test_a_database_at_head_has_nothing_pending(db):
+    head = schema_check._head_revision()
+    assert head, "the migration tree must declare exactly one head"
+    _stamp_alembic(db, head)
+    assert schema_check.migrations_are_pending(db.get_bind()) is False
+
+
+def test_a_database_behind_head_has_work_pending(db):
+    _stamp_alembic(db, "0006_subnet_discovery_status")
+    assert schema_check.migrations_are_pending(db.get_bind()) is True
+
+
+def test_a_database_that_never_migrated_has_everything_pending(db):
+    db.execute(text("DROP TABLE IF EXISTS alembic_version"))
+    db.commit()
+    assert schema_check.migrations_are_pending(db.get_bind()) is True
+
+
+def test_drift_at_head_stops_waiting_immediately(db, caplog):
+    """The production case. Stamped at head, an object missing: waiting cannot
+    fix that, so the budget must not be spent on it."""
+    head = schema_check._head_revision()
+    _stamp_alembic(db, head)
+    _drop_table(db, "app_assets")
+
+    with caplog.at_level(logging.ERROR):
+        drift = schema_check.wait_for_schema(
+            timeout=30, interval=1.0, bind=db.get_bind(), where="worker"
+        )
+
+    assert drift is not None and not drift.ok
+    assert "app_assets" in drift.missing_tables
+    # The whole point: it returned rather than waiting out 30s. Asserted on the
+    # message rather than on elapsed time, which would be a flaky clock test.
+    assert "waiting cannot help" in caplog.text
+    assert "already at head" in caplog.text
+
+
+def test_drift_while_migrations_are_pending_still_waits(db):
+    """Guard on the ORIGINAL fix. The 2026-08-05 race is a schema that is
+    incomplete *because a migration is running*, and that must still be waited
+    out -- an early give-up here would silently undo the reason this module
+    exists."""
+    _stamp_alembic(db, "0006_subnet_discovery_status")
+    _drop_table(db, "app_assets")
+
+    started = time.monotonic()
+    drift = schema_check.wait_for_schema(
+        timeout=2, interval=0.5, bind=db.get_bind(), where="worker"
+    )
+    waited = time.monotonic() - started
+
+    assert drift is not None and not drift.ok
+    assert waited >= 1.5, "gave up early on a database that is genuinely mid-migration"
+
+
+def test_an_unreadable_head_keeps_waiting(db, monkeypatch):
+    """None means "cannot tell", and cannot-tell must not trigger the new
+    early exit -- giving up is the new behaviour, so an unreadable revision
+    tree must fall back to the old one rather than inherit it."""
+    monkeypatch.setattr(schema_check, "_head_revision", lambda: None)
+    assert schema_check.migrations_are_pending(db.get_bind()) is None
+
+    _drop_table(db, "app_assets")
+    started = time.monotonic()
+    schema_check.wait_for_schema(timeout=2, interval=0.5, bind=db.get_bind(), where="worker")
+    assert time.monotonic() - started >= 1.5

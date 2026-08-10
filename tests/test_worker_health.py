@@ -438,3 +438,108 @@ def test_worker_banner_is_none_when_healthy_and_never_raises(db):
             raise RuntimeError("db gone")
 
     assert health.worker_banner(_Broken(), None) is None
+
+
+# --------------------------------------------------------------------------- #
+# "Starting" is not "stalled"
+#
+# 2026-08-10, a real install: one table had gone missing from a database already
+# stamped at head, so the worker spent its full 300s schema wait on every
+# restart. It writes no liveness stamp while it waits, the staleness threshold
+# at the default cadence is 180s, and the previous worker's stamps were still in
+# the table -- so the dashboard reported a stalled worker with all fifteen jobs
+# down, once per restart, about a worker that was doing exactly what it should.
+# --------------------------------------------------------------------------- #
+def _stale_stamp(db, job="evaluate_alerts", age=4000, interval=60):
+    """An upgrade restart: a previous worker's stamps, nothing refreshing them."""
+    db.query(m.WorkerJobRun).delete()
+    db.add(
+        m.WorkerJobRun(
+            job=job,
+            last_success_at=_now() - timedelta(seconds=age),
+            expected_interval_seconds=interval,
+        )
+    )
+    db.commit()
+
+
+def test_stale_stamps_without_a_marker_still_read_as_stale(db):
+    """The behaviour being refined, asserted first so the change is visible: with
+    no marker this is exactly as before, and 'starting' cannot be a blanket
+    excuse for a worker that never said it was starting."""
+    _stale_stamp(db)
+    assert health.worker_health(db)["state"] == health.STATE_STALE
+    assert worker_health_cli.main() == 1
+
+
+def test_a_worker_in_its_schema_wait_reads_as_starting(db):
+    _stale_stamp(db)
+    health.mark_worker_starting(db, 300)
+
+    got = health.worker_health(db)
+    assert got["state"] == health.STATE_STARTING
+    assert got["stale_jobs"] == []
+    # The container probe must PASS: a worker inside its stated budget is doing
+    # the right thing, and failing it here leaves compose's start_period as the
+    # only thing between a slow migration and an unhealthy container.
+    assert worker_health_cli.main() == 0
+
+
+def test_the_banner_does_not_accuse_a_starting_worker(db):
+    _stale_stamp(db)
+    client = _user(db)
+    health.mark_worker_starting(db, 300)
+    assert health.worker_banner(db, db.scalars(select(m.User)).first()) is None
+    # and /readyz must not 503 for it either
+    assert client.get("/readyz").status_code == 200
+    assert client.get("/readyz").json()["checks"]["worker"] == health.STATE_STARTING
+
+
+def test_the_marker_never_appears_as_a_job(db):
+    """It is not a job and never runs. Listed to an operator it would read as the
+    one job that never completes -- an invented fault."""
+    _stale_stamp(db)
+    health.mark_worker_starting(db, 300)
+    assert health.worker_health(db)["jobs"] == []
+    health.clear_worker_starting(db)
+    assert health.WORKER_STARTING_JOB not in {
+        j["job"] for j in health.worker_health(db)["jobs"]
+    }
+
+
+def test_an_expired_marker_stops_sheltering_a_dead_worker(db):
+    """The one that matters. A worker that dies mid-wait must go back to being
+    judged on its stamps -- a 'starting' that never ages out would hide a dead
+    worker behind a reassuring word, which is the failure this module exists to
+    prevent."""
+    _stale_stamp(db)
+    health.mark_worker_starting(db, 300)
+    row = db.get(m.WorkerJobRun, health.WORKER_STARTING_JOB)
+    row.last_success_at = _now() - timedelta(
+        seconds=300 + health.WORKER_STARTING_GRACE_SECONDS + 60
+    )
+    db.commit()
+
+    assert health.worker_health(db)["state"] == health.STATE_STALE
+    assert worker_health_cli.main() == 1
+
+
+def test_clearing_the_marker_restores_the_normal_rules(db):
+    _stale_stamp(db)
+    health.mark_worker_starting(db, 300)
+    assert health.worker_health(db)["state"] == health.STATE_STARTING
+    health.clear_worker_starting(db)
+    assert db.get(m.WorkerJobRun, health.WORKER_STARTING_JOB) is None
+    assert health.worker_health(db)["state"] == health.STATE_STALE
+
+
+def test_marking_never_raises_when_the_table_is_missing(db):
+    """Called on the startup path, before the schema is known to exist. A worker
+    that refused to boot because it could not write a *marker* would be strictly
+    worse than the banner it prevents."""
+    m.WorkerJobRun.__table__.drop(bind=db.get_bind())
+    try:
+        health.mark_worker_starting(db, 300)  # must not raise
+        health.clear_worker_starting(db)  # must not raise
+    finally:
+        m.WorkerJobRun.__table__.create(bind=db.get_bind())

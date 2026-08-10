@@ -56,9 +56,10 @@ import argparse
 import logging
 import sys
 import time
+from pathlib import Path
 from typing import List, Optional, Sequence, Tuple
 
-from sqlalchemy import inspect
+from sqlalchemy import inspect, text
 
 from central.db import Base, engine
 
@@ -157,6 +158,89 @@ def check(bind=None) -> Optional[SchemaDrift]:
         return None
 
 
+def _head_revision() -> Optional[str]:
+    """The head revision this build's migration scripts declare, or None.
+
+    Read straight from ``ScriptDirectory`` rather than through
+    ``alembic.config.Config``: that would parse ``alembic.ini`` with
+    ConfigParser, and this repo has already been bitten once by a credential
+    meeting ``BasicInterpolation`` (see migrations/env.py). Nothing here needs
+    the ini file -- only the revision graph on disk.
+    """
+    try:
+        from alembic.script import ScriptDirectory
+
+        root = Path(__file__).resolve().parent.parent
+        # Reading the head means alembic EXECUTES every revision module, and
+        # 0001_baseline does `from migrations.guard import refuse_if_populated`
+        # -- so the repo root has to be importable or the whole read fails with
+        # ModuleNotFoundError. In the container it happens to be (WORKDIR /app,
+        # and `python -m` puts cwd on sys.path), which is exactly the kind of
+        # accident this repo has been bitten by before: it works until something
+        # runs from another directory, and then degrades silently. Put the root
+        # on the path ourselves and take it back off.
+        added = str(root) not in sys.path
+        if added:
+            sys.path.insert(0, str(root))
+        try:
+            heads = ScriptDirectory(str(root / "migrations")).get_heads()
+        finally:
+            if added:
+                try:
+                    sys.path.remove(str(root))
+                except ValueError:  # pragma: no cover - someone else removed it
+                    pass
+        # tests/test_migration_chain.py asserts exactly one head; anything else
+        # is a forked chain, which is not a question this function can answer.
+        return heads[0] if len(heads) == 1 else None
+    except Exception as exc:  # pragma: no cover - needs a broken/absent tree
+        log.debug("could not read the migration head: %s", exc)
+        return None
+
+
+def migrations_are_pending(bind=None) -> Optional[bool]:
+    """Is there migration work still to do? None means "cannot tell".
+
+    **This is the one legitimate use of ``alembic_version`` in this module**,
+    and it does not contradict the docstring above. That paragraph refuses the
+    version as an answer to *does the schema have what we need* -- a question
+    only the columns can answer. This asks a different one: *is anybody still
+    migrating?* -- which is precisely what the version records and the columns
+    cannot say. The verdict on the schema stays with ``inspect_schema``.
+
+    Why it matters: ``wait_for_schema`` cannot otherwise tell a migration that
+    is still running from a schema that is simply wrong, so it spent the full
+    budget on both. Observed in production 2026-08-10 -- ``app_assets`` had gone
+    missing from a database already stamped at head, so every worker restart
+    waited the whole 300s for a table no migration was going to create, and the
+    dashboard called the worker stalled for the duration.
+
+    Returns True when the stamp is behind head or absent (migrations pending or
+    in flight), False when it is exactly at head (they are done -- waiting will
+    not help), and None when that cannot be established. **None and True both
+    keep the caller waiting**, because giving up early is the new behaviour and
+    an unreadable version must not be the thing that triggers it.
+    """
+    head = _head_revision()
+    if head is None:
+        return None
+    try:
+        insp = inspect(bind if bind is not None else engine)
+        if "alembic_version" not in set(insp.get_table_names()):
+            # Never migrated: everything is pending.
+            return True
+        target = bind if bind is not None else engine
+        with target.connect() as conn:
+            stamped = [r[0] for r in conn.execute(text("SELECT version_num FROM alembic_version"))]
+    except Exception as exc:  # pragma: no cover - needs an unreachable database
+        log.debug("could not read alembic_version: %s", exc)
+        return None
+    if len(stamped) != 1:
+        # No rows, or a forked/multi-head stamp. Either way not a clean "done".
+        return True
+    return stamped[0] != head
+
+
 def wait_for_schema(
     timeout: float = DEFAULT_WAIT_SECONDS,
     interval: float = 2.0,
@@ -173,6 +257,15 @@ def wait_for_schema(
     to start is worse than one that runs and logs why its jobs are failing --
     the operator's route to fixing either is the dashboard, which needs the
     stack up.
+
+    **It also stops early when nobody is migrating.** Waiting only makes sense
+    while something is still applying revisions; against a database stamped at
+    head the missing objects are never going to arrive, and the budget is spent
+    for nothing. Worse than nothing, in fact -- the worker writes no liveness
+    stamps while it waits, so a wait longer than ``health.stale_after_seconds``
+    makes the dashboard announce a stalled worker on every restart. That is what
+    a real install did on 2026-08-10, once per restart, for a single dropped
+    table. See ``migrations_are_pending``.
     """
     deadline = time.monotonic() + timeout
     first = True
@@ -181,6 +274,19 @@ def wait_for_schema(
         if drift is not None and drift.ok:
             if not first:
                 log.info("database schema is complete; continuing")
+            return drift
+        if drift is not None and migrations_are_pending(bind) is False:
+            # Stamped at head with objects still missing: this is drift, not a
+            # race, and no amount of waiting fixes drift. Report it now and let
+            # the caller get on with it -- deliberately at the same volume as
+            # the timeout path below, because the operator's next step is
+            # identical and only the reason differs.
+            log.error(
+                "database schema is incomplete in the %s and migrations are "
+                "already at head, so waiting cannot help (%s). Running anyway; "
+                "jobs touching these will fail. %s",
+                where, drift.summary(), drift.describe(),
+            )
             return drift
         remaining = deadline - time.monotonic()
         if remaining <= 0:
