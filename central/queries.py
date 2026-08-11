@@ -672,6 +672,14 @@ def printer_issue_queue(db: Session, limit: int = 12) -> dict:
             issue_count = len(alerts)
             hidden_count = max(0, len(alerts) - 1)
             blocking = blocking or primary.type == m.AlertConditionType.printer_offline
+            # A technician choosing "Printing stopped" creates a critical
+            # manual issue before the next device poll can confirm a status
+            # change. Treat that explicit observation as operational truth so
+            # it is not demoted to "Needs attention" on the overview.
+            blocking = blocking or (
+                primary.type == m.AlertConditionType.manual_issue
+                and primary.severity == m.EventSeverity.critical
+            )
         else:
             continue
 

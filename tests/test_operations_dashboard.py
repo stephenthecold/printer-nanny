@@ -228,6 +228,31 @@ def test_printer_issue_queue_groups_and_orders_by_impact(db):
     assert shipping["more_count"] == 1
 
 
+def test_manual_printing_stopped_issue_is_immediately_blocking(db):
+    client, site = _client_site(db)
+    printer = _printer(
+        db,
+        client,
+        site,
+        "10.0.0.40",
+        status=m.PrinterStatus.ok,
+        display_name="Records",
+    )
+    _alert(
+        db,
+        printer,
+        "Printer will not print",
+        severity=m.EventSeverity.critical,
+        condition=m.AlertConditionType.manual_issue,
+    )
+    db.commit()
+
+    row = queries.printer_issue_queue(db)["rows"][0]
+    assert row["blocking"] is True
+    assert row["impact_label"] == "Printing stopped"
+    assert row["title"] == "Printer will not print"
+
+
 def test_dashboard_renders_three_priorities_and_escapes_device_text(db):
     now = datetime.now(timezone.utc)
     client, site = _client_site(db, client_name="LCR", site_name="Downtown")
