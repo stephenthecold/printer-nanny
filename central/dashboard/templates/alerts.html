@@ -17,7 +17,8 @@
       {% call select_field('printer_id', 'Printer and location', required=True, extra_cls='js-issue-printer') %}
         <option value="">Choose a printer</option>
         {% for printer in printers %}
-        <option value="{{ printer.id }}" data-timezone="{{ printer.client.timezone or issue_default_timezone }}">{{ printer.client.name }} · {{ printer.site.name }} · {{ printer.display_name or printer.model or printer.ip }}</option>
+        {% set issue_printer_name = printer.display_name or printer.model or printer.hostname or printer.ip %}
+        <option value="{{ printer.id }}" data-timezone="{{ printer.client.timezone or issue_default_timezone }}">{{ printer.client.name }} · {{ printer.site.name }} · {{ issue_printer_name }}{% if issue_printer_name != printer.ip %} · {{ printer.ip }}{% endif %}{% if printer.location %} · {{ printer.location }}{% endif %}</option>
         {% endfor %}
       {% endcall %}
       {% call select_field('impact', 'Impact on printing', required=True) %}

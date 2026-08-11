@@ -30,6 +30,7 @@ def _fleet(db):
         ip="10.0.0.20",
         model="HP LaserJet M611dn",
         display_name="Reception",
+        location="Front desk alcove",
         discovery_state=m.DiscoveryState.approved,
     )
     db.add(printer)
@@ -113,7 +114,7 @@ def test_critical_manual_issue_immediately_notifies_email_and_freescout(
         assert note.severity == "critical"
         assert note.printer_label == "HP LaserJet M611dn @ 10.0.0.20"
         assert "Occurred:" in note.body
-        assert note.site_name == "Downtown"
+        assert note.site_name == "Downtown · Front desk alcove"
     deliveries = list(db.scalars(select(m.NotificationDelivery)))
     assert len(deliveries) == 2
     assert {delivery.status for delivery in deliveries} == {m.DeliveryStatus.delivered}
@@ -187,6 +188,7 @@ def test_manual_issue_is_not_auto_resolved_and_dashboard_copy_is_escaped(db):
     assert "&lt;script&gt;alert(1)&lt;/script&gt;" in body
     assert "Report a printer issue" in body
     assert 'data-timezone="UTC"' in body
+    assert "Reception · 10.0.0.20 · Front desk alcove" in body
     assert "data-issue-time" in body
 
 

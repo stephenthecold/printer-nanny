@@ -23,24 +23,24 @@
 
 {# These are navigation summaries, not a second dashboard. Each count takes the
    operator directly to the queue it describes, in the agreed priority order. #}
-<div class="grid sm:grid-cols-3 gap-3 mb-6" aria-label="Current priorities">
-  <a href="#system-health" class="{{ card_cls('md', 'block hover:ring-2 hover:ring-sky-300 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-sky-500') }}">
+<div class="grid grid-cols-3 gap-2 sm:gap-3 mb-6" aria-label="Current priorities">
+  <a href="#system-health" class="{{ card_cls('sm', 'block hover:ring-2 hover:ring-sky-300 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-sky-500') }}">
     <div class="flex items-baseline gap-1">
-      <span class="text-3xl font-semibold tabular-nums {{ 'text-slate-500' if not subnet_health.total else ('text-green-700' if subnet_health.verified == subnet_health.total and not subnet_health.agent_attention else 'text-red-700') }}">{{ subnet_health.verified }}</span>
-      <span class="text-sm text-slate-500">of {{ subnet_health.total }}</span>
+      <span class="text-xl sm:text-3xl font-semibold tabular-nums {{ 'text-slate-500' if not subnet_health.total else ('text-green-700' if subnet_health.verified == subnet_health.total and not subnet_health.agent_attention else 'text-red-700') }}">{{ subnet_health.verified }}</span>
+      <span class="text-xs sm:text-sm text-slate-500">of {{ subnet_health.total }}</span>
     </div>
-    <div class="text-sm font-medium mt-1">Subnets verified</div>
-    <div class="text-xs text-slate-500 mt-0.5">{% if subnet_health.agent_attention %}{{ subnet_health.agent_attention }} additional agent{{ 's' if subnet_health.agent_attention != 1 }} need attention{% else %}Agent plus a successful printer reply{% endif %}</div>
+    <div class="text-xs sm:text-sm font-medium mt-1 leading-tight">Subnets verified</div>
+    <div class="hidden sm:block text-xs text-slate-500 mt-0.5">{% if subnet_health.agent_attention %}{{ subnet_health.agent_attention }} additional agent{{ 's' if subnet_health.agent_attention != 1 }} need attention{% else %}Agent plus a successful printer reply{% endif %}</div>
   </a>
-  <a href="#printer-issues" class="{{ card_cls('md', 'block hover:ring-2 hover:ring-sky-300 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-sky-500') }}">
-    <div class="text-3xl font-semibold tabular-nums {{ 'text-red-700' if issue_queue.total else 'text-green-700' }}">{{ issue_queue.total }}</div>
-    <div class="text-sm font-medium mt-1">Printers needing attention</div>
-    <div class="text-xs text-slate-500 mt-0.5">Printing-stopped devices appear first</div>
+  <a href="#printer-issues" class="{{ card_cls('sm', 'block hover:ring-2 hover:ring-sky-300 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-sky-500') }}">
+    <div class="text-xl sm:text-3xl font-semibold tabular-nums {{ 'text-red-700' if issue_queue.total else 'text-green-700' }}">{{ issue_queue.total }}</div>
+    <div class="text-xs sm:text-sm font-medium mt-1 leading-tight">Printers needing attention</div>
+    <div class="hidden sm:block text-xs text-slate-500 mt-0.5">Printing-stopped devices appear first</div>
   </a>
-  <a href="#low-supplies" class="{{ card_cls('md', 'block hover:ring-2 hover:ring-sky-300 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-sky-500') }}">
-    <div class="text-3xl font-semibold tabular-nums {{ 'text-amber-700' if supply_total else 'text-green-700' }}">{{ supply_total }}</div>
-    <div class="text-sm font-medium mt-1">Supplies in the order window</div>
-    <div class="text-xs text-slate-500 mt-0.5">Soonest estimated depletion first</div>
+  <a href="#low-supplies" class="{{ card_cls('sm', 'block hover:ring-2 hover:ring-sky-300 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-sky-500') }}">
+    <div class="text-xl sm:text-3xl font-semibold tabular-nums {{ 'text-amber-700' if supply_total else 'text-green-700' }}">{{ supply_total }}</div>
+    <div class="text-xs sm:text-sm font-medium mt-1 leading-tight">Supplies in the order window</div>
+    <div class="hidden sm:block text-xs text-slate-500 mt-0.5">Soonest estimated depletion first</div>
   </a>
 </div>
 

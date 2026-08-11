@@ -87,6 +87,9 @@ def create_issue(
 
     client = db.get(m.Client, printer.client_id)
     site = db.get(m.Site, printer.site_id)
+    site_label = site.name if site else None
+    if site_label and printer.location:
+        site_label = f"{site_label} · {one_line(printer.location, 160)}"
     happened = occurred_at.astimezone(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
     body = f"Issue: {issue_detail or issue_title}\nOccurred: {happened}"
     note = Notification(
@@ -94,7 +97,7 @@ def create_issue(
         body=body,
         severity=severity.value,
         client_name=client.name if client else None,
-        site_name=site.name if site else None,
+        site_name=site_label,
         printer_label=(
             f"{one_line(printer.model or 'Unknown model', 160)} @ {printer.ip}"
         ),

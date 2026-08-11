@@ -270,6 +270,13 @@ def test_detail_and_preview_routes_keep_a_current_parent(http, db):
     assert portal_preview.aria_current == ["/manage"]
 
 
+def test_supply_compatibility_uses_supplies_mobile_context(http):
+    html = http.get("/manage/supply-compatibility").text
+    parsed = _parse(html)
+    assert parsed.aria_current == ["/supplies/reorder"]
+    assert '<span class="ml-auto mr-20 text-xs text-slate-200 truncate max-w-24">Supplies</span>' in html
+
+
 def test_mobile_drawer_has_keyboard_and_background_guards(http):
     html = http.get("/").text
     assert 'aria-controls="primary-navigation"' in html

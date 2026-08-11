@@ -73,7 +73,7 @@ log = logging.getLogger("central.main")
 # cookie" is the trigger rather than a path allowlist.
 app = FastAPI(
     title="Printer Nanny",
-    version="1.10.1",
+    version="1.10.2",
     dependencies=[Depends(csrf_protect)],
     # /docs, /redoc and /openapi.json are FastAPI defaults and were UNAUTHENTICATED
     # -- 198 KB of schema describing every SCIM, agent-ingest, workstation-enroll
