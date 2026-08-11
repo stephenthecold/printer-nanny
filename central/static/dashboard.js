@@ -186,8 +186,46 @@
     sync();
   }
 
+  /* Fill manual issue time in the selected client's timezone. Docker normally
+   * runs in UTC and the technician's browser may not share the client's zone;
+   * using either clock silently records the wrong occurrence time. */
+  function initIssueTime() {
+    var printer = document.querySelector(".js-issue-printer");
+    var input = document.querySelector("[data-issue-time]");
+    if (!printer || !input) return;
+
+    function two(value) { return String(value).padStart(2, "0"); }
+    function nowIn(zone) {
+      try {
+        var parts = new Intl.DateTimeFormat("en-CA", {
+          timeZone: zone || "UTC", year: "numeric", month: "2-digit",
+          day: "2-digit", hour: "2-digit", minute: "2-digit", hourCycle: "h23"
+        }).formatToParts(new Date());
+        var values = {};
+        for (var i = 0; i < parts.length; i++) values[parts[i].type] = parts[i].value;
+        return values.year + "-" + values.month + "-" + values.day + "T" +
+          values.hour + ":" + values.minute;
+      } catch (_error) {
+        var local = new Date();
+        return local.getFullYear() + "-" + two(local.getMonth() + 1) + "-" +
+          two(local.getDate()) + "T" + two(local.getHours()) + ":" +
+          two(local.getMinutes());
+      }
+    }
+    function fill() {
+      if (input.dataset.autoValue !== "true") return;
+      var option = printer.options[printer.selectedIndex];
+      if (!option || !option.dataset.timezone) return;
+      input.value = nowIn(option.dataset.timezone);
+    }
+    input.addEventListener("input", function () { input.dataset.autoValue = "false"; });
+    printer.addEventListener("change", fill);
+    fill();
+  }
+
   refresh();
   initNavigation();
+  initIssueTime();
   setInterval(tick, TICK_MS);
   /* htmx events bubble, so one listener on the document covers the strip being
    * replaced by its own poll and by the "Check now" button alike. */

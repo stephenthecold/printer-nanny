@@ -1,9 +1,41 @@
 {% extends "base.html" %}
-{% from "_components.html" import badge, btn, card_cls, empty_row, note, page_title,
-        table_cls, table_wrap, td_cls, th_cls, thead_cls %}
+{% from "_components.html" import badge, btn, card_cls, empty_row, field, note,
+        page_title, select_field, table_cls, table_wrap, td_cls, textarea_field,
+        th_cls, thead_cls %}
 {% block title %}Issues · Printer Nanny{% endblock %}
 {% block body %}
 {{ page_title('Issues') }}
+
+{% if issues_flash %}<div class="{{ note('info', 'mb-4') }}" role="status">{{ issues_flash }}</div>{% endif %}
+
+<details class="{{ card_cls('md', 'mb-4') }}">
+  <summary class="cursor-pointer rounded font-semibold focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-sky-500">Report a printer issue</summary>
+  <p class="text-xs text-slate-500 mt-2">Printing-stopped issues are critical and immediately create an urgent-tagged FreeScout ticket when configured. Enabled technician email and other channels are notified at the same time.</p>
+  <form method="post" action="/alerts/manual" class="mt-4 space-y-3">
+    {{ csrf_field() }}
+    <div class="grid md:grid-cols-2 gap-3">
+      {% call select_field('printer_id', 'Printer and location', required=True, extra_cls='js-issue-printer') %}
+        <option value="">Choose a printer</option>
+        {% for printer in printers %}
+        <option value="{{ printer.id }}" data-timezone="{{ printer.client.timezone or issue_default_timezone }}">{{ printer.client.name }} · {{ printer.site.name }} · {{ printer.display_name or printer.model or printer.ip }}</option>
+        {% endfor %}
+      {% endcall %}
+      {% call select_field('impact', 'Impact on printing', required=True) %}
+        <option value="stopped">Printing stopped — critical</option>
+        <option value="degraded">Printing degraded — warning</option>
+        <option value="information">Information only</option>
+      {% endcall %}
+      {{ field('title', 'Issue', required=True, placeholder='Paper jam will not clear') }}
+      <label class="block">
+        <span class="text-xs text-slate-500">Time it happened (client local time) <span class="text-red-600" aria-hidden="true">*</span></span>
+        <input name="occurred_at" type="datetime-local" required data-issue-time data-auto-value="true" class="w-full border border-slate-300 rounded px-3 py-2 text-sm focus:border-sky-500 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-offset-1 focus-visible:ring-sky-500" />
+        <span class="block text-xs text-slate-400 mt-0.5">Filled with the selected client location's current time; change it if the issue started earlier.</span>
+      </label>
+    </div>
+    {{ textarea_field('detail', 'Details', rows=3, placeholder='What happened, what the display says, and anything already tried') }}
+    <button class="{{ btn('primary') }}">Record and notify</button>
+  </form>
+</details>
 
 {# Undelivered notifications: alerts nobody was told about. `owed` means no
    channel was enabled/routed when the alert fired -- the notification is queued
@@ -48,11 +80,14 @@
       </thead>
       <tbody>
         {% for a in alerts %}
+        {% set printer = alert_printers.get(a.printer_id) %}
         <tr class="border-t align-top" id="alert-{{ a.id }}">
           <td class="{{ td_cls() }}">
             {{ badge(a.severity.value, 'error' if a.severity.value == 'critical' else 'warning') }}
           </td>
           <td class="{{ td_cls() }}"><div class="font-medium">{{ a.title }}</div><div class="text-slate-500 text-xs">{{ a.detail or '' }}</div>
+            {% if printer %}<div class="text-xs mt-1"><a class="text-sky-700 hover:underline" href="/printers/{{ printer.id }}">{{ printer.model or printer.display_name or printer.ip }}</a> · {{ printer.site.name }}</div>{% endif %}
+            {% if a.type.value == 'manual_issue' and a.occurred_at %}<div class="text-xs text-slate-500">Occurred {{ a.occurred_at.strftime('%Y-%m-%d %H:%M UTC') }}</div>{% endif %}
             {% if a.notified_channels %}
             <div class="mt-1 flex flex-wrap gap-1">
               {# Three states, not two. A severity gate or an unconfigured channel
@@ -85,6 +120,7 @@
             {% endif %}
             <button hx-post="/alerts/{{ a.id }}/resolve" hx-target="#alert-{{ a.id }}" hx-swap="outerHTML"
                     class="{{ btn('success', 'sm') }}">Resolve</button>
+            {% if a.type.value == 'manual_issue' and a.external_ref %}<div class="text-[10px] text-slate-500 mt-1">Close FreeScout ticket {{ a.external_ref }} after resolving.</div>{% endif %}
           </td>
         </tr>
         {% else %}

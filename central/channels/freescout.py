@@ -67,6 +67,12 @@ class FreeScoutChannel(NotificationChannel):
             body_lines.append(f"<br>Site: {_esc(note.site_name)}")
         if note.client_name:
             body_lines.append(f"<br>Client: {_esc(note.client_name)}")
+        tags = ["printer-nanny", note.severity]
+        if note.severity == "critical":
+            # FreeScout's documented create-conversation API has no priority
+            # field. An explicit supported tag makes critical tickets routable
+            # by FreeScout workflows without relying on an ignored extension.
+            tags.append("urgent")
         return {
             "type": "email",
             "mailboxId": self._mailbox_id(),
@@ -88,7 +94,7 @@ class FreeScoutChannel(NotificationChannel):
                     "text": "".join(body_lines),
                 }
             ],
-            "tags": ["printer-nanny", note.severity],
+            "tags": tags,
         }
 
     def send(self, note: Notification) -> ChannelResult:

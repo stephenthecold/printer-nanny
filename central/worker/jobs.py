@@ -807,8 +807,10 @@ def _resolve_stale(
     in BOTH open and acknowledged states -- an ack'd alert whose condition clears
     must still auto-resolve, otherwise it's stuck open forever. Maintenance and
     predicted-depletion alerts own their own lifecycle (check_maintenance_due /
-    forecast_supplies) and are skipped; a resolved alert that opened a FreeScout
-    ticket gets it auto-closed.
+    forecast_supplies) and are skipped. Manual issues are human-owned and are
+    skipped too: the operator explicitly asked that Printer Nanny never infer a
+    fix or close its FreeScout ticket. A rule-driven alert that resolves still
+    gets its linked ticket auto-closed.
 
     ``resolved_at`` is stamped from the pass's ``now``, not from a fresh
     wall-clock read. The flap window is measured backwards from ``now`` against
@@ -823,6 +825,7 @@ def _resolve_stale(
         if alert.type in (
             m.AlertConditionType.maintenance_due,
             m.AlertConditionType.predicted_depletion,
+            m.AlertConditionType.manual_issue,
         ):
             continue
         if alert.dedupe_key not in active_keys:

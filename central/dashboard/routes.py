@@ -2,13 +2,13 @@
 
 from __future__ import annotations
 
-from datetime import date, datetime, timezone
+from datetime import date, datetime, timedelta, timezone
 from typing import Optional
 
 from fastapi import APIRouter, Depends, Form, Request
 from fastapi.responses import HTMLResponse, RedirectResponse
 from sqlalchemy import case, func, select
-from sqlalchemy.orm import Session
+from sqlalchemy.orm import Session, joinedload
 
 from central import models as m
 from central import queries
@@ -1353,18 +1353,115 @@ def alerts_inbox(request: Request, db: Session = Depends(get_db)):
             )
         )
     )
+    printers = list(
+        db.scalars(
+            select(m.Printer)
+            .options(joinedload(m.Printer.client), joinedload(m.Printer.site))
+            .where(m.Printer.discovery_state == m.DiscoveryState.approved)
+            .order_by(m.Printer.client_id, m.Printer.site_id, m.Printer.display_name,
+                      m.Printer.model, m.Printer.ip)
+        )
+    )
+    active_printer_ids = {alert.printer_id for alert in rows if alert.printer_id is not None}
+    alert_printers = {printer.id: printer for printer in printers if printer.id in active_printer_ids}
     # Notifications that were owed but never delivered (no channel enabled, or a
     # dead-letter on a still-live alert) are invisible otherwise -- an alert with
     # no badges reads as "not notified yet", not "nobody was told and nobody will
     # be". Surface them at the top of the inbox with the fix.
+    from central.runtime import load_settings
+
+    issue_runtime = load_settings(db)
     return _render(
         request, "alerts.html", db=db, user=user, alerts=rows,
+        printers=printers,
+        alert_printers=alert_printers,
+        issues_flash=request.session.pop("issues_flash", None),
+        issue_default_timezone=(
+            str(issue_runtime.get("alerts.default_timezone") or "UTC")
+        ),
         undelivered=queries.undelivered_notifications(db),
         # An empty alerts inbox is the most reassuring screen in the product and
         # the one most worth qualifying: "no open alerts" over four-hour-old
         # readings means nobody has looked, not that nothing is wrong.
         **_freshness_ctx(request, db, user),
     )
+
+
+@router.post("/alerts/manual")
+def create_manual_issue(
+    request: Request,
+    printer_id: int = Form(...),
+    impact: str = Form(""),
+    title: str = Form(""),
+    detail: str = Form(""),
+    occurred_at: str = Form(""),
+    db: Session = Depends(get_db),
+):
+    from zoneinfo import ZoneInfo
+
+    from central import manual_issues
+    from central.audit import record
+    from central.runtime import load_settings
+    from central.suppression import client_timezone_name
+
+    user = _user(request, db)
+    if user is None:
+        return _login_redirect()
+    if user.role == m.UserRole.client_readonly:
+        return RedirectResponse("/", status_code=303)
+    printer = db.get(m.Printer, printer_id)
+    if printer is None or printer.discovery_state != m.DiscoveryState.approved:
+        request.session["issues_flash"] = "Choose an approved printer."
+        return RedirectResponse("/alerts", status_code=303)
+    clean_title = manual_issues.one_line(title, 300)
+    if not clean_title:
+        request.session["issues_flash"] = "Describe the issue before submitting it."
+        return RedirectResponse("/alerts", status_code=303)
+    if impact not in manual_issues.IMPACT_SEVERITY:
+        request.session["issues_flash"] = "Choose how the issue affects printing."
+        return RedirectResponse("/alerts", status_code=303)
+
+    runtime = load_settings(db)
+    zone_name = client_timezone_name(db, printer, runtime)
+    try:
+        zone = ZoneInfo(zone_name)
+    except Exception:  # noqa: BLE001 - stale timezone degrades to UTC
+        zone = timezone.utc
+    try:
+        local_time = datetime.fromisoformat(occurred_at.strip())
+        happened = local_time.replace(tzinfo=zone).astimezone(timezone.utc)
+    except (TypeError, ValueError):
+        request.session["issues_flash"] = "Enter a valid time for when this happened."
+        return RedirectResponse("/alerts", status_code=303)
+    now = datetime.now(timezone.utc)
+    if happened > now + timedelta(minutes=5):
+        request.session["issues_flash"] = "Issue time cannot be in the future."
+        return RedirectResponse("/alerts", status_code=303)
+
+    alert, created = manual_issues.create_issue(
+        db,
+        printer=printer,
+        impact=impact,
+        title=clean_title,
+        detail=detail,
+        occurred_at=happened,
+        now=now,
+    )
+    record(
+        db,
+        request,
+        user,
+        "manual_issue.create" if created else "manual_issue.duplicate",
+        target=f"alert:{alert.id} printer:{printer.id}",
+        detail=f"impact={impact}; occurred_at={happened.isoformat()}",
+    )
+    db.commit()
+    request.session["issues_flash"] = (
+        "Issue recorded and notifications queued."
+        if created
+        else "That printer already has an issue open for this occurrence time."
+    )
+    return RedirectResponse(f"/alerts#alert-{alert.id}", status_code=303)
 
 
 @router.post("/alerts/{alert_id}/{action}", response_class=HTMLResponse)

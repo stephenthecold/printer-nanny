@@ -197,6 +197,7 @@ class SuppressionAction(str, enum.Enum):
 
 
 class AlertConditionType(str, enum.Enum):
+    manual_issue = "manual_issue"              # staff-reported; never auto-resolved
     supply_below = "supply_below"          # threshold = percent
     error_severity = "error_severity"      # threshold mapped to EventSeverity rank
     offline_minutes = "offline_minutes"    # threshold = minutes an *agent* is offline
@@ -1638,6 +1639,11 @@ class Alert(Base):
     state: Mapped[AlertState] = mapped_column(_enum(AlertState), default=AlertState.open, index=True)
     title: Mapped[str] = mapped_column(String(300))
     detail: Mapped[Optional[str]] = mapped_column(Text, default=None)
+    # When a person observed a manual issue. Separate from created_at, which is
+    # when Printer Nanny recorded it and remains trustworthy for audit/order.
+    occurred_at: Mapped[Optional[datetime]] = mapped_column(
+        DateTime(timezone=True), default=None
+    )
     # De-dupe key so the worker doesn't re-open the same condition every cycle.
     dedupe_key: Mapped[str] = mapped_column(String(200), index=True)
     notified_channels: Mapped[Optional[list]] = mapped_column(JSON, default=None)
