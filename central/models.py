@@ -393,6 +393,7 @@ class Site(Base):
     supply_usages: Mapped[list[SupplyUsage]] = relationship(
         back_populates="site", cascade="all, delete-orphan"
     )
+    shipping_notices: Mapped[list[ShippingNotice]] = relationship(back_populates="site")
 
     __table_args__ = (UniqueConstraint("client_id", "name", name="uq_site_client_name"),)
 
@@ -945,6 +946,9 @@ class SupplyOrder(Base):
     printer: Mapped[Optional[Printer]] = relationship()
     supply: Mapped[Optional[Supply]] = relationship()
     usages: Mapped[list[SupplyUsage]] = relationship(back_populates="supply_order")
+    shipping_notices: Mapped[list[ShippingNotice]] = relationship(
+        back_populates="supply_order"
+    )
 
     __table_args__ = (
         CheckConstraint("quantity > 0", name="ck_supply_orders_quantity_positive"),
@@ -1221,6 +1225,54 @@ class SupplyUsage(Base):
 
     __table_args__ = (
         Index("ix_supply_usages_site_status", "site_id", "status"),
+    )
+
+
+class ShippingNotice(Base):
+    """A privacy-minimized shipping update read from the shared mailbox.
+
+    Raw message bodies are deliberately not retained. Only the fields needed to
+    route a shipment, show its ETA/tracking, and deduplicate Graph messages are
+    stored. Location and order links remain nullable so uncertain matches become
+    explicit Assign/Delete work instead of silently changing the wrong budget.
+    """
+
+    __tablename__ = "shipping_notices"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    source_message_id: Mapped[str] = mapped_column(String(512), unique=True)
+    internet_message_id: Mapped[str] = mapped_column(String(512), default="")
+    mailbox: Mapped[str] = mapped_column(String(320))
+    sender: Mapped[str] = mapped_column(String(320), default="")
+    subject: Mapped[str] = mapped_column(String(500), default="")
+    vendor: Mapped[str] = mapped_column(String(160), default="")
+    item_description: Mapped[str] = mapped_column(String(500), default="")
+    sku: Mapped[str] = mapped_column(String(120), default="")
+    quantity: Mapped[Optional[int]] = mapped_column(Integer, default=None)
+    ship_to: Mapped[str] = mapped_column(String(500), default="")
+    tracking_number: Mapped[str] = mapped_column(String(120), default="")
+    estimated_delivery_at: Mapped[Optional[date]] = mapped_column(Date, default=None)
+    received_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    site_id: Mapped[Optional[int]] = mapped_column(
+        ForeignKey("sites.id", ondelete="SET NULL"), default=None, index=True
+    )
+    supply_order_id: Mapped[Optional[int]] = mapped_column(
+        ForeignKey("supply_orders.id", ondelete="SET NULL"), default=None, index=True
+    )
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+
+    site: Mapped[Optional[Site]] = relationship(back_populates="shipping_notices")
+    supply_order: Mapped[Optional[SupplyOrder]] = relationship(
+        back_populates="shipping_notices"
+    )
+
+    __table_args__ = (
+        CheckConstraint(
+            "quantity IS NULL OR quantity > 0",
+            name="ck_shipping_notices_quantity_positive",
+        ),
+        Index("ix_shipping_notices_order_eta", "supply_order_id", "estimated_delivery_at"),
     )
 
 

@@ -725,6 +725,7 @@ def supplies_reorder(request: Request, db: Session = Depends(get_db)):
     rather than trusted from the query string.
     """
     from central import reorder as reorder_mod
+    from central import shipping_mailbox as shipping_mod
     from central import supply_inventory as inventory_mod
     from central import supply_orders as order_mod
 
@@ -753,6 +754,7 @@ def supplies_reorder(request: Request, db: Session = Depends(get_db)):
     orders = order_mod.active_orders(db, client_id=selected_id)
     stock = inventory_mod.stock_groups(db, client_id=selected_id)
     unresolved = inventory_mod.unresolved_usages(db, client_id=selected_id)
+    shipping_notices = shipping_mod.pending_notices(db, client_id=selected_id)
     by_signature = order_mod.orders_by_signature(orders)
     orders_for_supply = {
         rec.supply_id: by_signature.get(
@@ -771,6 +773,13 @@ def supplies_reorder(request: Request, db: Session = Depends(get_db)):
         clients=clients,
         selected_client_id=selected_id,
         active_orders=orders,
+        pending_shipping_notices=shipping_notices,
+        shipping_options=shipping_mod.assignment_options(
+            db, shipping_notices, client_id=selected_id
+        ),
+        shipping_by_order=shipping_mod.shipping_by_order(
+            db, [order.id for order in orders]
+        ),
         stock=stock,
         stock_compatible_printers=order_mod.compatible_printers(
             db, [item.order for item in stock]
@@ -999,6 +1008,91 @@ def supply_usage_delete(
     return RedirectResponse(
         f"/supplies/reorder?client_id={client_id}", status_code=303
     )
+
+
+@router.post("/supplies/shipping/{notice_id}/assign")
+def shipping_notice_assign(
+    notice_id: int,
+    request: Request,
+    order_id: int = Form(...),
+    db: Session = Depends(get_db),
+):
+    from central import shipping_mailbox
+    from central.audit import record
+
+    user = _user(request, db)
+    if user is None or user.role == m.UserRole.client_readonly:
+        return _login_redirect()
+    notice = db.scalar(
+        select(m.ShippingNotice)
+        .where(m.ShippingNotice.id == notice_id)
+        .with_for_update()
+    )
+    order = db.scalar(
+        select(m.SupplyOrder)
+        .where(m.SupplyOrder.id == order_id)
+        .with_for_update()
+    )
+    if notice is None or order is None:
+        request.session["supply_flash"] = "That shipping assignment is no longer available."
+        return RedirectResponse("/supplies/reorder", status_code=303)
+    if not shipping_mailbox.assign_notice(notice, order):
+        request.session["supply_flash"] = (
+            "That notice is already assigned or the order is no longer active."
+        )
+        return RedirectResponse("/supplies/reorder", status_code=303)
+    record(
+        db,
+        request,
+        user,
+        "shipping_notice.assign",
+        target=f"shipping_notice:{notice.id} supply_order:{order.id} site:{order.site_id}",
+    )
+    client_id = order.site.client_id
+    db.commit()
+    request.session["supply_flash"] = "Shipping update assigned to the order."
+    return RedirectResponse(
+        f"/supplies/reorder?client_id={client_id}", status_code=303
+    )
+
+
+@router.post("/supplies/shipping/{notice_id}/delete")
+def shipping_notice_delete(
+    notice_id: int, request: Request, db: Session = Depends(get_db)
+):
+    from central.audit import record
+
+    user = _user(request, db)
+    if user is None or user.role == m.UserRole.client_readonly:
+        return _login_redirect()
+    notice = db.scalar(
+        select(m.ShippingNotice)
+        .where(m.ShippingNotice.id == notice_id)
+        .with_for_update()
+    )
+    if notice is None:
+        request.session["supply_flash"] = "That shipping notice was already removed."
+        return RedirectResponse("/supplies/reorder", status_code=303)
+    if notice.supply_order_id is not None:
+        request.session["supply_flash"] = (
+            "An assigned shipping notice cannot be deleted from the review queue."
+        )
+        return RedirectResponse("/supplies/reorder", status_code=303)
+    client_id = notice.site.client_id if notice.site is not None else None
+    record(
+        db,
+        request,
+        user,
+        "shipping_notice.delete",
+        target=f"shipping_notice:{notice.id} site:{notice.site_id or 'unmatched'}",
+    )
+    db.delete(notice)
+    db.commit()
+    request.session["supply_flash"] = "Shipping notice removed."
+    target = "/supplies/reorder"
+    if client_id is not None:
+        target = f"{target}?client_id={client_id}"
+    return RedirectResponse(target, status_code=303)
 
 
 # --- Device security posture ------------------------------------------------ #

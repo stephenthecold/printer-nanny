@@ -11,6 +11,58 @@
 
 {% if supply_flash %}<div class="{{ note('info', 'mb-5') }}" role="status">{{ supply_flash }}</div>{% endif %}
 
+{% if pending_shipping_notices %}
+<section class="{{ card_cls('md', 'mb-5') }} border-amber-300" aria-labelledby="shipping-review-title">
+  <div class="flex items-start justify-between gap-3 flex-wrap mb-3">
+    <div>
+      <h2 id="shipping-review-title" class="font-semibold">Shipping updates need review</h2>
+      <p class="text-xs text-slate-500 mt-1">The shared mailbox found a shipment but could not safely connect it to one active order.</p>
+    </div>
+    {{ badge(pending_shipping_notices|length ~ ' to review', 'warning') }}
+  </div>
+  <div class="space-y-2">
+    {% for notice in pending_shipping_notices %}
+    {% set options = shipping_options.get(notice.id, []) %}
+    <article class="rounded border border-amber-200 bg-amber-50 px-3 py-3 flex items-start justify-between gap-3 flex-wrap">
+      <div class="min-w-0">
+        <div class="text-sm font-medium">{{ notice.item_description or notice.subject or 'Shipping update' }}</div>
+        <div class="text-xs text-slate-600 mt-0.5">
+          {{ notice.vendor or notice.sender or 'Unknown sender' }}
+          {% if notice.sku %} · SKU {{ notice.sku }}{% endif %}
+          {% if notice.quantity %} · quantity {{ notice.quantity }}{% endif %}
+        </div>
+        <div class="text-xs text-slate-600 mt-0.5">
+          Destination: {% if notice.site %}{{ notice.site.client.name }} · {{ notice.site.name }}{% else %}{{ notice.ship_to or 'not recognized' }}{% endif %}
+          {% if notice.estimated_delivery_at %} · estimated {{ notice.estimated_delivery_at.strftime('%b %d, %Y') }}{% endif %}
+          {% if notice.tracking_number %} · tracking {{ notice.tracking_number }}{% endif %}
+        </div>
+        {% if not options %}<p class="text-xs text-amber-800 mt-1">No active order is available to assign. Record the order below, then return to this update.</p>{% endif %}
+      </div>
+      <div class="flex items-end gap-2 flex-wrap">
+        {% if options %}
+        <form method="post" action="/supplies/shipping/{{ notice.id }}/assign" class="flex items-end gap-2 flex-wrap">
+          {{ csrf_field() }}
+          <label class="block text-xs">Active order
+            <select name="order_id" class="{{ input_sm_cls('block mt-1 max-w-72') }}" required>
+              {% for order in options %}
+              <option value="{{ order.id }}">{{ order.site.client.name }} · {{ order.site.name }} · {{ order.quantity }}× {{ order.description or order.supply_type }}</option>
+              {% endfor %}
+            </select>
+          </label>
+          <button class="{{ btn('primary', 'sm') }}">Assign</button>
+        </form>
+        {% endif %}
+        <form method="post" action="/supplies/shipping/{{ notice.id }}/delete" onsubmit="return confirm('Remove this shipping notice?')">
+          {{ csrf_field() }}
+          <button class="{{ btn('danger', 'sm') }}">Delete</button>
+        </form>
+      </div>
+    </article>
+    {% endfor %}
+  </div>
+</section>
+{% endif %}
+
 {% if unresolved_usages %}
 <section class="{{ card_cls('md', 'mb-5') }} border-amber-300" aria-labelledby="unmatched-usage-title">
   <div class="flex items-start justify-between gap-3 flex-wrap mb-3">
@@ -119,6 +171,11 @@
           {{ order.manufacturer or 'Manufacturer not recorded' }}{% if order.sku %} · SKU {{ order.sku }}{% endif %} · {{ order.vendor }}
           {% if order.estimated_delivery_at %} · estimated {{ order.estimated_delivery_at.strftime('%b %d, %Y') }}{% endif %}
         </div>
+        {% for shipment in shipping_by_order.get(order.id, []) %}
+        <div class="text-xs text-emerald-800 mt-1">
+          Mailbox update{% if shipment.tracking_number %} · tracking {{ shipment.tracking_number }}{% endif %}{% if shipment.estimated_delivery_at %} · estimated {{ shipment.estimated_delivery_at.strftime('%b %d, %Y') }}{% endif %}
+        </div>
+        {% endfor %}
         {% set matches = compatible_printers.get(order.id, []) %}
         <div class="text-xs text-sky-800 mt-1">
           Compatible here: {% if matches %}{% for printer in matches %}{{ printer.display_name or printer.model or printer.ip }}{{ ', ' if not loop.last }}{% endfor %}{% else %}no currently approved matching printer{% endif %}

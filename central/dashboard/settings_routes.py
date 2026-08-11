@@ -95,6 +95,19 @@ def settings_page(
          "smtp_oauth_error": smtp_oauth_error or None,
          "smtp_auth_type": str(values.get("smtp.auth_type") or "basic"),
          "smtp_has_refresh_token": bool(values.get("smtp.oauth_refresh_token")),
+         "shipping_enabled": bool(values.get("shipping.enabled")),
+         "shipping_ready": bool(values.get("shipping.enabled")) and all(
+             str(values.get(key) or "").strip()
+             for key in (
+                 "shipping.tenant_id",
+                 "shipping.client_id",
+                 "shipping.client_secret",
+                 "shipping.mailbox",
+             )
+         ),
+         "shipping_sender_restricted": bool(
+             str(values.get("shipping.allowed_senders") or "").strip()
+         ),
          "smtp_oauth_redirect_uri": str(request.base_url).rstrip("/") + CALLBACK_PATH},
     )
 

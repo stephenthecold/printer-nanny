@@ -66,6 +66,26 @@
 </section>
 {% endif %}
 
+{% if active_group == 'procurement' %}
+<section class="{{ card_cls('md', 'max-w-3xl mb-6') }}" aria-labelledby="shipping-setup-title">
+  <div class="flex items-start justify-between gap-3 flex-wrap">
+    <div>
+      <h2 id="shipping-setup-title" class="font-semibold">Microsoft 365 shipping mailbox</h2>
+      <p class="text-sm text-slate-500 mt-1">Printer Nanny reads a dedicated shared mailbox every 30 minutes and keeps only shipment fields—not message bodies.</p>
+    </div>
+    {% if shipping_ready %}<span class="text-xs font-medium text-emerald-700 bg-emerald-50 rounded px-2 py-1">Ready</span>{% elif shipping_enabled %}<span class="text-xs font-medium text-amber-800 bg-amber-50 rounded px-2 py-1">Setup incomplete</span>{% else %}<span class="text-xs font-medium text-slate-600 bg-slate-100 rounded px-2 py-1">Off</span>{% endif %}
+  </div>
+  <ol class="list-decimal ml-5 mt-3 space-y-1 text-sm text-slate-600">
+    <li>Create an Entra app and grant <code>Mail.Read</code> application permission with admin consent.</li>
+    <li>In Exchange Online, restrict that app to this shipping-only shared mailbox.</li>
+    <li>Enter the tenant, app, secret, and mailbox below; then enable and save.</li>
+  </ol>
+  {% if shipping_enabled and not shipping_sender_restricted %}
+  <p class="text-xs text-amber-800 mt-3">No sender domains are restricted. Use this only when the mailbox receives shipping notifications and nothing else.</p>
+  {% endif %}
+</section>
+{% endif %}
+
 <form method="post" action="/settings" class="space-y-6 max-w-3xl">
   {{ csrf_field() }}
   <input type="hidden" name="_group" value="{{ active_group }}" />

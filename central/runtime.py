@@ -80,6 +80,32 @@ SPECS: List[Spec] = [
     Spec("smtp.oauth_access_token", "secret", "Email (SMTP)", "OAuth access token (cached)", ""),
     Spec("smtp.oauth_access_token_expires_at", "int", "Email (SMTP)",
          "OAuth access token expiry (unix ts)", 0),
+    # Unattended Microsoft Graph reader for a dedicated shipping-only shared
+    # mailbox. Client credentials are intentional: a worker cannot depend on a
+    # technician's delegated login staying alive. Limit the app to this mailbox
+    # in Exchange Online in addition to granting Mail.Read application access.
+    Spec("shipping.enabled", "bool", "Shipping mailbox (O365)",
+         "Read shipping notices from Microsoft 365", False),
+    Spec("shipping.tenant_id", "str", "Shipping mailbox (O365)",
+         "Entra tenant ID", ""),
+    Spec("shipping.client_id", "str", "Shipping mailbox (O365)",
+         "Entra application (client) ID", ""),
+    Spec("shipping.client_secret", "secret", "Shipping mailbox (O365)",
+         "Entra client secret", "",
+         "Encrypted at rest and never rendered back into this page."),
+    Spec("shipping.mailbox", "str", "Shipping mailbox (O365)",
+         "Dedicated shared mailbox address", "",
+         "Grant the app Mail.Read application permission, admin consent, and scope "
+         "its Exchange access to this shipping-only mailbox."),
+    Spec("shipping.allowed_senders", "str", "Shipping mailbox (O365)",
+         "Allowed sender domains", "",
+         "Optional comma-separated domains. Leave blank only when this mailbox "
+         "receives shipping notifications and nothing else."),
+    Spec("shipping.poll_interval_min", "int", "Shipping mailbox (O365)",
+         "Check mailbox every (minutes)", 30),
+    Spec("shipping.initial_lookback_days", "int", "Shipping mailbox (O365)",
+         "First check looks back (days)", 14,
+         "Limits the first connection so old mailbox history is not imported."),
     # Microsoft Teams
     Spec("teams.enabled", "bool", "Microsoft Teams", "Post to a Teams channel on alerts", False),
     Spec("teams.webhook_url", "secret", "Microsoft Teams", "Incoming webhook URL", "",
@@ -615,6 +641,7 @@ SETTINGS_GROUPS: "Dict[str, tuple]" = {
         ["Email (SMTP)", "Microsoft Teams", "Slack", "Webhook (generic)", "FreeScout",
          "Event bus"],
     ),
+    "procurement": ("Supply workflow", ["Shipping mailbox (O365)"]),
     "alerts": ("Alerts & Reports",
                ["Alerts", "Supplies (reorder)", "Supplies (yield)", "Reports",
                 "ESG / Sustainability"]),

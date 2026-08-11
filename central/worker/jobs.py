@@ -1942,6 +1942,18 @@ def _publish_yield_events(
     return {"published": published, "failed": failed}
 
 
+def sync_shipping_mailbox(db: Session, now: Optional[datetime] = None) -> dict:
+    """Poll O365 and assume linked orders delivered when their ETA arrives."""
+    from central import shipping_mailbox
+
+    now = _aware(now) or _now()
+    result = shipping_mailbox.sync_mailbox(db, now=now)
+    delivered = shipping_mailbox.assume_due_delivered(db, today=now.date())
+    if delivered:
+        result["shipping_assumed_delivered"] = delivered
+    return result
+
+
 def prune_login_attempts(db: Session, now: Optional[datetime] = None) -> dict:
     """Drop failed-sign-in rows that can no longer affect a throttle decision.
 

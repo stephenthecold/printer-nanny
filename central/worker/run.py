@@ -64,6 +64,10 @@ JOBS = (
     # because both walk the same reading history and the forecast is the one an
     # operator is waiting on.
     jobs.scan_supply_cycles,
+    # Interval-gated internally (30 minutes by default). Reads only the
+    # dedicated shipping mailbox, links exact location/SKU matches, and assumes
+    # a linked order delivered when its parsed ETA arrives.
+    jobs.sync_shipping_mailbox,
     # Interval-gated internally (directory.sync_interval_min); a no-op on most
     # cycles. After the alert path so a slow directory never delays alerting.
     jobs.sync_directories,
