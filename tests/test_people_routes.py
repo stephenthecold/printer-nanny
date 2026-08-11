@@ -267,11 +267,15 @@ def test_a_duplicate_email_is_rejected_with_a_message_not_a_500(db):
 def test_a_person_needs_at_least_one_identifier(db):
     _user(db, "admin", m.UserRole.admin)
     acme, _ = _client_with_printer(db, "Acme", "10.0.0.1")
-    _login("admin").post("/manage/people/create",
-                         data={"client_id": acme.id, "email": "", "upn": "",
-                               "display_name": "   "},
-                         follow_redirects=False)
+    cli = _login("admin")
+    cli.post("/manage/people/create",
+             data={"client_id": acme.id, "email": "", "upn": "",
+                   "display_name": "   "},
+             follow_redirects=False)
     assert db.query(m.EndUser).count() == 0
+    assert "Give the staff member" in cli.get(
+        f"/manage/people?client_id={acme.id}"
+    ).text
 
 
 # --------------------------- groups ----------------------------------------- #
@@ -371,6 +375,20 @@ def test_the_page_links_to_the_operator_users_page_to_keep_them_distinct(db):
     assert "/manage/users" in body
 
 
+def test_the_page_uses_staff_terminology_and_keeps_global_navigation(db):
+    _user(db, "admin", m.UserRole.admin)
+    _client_with_printer(db, "Acme", "10.0.0.1")
+
+    body = _login("admin").get("/manage/people").text
+
+    assert "<title>Staff ·" in body
+    assert '<h1 class="text-2xl font-semibold mb-1">Staff</h1>' in body
+    assert "Console users" in body
+    assert "<nav" in body and 'aria-label="Primary"' in body
+
+
 def test_the_page_survives_having_no_clients(db):
     _user(db, "admin", m.UserRole.admin)
-    assert _login("admin").get("/manage/people").status_code == 200
+    response = _login("admin").get("/manage/people")
+    assert response.status_code == 200
+    assert "<nav" in response.text and 'aria-label="Primary"' in response.text

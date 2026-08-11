@@ -106,12 +106,50 @@ def test_missing_names_create_nothing(db):
     assert not list(db.scalars(select(m.Client)))
 
 
-def test_the_subnet_is_optional(db):
+def test_missing_subnet_without_an_explicit_bypass_creates_nothing(db):
     _mk_user(db, "admin", m.UserRole.admin)
     _submit(_login("admin"), cidr="")
     db.expire_all()
     assert not list(db.scalars(select(m.Subnet)))
+    assert not list(db.scalars(select(m.AgentClaimToken)))
+    assert not list(db.scalars(select(m.Client)))
+
+
+def test_an_explicit_subnet_bypass_keeps_the_reason_and_claim_flow(db):
+    _mk_user(db, "admin", m.UserRole.admin)
+    _submit(
+        _login("admin"),
+        cidr="",
+        skip_network="1",
+        skip_reason="  Waiting   for network details  ",
+    )
+    db.expire_all()
+    site = db.scalar(select(m.Site))
+    bypass = db.scalar(select(m.SetupBypass))
+    assert site is not None
+    assert bypass is not None
+    assert bypass.key == f"site:{site.id}:subnet"
+    assert bypass.reason == "Waiting for network details"
     assert list(db.scalars(select(m.AgentClaimToken)))
+    audit = db.scalar(
+        select(m.AuditLog).where(m.AuditLog.action == "setup.bypass")
+    )
+    assert audit is not None
+    assert "Waiting for network details" not in (audit.detail or "")
+
+
+def test_subnet_bypass_requires_a_reason(db):
+    _mk_user(db, "admin", m.UserRole.admin)
+    _submit(_login("admin"), cidr="", skip_network="1", skip_reason="  ")
+    db.expire_all()
+    assert not list(db.scalars(select(m.Client)))
+
+
+def test_invalid_cidr_is_rejected_before_anything_is_created(db):
+    _mk_user(db, "admin", m.UserRole.admin)
+    _submit(_login("admin"), cidr="not-a-network")
+    db.expire_all()
+    assert not list(db.scalars(select(m.Client)))
 
 
 def test_trusted_carries_through_the_wizard(db):
@@ -147,6 +185,8 @@ def test_the_form_renders(db):
     body = _login("admin").get("/manage/onboard").text
     assert 'action="/manage/onboard"' in body
     assert 'name="client_name"' in body and 'name="cidr"' in body
+    assert "Required setup" in body
+    assert 'name="skip_network"' in body
 
 
 # ---------- the handoff to enrollment ----------

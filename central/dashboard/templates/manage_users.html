@@ -1,9 +1,9 @@
 {% extends "base.html" %}
 {% from "_components.html" import badge, btn, card_cls, empty_row, field, page_title,
         section_title, select_field, table_cls, table_wrap, td_cls, th_cls, thead_cls, tr_cls %}
-{% block title %}Users · {{ app.name or 'Printer Nanny' }}{% endblock %}
+{% block title %}Console users · {{ app.name or 'Printer Nanny' }}{% endblock %}
 {% block body %}
-{{ page_title('Users', sub='Operators of this system. Customer staff who print live under People.') }}
+{{ page_title('Console users', sub='Operators who sign in to Printer Nanny. Client staff who receive printer assignments live under Staff.') }}
 
 <div class="grid md:grid-cols-3 gap-6">
   <section class="{{ card_cls('none', 'md:col-span-2') }}">
@@ -35,7 +35,8 @@
             <td class="{{ td_cls('left', 'text-slate-500') }}">{{ u.email or '—' }}</td>
             <td class="{{ td_cls() }}">
               {% set tones = {'admin': 'error', 'tech': 'info', 'client_readonly': 'muted'} %}
-              {{ badge(u.role.value, tones.get(u.role.value, 'neutral')) }}
+              {% set role_labels = {'admin': 'Administrator', 'tech': 'Technician', 'client_readonly': 'Client (read only)'} %}
+              {{ badge(role_labels.get(u.role.value, u.role.value), tones.get(u.role.value, 'neutral')) }}
             </td>
             <td class="{{ td_cls('left', 'text-slate-500') }}">
               {% if u.role.value == 'client_readonly' and u.client_id %}
@@ -54,7 +55,7 @@
               {% if u.id != user.id %}
               <form method="post" action="/manage/users/{{ u.id }}/delete" class="inline"
                     data-username="{{ u.username }}"
-                    onsubmit="return confirm('Delete user ' + this.dataset.username + '?')">
+                    onsubmit="return confirm('Delete console user ' + this.dataset.username + '?')">
                 {{ csrf_field() }}
                 <button class="text-xs text-red-600 hover:underline rounded">Delete</button>
               </form>
@@ -62,7 +63,7 @@
             </td>
           </tr>
         {% else %}
-          {{ empty_row(6, 'No users — seed data should have created an admin.') }}
+          {{ empty_row(6, 'No console users — seed data should have created an admin.') }}
         {% endfor %}
         </tbody>
       </table>
@@ -70,21 +71,22 @@
   </section>
 
   <section class="{{ card_cls('md', 'h-fit') }}">
-    {{ section_title('Add user') }}
+    {{ section_title('Add console user') }}
     <form method="post" action="/manage/users" class="space-y-3">
       {{ csrf_field() }}
       {{ field('username', 'Username', required=True, autocomplete='off') }}
       {{ field('email', 'Email', type='email', help='Optional. Used to match SSO sign-ins.') }}
       {% call select_field('role', 'Role') %}
-        {% for r in roles %}<option value="{{ r }}" {% if r == 'tech' %}selected{% endif %}>{{ r }}</option>{% endfor %}
+        {% set role_labels = {'admin': 'Administrator', 'tech': 'Technician', 'client_readonly': 'Client (read only)'} %}
+        {% for r in roles %}<option value="{{ r }}" {% if r == 'tech' %}selected{% endif %}>{{ role_labels.get(r, r) }}</option>{% endfor %}
       {% endcall %}
-      {% call select_field('client_id', 'Client', help='Required when the role is client_readonly.') %}
+      {% call select_field('client_id', 'Client', help='Required for a read-only client account.') %}
         <option value="">—</option>
         {% for c in clients %}<option value="{{ c.id }}">{{ c.name }}</option>{% endfor %}
       {% endcall %}
       {{ field('password', 'Initial password', type='password', autocomplete='new-password',
                help='Leave blank for an SSO-only account.') }}
-      <button class="{{ btn('primary', 'md', 'w-full') }}">Add user</button>
+      <button class="{{ btn('primary', 'md', 'w-full') }}">Add console user</button>
     </form>
   </section>
 </div>

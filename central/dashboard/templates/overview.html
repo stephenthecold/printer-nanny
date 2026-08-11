@@ -1,48 +1,246 @@
 {% extends "base.html" %}
-{% from "base.html" import status_badge, level_bar %}
-{% from "_components.html" import badge, card_cls, empty_row, page_title, section_title,
+{% from "base.html" import level_bar %}
+{% from "_components.html" import badge, btn, card_cls, empty_row, note, page_title,
         table_cls, table_wrap, td_cls, th_cls, thead_cls, tr_cls %}
-{% block title %}Overview · {{ app.name or 'Printer Nanny' }}{% endblock %}
+{% block title %}Dashboard · {{ app.name or 'Printer Nanny' }}{% endblock %}
 {% block body %}
-{{ page_title('Fleet overview') }}
+{{ page_title('Dashboard', 'Work from the top down. Monitoring ' ~ summary.total_printers ~ ' approved printer' ~ ('s' if summary.total_printers != 1 else '') ~ '.') }}
 
-{# Stat tiles. grid-cols-2 on phones so they stay readable rather than
-   shrinking to five unreadable columns. #}
-<div class="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-5 gap-3 mb-6">
-  {% set s = summary %}
-  <div class="{{ card_cls() }}">
-    <div class="text-3xl font-semibold tabular-nums">{{ s.total_printers }}</div>
-    <div class="text-xs text-slate-500 mt-1">Printers</div>
+{% if setup.open_count or setup.verification_attention %}
+<section class="{{ note('warning', 'mb-5 flex items-center justify-between gap-3 flex-wrap') }}" aria-labelledby="setup-reminder-title">
+  <div>
+    <h2 id="setup-reminder-title" class="font-semibold">
+      {% if setup.open_count %}Setup needs attention{% else %}Monitoring verification is still in progress{% endif %}
+    </h2>
+    <p class="text-xs mt-1">
+      {% if setup.open_count %}{{ setup.open_count }} required item{{ 's remain' if setup.open_count != 1 else ' remains' }}.{% endif %}
+      {% if setup.verification_attention %}{{ setup.verification_attention }} location{{ 's' if setup.verification_attention != 1 }} do not yet have both a current agent reply and a successful printer poll.{% endif %}
+    </p>
   </div>
-  <div class="{{ card_cls() }}">
-    <div class="text-3xl font-semibold text-green-600 tabular-nums">{{ s.by_status.ok }}</div>
-    <div class="text-xs text-slate-500 mt-1">OK</div>
-  </div>
-  <div class="{{ card_cls() }}">
-    <div class="text-3xl font-semibold text-red-600 tabular-nums">{{ s.by_status.error + s.by_status.offline }}</div>
-    <div class="text-xs text-slate-500 mt-1">Error / Offline</div>
-  </div>
-  {% if s.pending_discovery %}
-  <a href="/approvals" class="{{ card_cls('md', 'hover:ring-2 hover:ring-sky-300 block focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-sky-500') }}">
-    <div class="text-3xl font-semibold text-sky-600 tabular-nums">{{ s.pending_discovery }}</div>
-    <div class="text-xs text-slate-500 mt-1">Pending discovery</div>
+  <a href="/manage/onboard" class="{{ btn('warning', 'sm') }}">Open guided setup</a>
+</section>
+{% endif %}
+
+{# These are navigation summaries, not a second dashboard. Each count takes the
+   operator directly to the queue it describes, in the agreed priority order. #}
+<div class="grid sm:grid-cols-3 gap-3 mb-6" aria-label="Current priorities">
+  <a href="#system-health" class="{{ card_cls('md', 'block hover:ring-2 hover:ring-sky-300 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-sky-500') }}">
+    <div class="flex items-baseline gap-1">
+      <span class="text-3xl font-semibold tabular-nums {{ 'text-slate-500' if not subnet_health.total else ('text-green-700' if subnet_health.verified == subnet_health.total and not subnet_health.agent_attention else 'text-red-700') }}">{{ subnet_health.verified }}</span>
+      <span class="text-sm text-slate-500">of {{ subnet_health.total }}</span>
+    </div>
+    <div class="text-sm font-medium mt-1">Subnets verified</div>
+    <div class="text-xs text-slate-500 mt-0.5">{% if subnet_health.agent_attention %}{{ subnet_health.agent_attention }} additional agent{{ 's' if subnet_health.agent_attention != 1 }} need attention{% else %}Agent plus a successful printer reply{% endif %}</div>
   </a>
-  {% else %}
-  <div class="{{ card_cls() }}">
-    <div class="text-3xl font-semibold text-slate-300 tabular-nums">0</div>
-    <div class="text-xs text-slate-500 mt-1">Pending discovery</div>
-  </div>
-  {% endif %}
-  <a href="/alerts" class="{{ card_cls('md', 'hover:ring-2 hover:ring-amber-300 block focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-sky-500') }}">
-    <div class="text-3xl font-semibold text-amber-600 tabular-nums">{{ s.open_alerts }}</div>
-    <div class="text-xs text-slate-500 mt-1">Open alerts</div>
+  <a href="#printer-issues" class="{{ card_cls('md', 'block hover:ring-2 hover:ring-sky-300 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-sky-500') }}">
+    <div class="text-3xl font-semibold tabular-nums {{ 'text-red-700' if issue_queue.total else 'text-green-700' }}">{{ issue_queue.total }}</div>
+    <div class="text-sm font-medium mt-1">Printers needing attention</div>
+    <div class="text-xs text-slate-500 mt-0.5">Printing-stopped devices appear first</div>
+  </a>
+  <a href="#low-supplies" class="{{ card_cls('md', 'block hover:ring-2 hover:ring-sky-300 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-sky-500') }}">
+    <div class="text-3xl font-semibold tabular-nums {{ 'text-amber-700' if supply_total else 'text-green-700' }}">{{ supply_total }}</div>
+    <div class="text-sm font-medium mt-1">Supplies in the order window</div>
+    <div class="text-xs text-slate-500 mt-0.5">Soonest estimated depletion first</div>
   </a>
 </div>
 
-{% if rollup %}
-<section class="{{ card_cls('none', 'mb-6') }}">
-  <h2 class="font-semibold px-3 pt-4 pb-2">Clients</h2>
+<section id="system-health" class="{{ card_cls('none', 'mb-6 scroll-mt-4') }}" aria-labelledby="system-health-title">
+  <div class="px-4 pt-4 pb-3 flex items-start justify-between gap-3 flex-wrap">
+    <div>
+      <h2 id="system-health-title" class="font-semibold">1. System and agent status</h2>
+      <p class="text-xs text-slate-500 mt-1">A subnet is verified only after its agent checks in and a printer on that subnet replies.</p>
+    </div>
+    <div class="flex gap-1.5 flex-wrap">
+      {% if subnet_health.down %}{{ badge(subnet_health.down ~ ' down', 'error') }}{% endif %}
+      {% if subnet_health.attention %}{{ badge(subnet_health.attention ~ ' unverified', 'warning') }}{% endif %}
+      {% if subnet_health.agent_attention %}{{ badge(subnet_health.agent_attention ~ ' agent issue' ~ ('s' if subnet_health.agent_attention != 1), 'error') }}{% endif %}
+      {{ badge(subnet_health.verified ~ ' verified', 'ok') }}
+    </div>
+  </div>
+  {% if subnet_health.agent_issues %}
+  <div class="mx-4 mb-3 rounded border border-red-200 bg-red-50 px-3 py-2 text-sm text-red-900">
+    <div class="font-medium">Additional agents need attention</div>
+    <ul class="mt-1 space-y-1">
+      {% for agent in subnet_health.agent_issues %}
+      <li class="flex items-center justify-between gap-3 flex-wrap">
+        <span><strong>{{ agent.agent_name }}</strong> · {{ agent.client_name }} / {{ agent.site_name }} · {{ agent.status|replace('_', ' ') }}{% if agent.heartbeat_at %} · last reply <time datetime="{{ agent.heartbeat_iso }}" data-pn-age="{{ agent.heartbeat_iso }}">{{ agent.heartbeat_age }} ago</time>{% else %} · never replied{% endif %}</span>
+        <a href="/manage/agents" class="text-red-800 underline rounded">Open agents</a>
+      </li>
+      {% endfor %}
+    </ul>
+  </div>
+  {% endif %}
   <div class="{{ table_wrap() }}">
+    <table class="{{ table_cls() }}">
+      <thead class="{{ thead_cls() }}">
+        <tr>
+          <th class="{{ th_cls() }}">Status</th>
+          <th class="{{ th_cls() }}">Client / location</th>
+          <th class="{{ th_cls() }}">Subnet</th>
+          <th class="{{ th_cls() }}">Agent</th>
+          <th class="{{ th_cls() }}">Last agent reply</th>
+          <th class="{{ th_cls() }}">Last printer reply</th>
+          <th class="{{ th_cls('right') }}"><span class="sr-only">Action</span></th>
+        </tr>
+      </thead>
+      <tbody>
+        {% for row in subnet_health.rows %}
+        <tr class="{{ tr_cls() }} align-top">
+          <td class="{{ td_cls() }}">
+            {{ badge(row.label, row.tone) }}
+            <div class="text-xs text-slate-500 mt-1 max-w-xs">{{ row.explanation }}</div>
+          </td>
+          <td class="{{ td_cls() }}">
+            <div class="font-medium">{{ row.client_name }}</div>
+            <div class="text-xs text-slate-500">{{ row.site_name }}</div>
+          </td>
+          <td class="{{ td_cls() }}">
+            <div class="font-medium">{{ row.subnet_label }}</div>
+            {% if row.subnet_label != row.cidr %}<div class="text-xs text-slate-500 tabular-nums">{{ row.cidr }}</div>{% endif %}
+            <div class="text-xs text-slate-500">{{ row.printer_count }} printer{{ 's' if row.printer_count != 1 }}</div>
+          </td>
+          <td class="{{ td_cls() }}">
+            <div>{{ row.agent_name }}</div>
+            <div class="text-xs text-slate-500">{{ row.agent_status|replace('_', ' ') }}</div>
+          </td>
+          <td class="{{ td_cls('left', 'whitespace-nowrap') }}">
+            {% if row.heartbeat_at %}
+            <time datetime="{{ row.heartbeat_iso }}" data-pn-age="{{ row.heartbeat_iso }}" title="{{ row.heartbeat_at.strftime('%Y-%m-%d %H:%M UTC') }}">{{ row.heartbeat_age }} ago</time>
+            {% else %}<span class="text-slate-400">Never</span>{% endif %}
+          </td>
+          <td class="{{ td_cls('left', 'whitespace-nowrap') }}">
+            {% if row.last_poll_at %}
+            <time datetime="{{ row.last_poll_iso }}" data-pn-age="{{ row.last_poll_iso }}" title="{{ row.last_printer_name }} replied at {{ row.last_poll_at.strftime('%Y-%m-%d %H:%M UTC') }}">{{ row.last_poll_age }} ago</time>
+            <div class="text-xs text-slate-500 max-w-48 truncate">{{ row.last_printer_name }}</div>
+            {% else %}<span class="text-slate-400">Never</span>{% endif %}
+          </td>
+          <td class="{{ td_cls('right', 'whitespace-nowrap') }}">
+            {% if row.last_printer_id %}
+            <a href="/printers/{{ row.last_printer_id }}" class="text-sky-700 hover:underline rounded">Open printer</a>
+            {% else %}
+            <a href="/manage/agents" class="text-sky-700 hover:underline rounded">Open agents</a>
+            {% endif %}
+          </td>
+        </tr>
+        {% else %}
+        <tr><td colspan="7" class="px-4 py-8 text-center text-slate-500">
+          No subnets are configured. <a href="/manage/onboard" class="text-sky-700 hover:underline rounded">Start guided setup</a>.
+        </td></tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+</section>
+
+<section id="printer-issues" class="{{ card_cls('none', 'mb-6 scroll-mt-4') }}" aria-labelledby="printer-issues-title">
+  <div class="px-4 pt-4 pb-3 flex items-start justify-between gap-3 flex-wrap">
+    <div>
+      <h2 id="printer-issues-title" class="font-semibold">2. Printer issues</h2>
+      <p class="text-xs text-slate-500 mt-1">One row per affected printer, ordered by whether printing has stopped and then severity.</p>
+    </div>
+    <a href="/alerts" class="text-sm text-sky-700 hover:underline rounded">View issues tab</a>
+  </div>
+  <div class="{{ table_wrap() }}">
+    <table class="{{ table_cls() }}">
+      <thead class="{{ thead_cls() }}">
+        <tr>
+          <th class="{{ th_cls() }}">Impact</th>
+          <th class="{{ th_cls() }}">Printer</th>
+          <th class="{{ th_cls() }}">Where</th>
+          <th class="{{ th_cls() }}">Issue</th>
+          <th class="{{ th_cls('right') }}"><span class="sr-only">Action</span></th>
+        </tr>
+      </thead>
+      <tbody>
+        {% for issue in issue_queue.rows %}
+        <tr class="{{ tr_cls() }} align-top">
+          <td class="{{ td_cls() }}">{{ badge(issue.impact_label, 'error' if issue.blocking else issue.tone) }}</td>
+          <td class="{{ td_cls() }}">
+            <a href="/printers/{{ issue.printer_id }}" class="font-medium text-sky-700 hover:underline rounded">{{ issue.printer_name }}</a>
+            <div class="text-xs text-slate-500">{{ issue.model }} · {{ issue.ip }}</div>
+          </td>
+          <td class="{{ td_cls() }}">
+            <div>{{ issue.client_name }} · {{ issue.site_name }}</div>
+            {% if issue.location %}<div class="text-xs text-slate-500">{{ issue.location }}</div>{% endif %}
+          </td>
+          <td class="{{ td_cls() }}">
+            <div class="font-medium">{{ issue.title }}</div>
+            {% if issue.detail %}<div class="text-xs text-slate-500 mt-0.5 max-w-xl">{{ issue.detail }}</div>{% endif %}
+            {% if issue.more_count %}<div class="text-xs text-amber-700 mt-0.5">+{{ issue.more_count }} more open issue{{ 's' if issue.more_count != 1 }}</div>{% endif %}
+          </td>
+          <td class="{{ td_cls('right', 'whitespace-nowrap') }}"><a href="/printers/{{ issue.printer_id }}" class="text-sky-700 hover:underline rounded">Open printer</a></td>
+        </tr>
+        {% else %}
+        {{ empty_row(5, 'No printers need attention.') }}
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+  {% if issue_queue.total > issue_queue.rows|length %}
+  <div class="border-t px-4 py-3 text-sm text-slate-500">Showing the first {{ issue_queue.rows|length }} of {{ issue_queue.total }} affected printers. <a href="/alerts" class="text-sky-700 hover:underline rounded">View all issues</a>.</div>
+  {% endif %}
+</section>
+
+<section id="low-supplies" class="{{ card_cls('none', 'mb-6 scroll-mt-4') }}" aria-labelledby="low-supplies-title">
+  <div class="px-4 pt-4 pb-3 flex items-start justify-between gap-3 flex-wrap">
+    <div>
+      <h2 id="low-supplies-title" class="font-semibold">3. Low supplies</h2>
+      <p class="text-xs text-slate-500 mt-1">Forecasted depletion is the primary order; level and page estimates fill gaps where history is still building.</p>
+    </div>
+    <a href="/supplies/reorder" class="text-sm text-sky-700 hover:underline rounded">Open supply planning</a>
+  </div>
+  <div class="{{ table_wrap() }}">
+    <table class="{{ table_cls() }}">
+      <thead class="{{ thead_cls() }}">
+        <tr>
+          <th class="{{ th_cls() }}">Urgency</th>
+          <th class="{{ th_cls() }}">Supply</th>
+          <th class="{{ th_cls() }}">Printer</th>
+          <th class="{{ th_cls() }}">Where</th>
+          <th class="{{ th_cls() }}">Estimated runway</th>
+          <th class="{{ th_cls('right') }}">Level</th>
+        </tr>
+      </thead>
+      <tbody>
+        {% for rec in supply_queue %}
+        <tr class="{{ tr_cls() }} align-top">
+          <td class="{{ td_cls() }}">{{ badge('Order now' if rec.urgency == urgency_now else 'Order soon', 'error' if rec.urgency == urgency_now else 'warning') }}</td>
+          <td class="{{ td_cls() }}">
+            <a href="/printers/{{ rec.printer_id }}" class="font-medium text-sky-700 hover:underline rounded">{{ rec.supply_label }}</a>
+            <div class="text-xs text-slate-500">{{ rec.supply_type }}{% if rec.color %} · {{ rec.color }}{% endif %}</div>
+          </td>
+          <td class="{{ td_cls() }}">
+            <a href="/printers/{{ rec.printer_id }}" class="hover:underline rounded">{{ rec.printer_name }}</a>
+            <div class="text-xs text-slate-500">{{ rec.model or 'Unknown model' }}</div>
+          </td>
+          <td class="{{ td_cls() }}">{{ rec.client_name }} · {{ rec.site_name }}</td>
+          <td class="{{ td_cls() }}">
+            {% if rec.days_remaining is not none %}
+            <strong class="tabular-nums">~{{ rec.days_remaining|round(1) }} days</strong>
+            {% elif rec.pages_remaining is not none %}
+            <strong class="tabular-nums">~{{ '{:,.0f}'.format(rec.pages_remaining) }} pages</strong>
+            {% else %}
+            <span class="text-slate-500">Forecast building</span>
+            {% endif %}
+            {% if rec.reasons %}<div class="text-xs text-slate-500 mt-0.5 max-w-sm">{{ rec.reasons[0] }}</div>{% endif %}
+          </td>
+          <td class="{{ td_cls('right', 'min-w-36') }}">{{ level_bar(rec.level_pct, rec.is_receptacle) }}</td>
+        </tr>
+        {% else %}
+        {{ empty_row(6, 'No supplies are currently inside the order window.') }}
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+  {% if supply_total > supply_queue|length %}
+  <div class="border-t px-4 py-3 text-sm text-slate-500">Showing the first {{ supply_queue|length }} of {{ supply_total }} supply recommendations. <a href="/supplies/reorder" class="text-sky-700 hover:underline rounded">View all supplies</a>.</div>
+  {% endif %}
+</section>
+
+{% if rollup %}
+<details class="{{ card_cls('none') }}">
+  <summary class="px-4 py-3 cursor-pointer font-medium rounded focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-sky-500">Client overview <span class="font-normal text-slate-500">· {{ rollup|length }} client{{ 's' if rollup|length != 1 }}</span></summary>
+  <div class="{{ table_wrap('border-t') }}">
     <table class="{{ table_cls() }}">
       <thead class="{{ thead_cls() }}">
         <tr>
@@ -51,7 +249,7 @@
           <th class="{{ th_cls('right') }}">Printers</th>
           <th class="{{ th_cls('right') }}">Down</th>
           <th class="{{ th_cls('right') }}">Low supplies</th>
-          <th class="{{ th_cls('right') }}">Open alerts</th>
+          <th class="{{ th_cls('right') }}">Open issues</th>
         </tr>
       </thead>
       <tbody>
@@ -64,69 +262,10 @@
           <td class="{{ td_cls('right', 'tabular-nums') }} {{ 'text-amber-600 font-semibold' if row.low_supplies else 'text-slate-400' }}">{{ row.low_supplies }}</td>
           <td class="{{ td_cls('right', 'tabular-nums') }} {{ 'text-amber-700 font-semibold' if row.open_alerts else 'text-slate-400' }}">{{ row.open_alerts }}</td>
         </tr>
-        {% else %}
-        {{ empty_row(6, 'No clients yet.') }}
         {% endfor %}
       </tbody>
     </table>
   </div>
-</section>
+</details>
 {% endif %}
-
-<div class="grid md:grid-cols-2 gap-6">
-  <section class="{{ card_cls() }}">
-    {{ section_title('Recent activity') }}
-    <ul class="space-y-2 text-sm">
-      {% for r in recent_activity %}
-      {% set tone = 'error' if r.severity=='critical' else ('warning' if r.severity=='warning' else ('info' if r.kind=='discovery' else 'neutral')) %}
-      {% set kind_label = {'event':'event','alert':'alert','discovery':'new'}[r.kind] %}
-      <li class="flex gap-2 items-start">
-        <span class="text-slate-400 tabular-nums text-xs whitespace-nowrap pt-0.5">{{ r.ts.strftime('%m-%d %H:%M') if r.ts else '' }}</span>
-        {{ badge(kind_label, tone, 'h-fit') }}
-        <a href="{{ r.link }}" class="hover:underline rounded">{{ r.message }}</a>
-      </li>
-      {% else %}<li class="text-slate-400">Nothing recent.</li>{% endfor %}
-    </ul>
-  </section>
-
-  <section class="{{ card_cls() }}">
-    {{ section_title('Low supplies') }}
-    <table class="{{ table_cls() }}">
-      <tbody>
-      {% for sup in low %}
-      <tr class="border-t">
-        <td class="py-1.5">
-          <a href="/printers/{{ sup.printer_id }}" class="text-sky-700 hover:underline rounded">{{ sup.description or sup.color or sup.type.value }}</a>
-          {% if sup.printer %}
-          <div class="text-xs text-slate-400">{{ sup.printer.model or sup.printer.hostname or 'printer' }} @ {{ sup.printer.ip }}</div>
-          {% endif %}
-        </td>
-        <td class="py-1.5 text-right">{{ level_bar(sup.level_pct, sup.is_receptacle) }}</td>
-      </tr>
-      {% else %}<tr><td class="py-2 text-slate-400">All supplies healthy.</td></tr>{% endfor %}
-      </tbody>
-    </table>
-  </section>
-
-  <section class="{{ card_cls() }}">
-    {{ section_title('Recent errors') }}
-    <ul class="space-y-2 text-sm">
-      {% for e in errors %}
-      <li class="flex gap-2">
-        {{ badge(e.severity.value, 'error' if e.severity.value == 'critical' else 'warning') }}
-        <a href="/printers/{{ e.printer_id }}" class="hover:underline rounded">{{ e.message }}</a>
-      </li>
-      {% else %}<li class="text-slate-400">No recent errors.</li>{% endfor %}
-    </ul>
-  </section>
-
-  <section class="{{ card_cls() }}">
-    {{ section_title('Open alerts') }}
-    <ul class="space-y-2 text-sm">
-      {% for a in alerts %}
-      <li><a href="/alerts" class="hover:underline rounded">{{ a.title }}</a></li>
-      {% else %}<li class="text-slate-400">No open alerts.</li>{% endfor %}
-    </ul>
-  </section>
-</div>
 {% endblock %}

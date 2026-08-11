@@ -40,6 +40,8 @@ def _fresh(db, model, obj_id):
 def test_users_list_visible_to_admin(env):
     resp = env["http"].get("/manage/users")
     assert resp.status_code == 200
+    assert "<title>Console users ·" in resp.text
+    assert ">Console users</h1>" in resp.text
     assert "admin" in resp.text
     assert "tech1" in resp.text
 
@@ -64,6 +66,7 @@ def test_create_local_user(env, db):
     assert u.role == m.UserRole.tech
     assert u.auth_provider == "local"
     assert verify_password("supersecret", u.password_hash)
+    assert "Console user &#39;newtech&#39; created." in env["http"].get("/manage/users").text
 
 
 def test_create_user_without_password_marks_sso_only(env, db):
@@ -85,7 +88,7 @@ def test_client_readonly_requires_a_client(env, db):
     assert db.scalar(select(m.User).where(m.User.username == "noclient")) is None
     # Follow the redirect to confirm a flash was queued.
     resp2 = env["http"].get("/manage/users")
-    assert "must be assigned to a client" in resp2.text
+    assert "A read-only client account must be assigned to a client" in resp2.text
 
 
 def test_client_readonly_with_client_persists(env, db):

@@ -37,6 +37,8 @@ def _submit(cli, **overrides):
         "client_name": "Acme Ltd",
         "site_name": "Head office",
         "cidr": "",
+        "skip_network": "1",
+        "skip_reason": "Network details pending",
         "ttl_minutes": 1440,
     }
     data.update(overrides)

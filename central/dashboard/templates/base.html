@@ -34,125 +34,194 @@
   |tojson quotes and escapes the value, and the attribute is single-quoted
   because the JSON is double-quoted.
 #}
-<body class="h-full text-slate-800 flex flex-col" hx-headers='{"X-CSRF-Token": {{ csrf_token()|tojson }}}'>
+<body class="min-h-full text-slate-800 flex flex-col" hx-headers='{"X-CSRF-Token": {{ csrf_token()|tojson }}}'>
 {% if user %}
 {#
   Navigation.
 
-  Three things this fixes, all of which were real operator complaints rather
-  than aesthetics:
+  One DOM serves both viewports: a fixed sidebar on desktop and a drawer on
+  small screens. Duplicating the links into a desktop nav and a mobile nav
+  would duplicate the landmark and every aria-current destination for screen
+  readers. The checkbox keeps the drawer pointer-operable without JavaScript;
+  dashboard.js adds keyboard activation, focus management, Escape handling, and
+  accurate expanded state.
 
-  * There was no indication of the current page. Thirteen identical links, and
-    nothing said which one you were looking at. `aria-current="page"` carries it
-    for screen readers; the ring + brightened text carries it visually.
-  * The bar was a fixed-height, non-wrapping flex row, so on a laptop width the
-    admin links simply ran off the right edge with no way to reach them. It now
-    wraps.
-  * The links were one undifferentiated run. They are now grouped by what an
-    operator is actually doing -- watching the fleet, changing it, or
-    administering the system -- with a separator between groups. Grouping is
-    visual only: every destination stays one click away, because collapsing
-    them into menus would tax the frequent paths to tidy the rare ones.
-
-  Active state is longest-prefix, not equality: /manage/agents must light up
-  "Agents", not "Manage", even though both prefixes match.
+  The first group is the normal technician workflow. Client operations and
+  administration are progressively disclosed, and the active group opens
+  automatically. Route authorization remains in Python -- hiding a link is
+  never treated as an access-control boundary.
 #}
 {%- set path = request.url.path if request is defined else '' -%}
-{#- /printers is in the "watching the fleet" group for every role: staff search
-    the whole fleet, a client_readonly user gets the same page scoped to their
-    own client (see routes.printer_search). Longest-prefix marking means the
-    printer *detail* page at /printers/<id> lights this entry up too, which is
-    correct -- it is where the search takes you. -#}
-{%- set g_watch = [{'href': '/', 'label': 'Overview'},
-                   {'href': '/printers', 'label': 'Printers'},
-                   {'href': '/alerts', 'label': 'Alerts'}] -%}
-{%- if nav_pending is defined and nav_pending -%}
-  {#- Approvals only appears when there is actually something to approve. -#}
-  {%- set _ = g_watch.append({'href': '/approvals', 'label': 'Approvals', 'badge': nav_pending}) -%}
-{%- endif -%}
-{%- set g_manage = [{'href': '/manage', 'label': 'Manage'},
-                    {'href': '/manage/agents', 'label': 'Agents'},
-                    {'href': '/manage/maintenance', 'label': 'Maintenance'}] -%}
+{%- set dashboard_href = '/portal' if user.role.value == 'client_readonly' else '/' -%}
+{%- set g_primary = [{'href': dashboard_href, 'label': 'Dashboard'},
+                     {'href': '/printers', 'label': 'Printers'}] -%}
 {%- if user.role.value != 'client_readonly' -%}
-  {%- set _ = g_manage.append({'href': '/manage/onboard', 'label': 'Onboard'}) -%}
-  {%- set _ = g_manage.append({'href': '/manage/alert-rules', 'label': 'Alert rules'}) -%}
-  {%- set _ = g_manage.append({'href': '/manage/suppression', 'label': 'Quiet hours'}) -%}
+  {%- set _ = g_primary.insert(1, {'href': '/alerts', 'label': 'Issues'}) -%}
+  {%- set _ = g_primary.append({'href': '/supplies/reorder', 'label': 'Supplies'}) -%}
+  {%- set _ = g_primary.append({'href': '/manage', 'label': 'Clients'}) -%}
+  {%- set _ = g_primary.append({'href': '/manage/onboard', 'label': 'Setup'}) -%}
+  {%- if nav_pending is defined and nav_pending -%}
+    {%- set _ = g_primary.append({'href': '/approvals', 'label': 'Approvals', 'badge': nav_pending}) -%}
+  {%- endif -%}
 {%- endif -%}
-{%- set g_admin = [] -%}
+
+{%- set g_client = [] -%}
 {%- if user.role.value != 'client_readonly' -%}
-  {#- Supplies to order. In the "watch the fleet" sense it is a list you read,
-      but it sits here with Security because both are cross-fleet reports rather
-      than the day-to-day inbox. client_readonly sees the same recommendations
-      in their portal, scoped to their own fleet. -#}
-  {%- set _ = g_admin.append({'href': '/supplies/reorder', 'label': 'Supplies'}) -%}
-  {#- Cartridge yield. Its own entry rather than a tab on Supplies: one page
-      answers "what do I order this week", the other "is what we ordered
-      delivering what it should", and they are read months apart. Active
-      marking is longest-prefix, so /supplies/yield lights this and not
-      Supplies. -#}
-  {%- set _ = g_admin.append({'href': '/supplies/yield', 'label': 'Yield'}) -%}
-  {%- set _ = g_admin.append({'href': '/security/posture', 'label': 'Security'}) -%}
+  {%- set _ = g_client.append({'href': '/manage/maintenance', 'label': 'Maintenance'}) -%}
+  {%- set _ = g_client.append({'href': '/manage/people', 'label': 'Staff'}) -%}
+  {%- set _ = g_client.append({'href': '/manage/machines', 'label': 'Workstations'}) -%}
 {%- endif -%}
 {%- if user.role.value == 'admin' -%}
-  {%- set _ = g_admin.append({'href': '/manage/people', 'label': 'People'}) -%}
-  {%- set _ = g_admin.append({'href': '/manage/machines', 'label': 'Machines'}) -%}
-  {#- Billing sits with the admin group because the route is admin-only: a rate
-      card is a customer's commercial terms, not fleet operations. A link that
-      303s for half the operators who can see it is worse than no link. -#}
-  {%- set _ = g_admin.append({'href': '/manage/billing', 'label': 'Billing'}) -%}
-  {%- set _ = g_admin.append({'href': '/manage/events', 'label': 'Events'}) -%}
-  {%- set _ = g_admin.append({'href': '/manage/definitions', 'label': 'Definitions'}) -%}
-  {%- set _ = g_admin.append({'href': '/manage/users', 'label': 'Users'}) -%}
+  {%- set _ = g_client.append({'href': '/manage/billing', 'label': 'Billing'}) -%}
+{%- endif -%}
+
+{%- set g_admin = [] -%}
+{%- if user.role.value != 'client_readonly' -%}
+  {%- set _ = g_admin.append({'href': '/manage/agents', 'label': 'Agents'}) -%}
+  {%- set _ = g_admin.append({'href': '/manage/alert-rules', 'label': 'Alert rules'}) -%}
+  {%- set _ = g_admin.append({'href': '/manage/suppression', 'label': 'Quiet hours'}) -%}
+  {%- set _ = g_admin.append({'href': '/supplies/yield', 'label': 'Cartridge yield'}) -%}
+  {%- set _ = g_admin.append({'href': '/security/posture', 'label': 'Device security'}) -%}
+{%- endif -%}
+{%- if user.role.value == 'admin' -%}
+  {%- set _ = g_admin.append({'href': '/manage/events', 'label': 'Integrations'}) -%}
+  {%- set _ = g_admin.append({'href': '/manage/definitions', 'label': 'Device definitions'}) -%}
+  {%- set _ = g_admin.append({'href': '/manage/users', 'label': 'Console users'}) -%}
   {%- set _ = g_admin.append({'href': '/manage/audit', 'label': 'Audit'}) -%}
   {%- set _ = g_admin.append({'href': '/admin/backup', 'label': 'Backup'}) -%}
   {%- set _ = g_admin.append({'href': '/settings', 'label': 'Settings'}) -%}
 {%- endif -%}
-{%- set nav_groups = [g_watch, g_manage, g_admin] | select | list -%}
+
+{%- set nav_groups = [g_primary, g_client, g_admin] -%}
 {#- Longest matching href wins, so a nested route marks its own entry. -#}
-{%- set ns = namespace(active='') -%}
+{%- set ns = namespace(active='', active_label='Dashboard') -%}
 {%- for group in nav_groups -%}{%- for item in group -%}
   {%- if (item.href == '/' and path == '/') or (item.href != '/' and path.startswith(item.href)) -%}
-    {%- if item.href | length > ns.active | length -%}{%- set ns.active = item.href -%}{%- endif -%}
+    {%- if item.href | length > ns.active | length -%}
+      {%- set ns.active = item.href -%}
+      {%- set ns.active_label = item.label -%}
+    {%- endif -%}
   {%- endif -%}
 {%- endfor -%}{%- endfor -%}
+
+{#- Detail and preview routes do not own a top-level link. Give them the
+    nearest truthful parent so every page still answers "where am I?". -#}
+{%- if path.startswith('/clients/') -%}
+  {%- set ns.active = dashboard_href -%}
+  {%- set ns.active_label = 'Dashboard' -%}
+{%- elif path.startswith('/portal') and user.role.value != 'client_readonly' -%}
+  {%- set ns.active = '/manage' -%}
+  {%- set ns.active_label = 'Clients' -%}
+{%- elif path.startswith('/approvals') and ns.active != '/approvals' -%}
+  {%- set ns.active = '/manage/onboard' -%}
+  {%- set ns.active_label = 'Setup' -%}
+{%- endif -%}
+
+{%- set account_active = path.startswith('/account') -%}
+{%- if account_active -%}{%- set ns.active_label = 'Account' -%}{%- endif -%}
+{%- set client_hrefs = g_client | map(attribute='href') | list -%}
+{%- set admin_hrefs = g_admin | map(attribute='href') | list -%}
+
+{% macro sidebar_links(items, active) -%}
+<ul class="space-y-1">
+  {% for item in items %}
+  {% set is_active = item.href == active %}
+  <li>
+    <a href="{{ item.href }}"
+       {% if is_active %}aria-current="page"{% endif %}
+       class="min-h-11 rounded-md px-3 py-2 text-sm flex items-center justify-between gap-2 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-white/70
+              {{ 'bg-white/15 text-white font-semibold' if is_active else 'text-slate-100/80 hover:bg-white/10 hover:text-white' }}">
+      <span>{{ item.label }}</span>
+      {% if item.badge %}
+      <span class="bg-amber-400 text-slate-900 rounded-full px-2 py-0.5 text-xs font-semibold tabular-nums">{{ item.badge }}</span>
+      {% endif %}
+    </a>
+  </li>
+  {% endfor %}
+</ul>
+{%- endmacro %}
+
 <a href="#main" class="sr-only focus:not-sr-only focus:absolute focus:z-50 focus:m-2 focus:rounded focus:bg-white focus:px-3 focus:py-2 focus:text-sm focus:text-slate-900 focus:shadow">Skip to content</a>
-<nav aria-label="Primary" class="text-slate-100" style="background-color: {{ app.primary_color or '#0f172a' }};">
-  <div class="max-w-7xl mx-auto px-4 py-2 flex items-center gap-x-4 gap-y-1 flex-wrap min-h-14">
-    <a href="/" class="font-semibold text-lg flex items-center gap-2 rounded focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-white/70">
+<div class="relative min-h-full flex-1 flex flex-col">
+  <input id="pn-nav-toggle" type="checkbox" tabindex="-1" aria-hidden="true"
+         class="peer sr-only lg:hidden" />
+
+  <header id="pn-mobile-header" class="h-14 shrink-0 px-4 flex items-center justify-between text-slate-100 lg:hidden"
+          style="background-color: {{ app.primary_color or '#0f172a' }};">
+    <a href="{{ dashboard_href }}" class="font-semibold flex min-w-0 items-center gap-2 rounded focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-white/70">
       {% if app.logo_url %}<img src="{{ app.logo_url }}" alt="" class="h-7 w-auto" />
       {% else %}<span aria-hidden="true">🖨️</span>{% endif %}
-      <span>{{ app.name or 'Printer Nanny' }}</span>
+      <span class="truncate">{{ app.name or 'Printer Nanny' }}</span>
     </a>
-    {% for group in nav_groups %}
-    {% if not loop.first %}<span class="h-4 w-px bg-white/25" aria-hidden="true"></span>{% endif %}
-    <ul class="flex items-center gap-x-4 gap-y-1 flex-wrap">
-      {% for item in group %}
-      {% set is_active = item.href == ns.active %}
-      <li>
-        <a href="{{ item.href }}"
-           {% if is_active %}aria-current="page"{% endif %}
-           class="text-sm rounded px-1 py-0.5 flex items-center gap-1 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-white/70
-                  {{ 'text-white font-medium ring-1 ring-white/40 bg-white/10' if is_active else 'text-slate-100/80 hover:text-white' }}">
-          {{ item.label }}
-          {% if item.badge %}
-          <span class="bg-amber-400 text-slate-900 rounded-full px-1.5 text-xs font-semibold">{{ item.badge }}</span>
-          {% endif %}
+    <span class="ml-auto mr-20 text-xs text-slate-200 truncate max-w-24">{{ ns.active_label }}</span>
+  </header>
+  {# The checkbox owns CSS-only drawer state; this visible label is the actual
+     keyboard control. Keeping the hidden checkbox out of the tab order avoids
+     an invisible focus stop while preserving navigation without JavaScript. #}
+  <label id="pn-mobile-menu" for="pn-nav-toggle" data-pn-nav-toggle
+         tabindex="0" role="button" aria-controls="primary-navigation" aria-expanded="false"
+         class="absolute top-0 right-4 z-30 h-14 cursor-pointer rounded-md px-3 flex items-center gap-2 text-sm font-medium text-slate-100 hover:bg-white/10 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-white/70 lg:hidden">
+    <span aria-hidden="true" class="text-lg leading-none">☰</span>
+    <span>Menu</span>
+  </label>
+
+  <aside class="fixed inset-0 z-40 hidden peer-checked:flex lg:inset-y-0 lg:left-0 lg:right-auto lg:flex lg:w-64"
+         aria-label="Application navigation">
+    <label for="pn-nav-toggle" data-pn-nav-toggle class="absolute inset-0 bg-slate-950/60 lg:hidden">
+      <span class="sr-only">Close navigation menu</span>
+    </label>
+    <nav id="primary-navigation" aria-label="Primary"
+         class="relative h-full w-72 lg:w-64 text-slate-100 flex flex-col shadow-xl lg:shadow-none"
+         style="background-color: {{ app.primary_color or '#0f172a' }};">
+      <div class="h-14 shrink-0 border-b border-white/10 px-4 flex items-center justify-between">
+        <a href="{{ dashboard_href }}" class="font-semibold text-lg min-w-0 flex items-center gap-2 rounded focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-white/70">
+          {% if app.logo_url %}<img src="{{ app.logo_url }}" alt="" class="h-7 w-auto" />
+          {% else %}<span aria-hidden="true">🖨️</span>{% endif %}
+          <span class="truncate">{{ app.name or 'Printer Nanny' }}</span>
         </a>
-      </li>
-      {% endfor %}
-    </ul>
-    {% endfor %}
-    {#- /account sits outside the groups (it is the user menu, not a section),
-        so its active state is computed directly rather than via ns.active. -#}
-    {%- set account_active = path.startswith('/account') -%}
-    <div class="ml-auto flex items-center gap-3">
-      <a href="/account" class="text-sm rounded px-1 py-0.5 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-white/70
-                {{ 'text-white font-medium ring-1 ring-white/40 bg-white/10' if account_active else 'text-slate-300 hover:text-white' }}"
-         {% if account_active %}aria-current="page"{% endif %}>{{ user.username }} ({{ user.role.value }})</a>
-      <a href="/logout" class="text-sm text-slate-300 hover:text-white rounded px-1 py-0.5 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-white/70">Logout</a>
-    </div>
-  </div>
-</nav>
+        <label for="pn-nav-toggle" data-pn-nav-toggle tabindex="0" role="button"
+               aria-label="Close navigation menu" aria-controls="primary-navigation"
+               class="min-h-11 min-w-11 cursor-pointer rounded-md flex items-center justify-center text-xl hover:bg-white/10 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-white/70 lg:hidden">
+          <span aria-hidden="true">×</span><span class="sr-only">Close navigation menu</span>
+        </label>
+      </div>
+
+      <div class="flex-1 overflow-y-auto px-3 py-4">
+        {{ sidebar_links(g_primary, ns.active) }}
+
+        {% if g_client %}
+        <details class="mt-5 group" {% if ns.active in client_hrefs %}open{% endif %}>
+          <summary class="min-h-11 cursor-pointer list-none rounded-md px-3 py-2 text-xs font-semibold uppercase tracking-wide text-slate-300 flex items-center justify-between focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-white/70 hover:bg-white/10">
+            <span>Client operations</span><span aria-hidden="true" class="group-open:rotate-90">›</span>
+          </summary>
+          <div class="mt-1 pl-2 border-l border-white/15">{{ sidebar_links(g_client, ns.active) }}</div>
+        </details>
+        {% endif %}
+
+        {% if g_admin %}
+        <details class="mt-2 group" {% if ns.active in admin_hrefs %}open{% endif %}>
+          <summary class="min-h-11 cursor-pointer list-none rounded-md px-3 py-2 text-xs font-semibold uppercase tracking-wide text-slate-300 flex items-center justify-between focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-white/70 hover:bg-white/10">
+            <span>Administration</span><span aria-hidden="true" class="group-open:rotate-90">›</span>
+          </summary>
+          <div class="mt-1 pl-2 border-l border-white/15">{{ sidebar_links(g_admin, ns.active) }}</div>
+        </details>
+        {% endif %}
+      </div>
+
+      <div class="shrink-0 border-t border-white/10 p-3 space-y-1">
+        <a href="/account" {% if account_active %}aria-current="page"{% endif %}
+           class="min-h-11 rounded-md px-3 py-2 text-sm flex items-center text-slate-100/80 hover:bg-white/10 hover:text-white focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-white/70 {{ 'bg-white/15 text-white font-semibold' if account_active else '' }}">
+          {{ user.username }}
+          <span class="ml-1 text-xs text-slate-300">
+            ({{ {'admin': 'admin', 'tech': 'technician', 'client_readonly': 'client'}[user.role.value] }})
+          </span>
+        </a>
+        <a href="/logout" class="min-h-11 rounded-md px-3 py-2 text-sm flex items-center text-slate-100/80 hover:bg-white/10 hover:text-white focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-white/70">Logout</a>
+      </div>
+    </nav>
+  </aside>
+
+  <div id="pn-page" class="min-w-0 flex-1 flex flex-col lg:pl-64">
 {% endif %}
 <main id="main" class="max-w-7xl mx-auto px-4 py-6 flex-1 w-full">
   {# Degraded-worker banner. A dead worker stops marking agents offline, so every
@@ -248,6 +317,10 @@
     {% endif %}
   </div>
 </footer>
+{% endif %}
+{% if user %}
+  </div>
+</div>
 {% endif %}
 </body>
 </html>

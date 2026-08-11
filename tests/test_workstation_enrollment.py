@@ -401,6 +401,19 @@ def test_the_shared_terminal_toggle_round_trips(db):
     assert machine.default_wins is False
 
 
+def test_missing_workstation_uses_operator_terminology(db):
+    _user(db, "admin1", m.UserRole.admin)
+    cli = _login("admin1")
+    response = cli.post(
+        "/manage/machines/999999/active",
+        data={"active": "1"},
+        follow_redirects=True,
+    )
+    assert response.status_code == 200
+    assert "That workstation no longer exists." in response.text
+    assert "That machine no longer exists." not in response.text
+
+
 def test_a_hostile_machine_name_is_escaped_in_the_page(db):
     """SNMP/PJL/device strings land in the dashboard; this one arrives from the
     workstation itself and must render as text."""
@@ -424,7 +437,7 @@ def test_the_page_renders_machines_and_their_assignments(db):
     page = _login("admin1").get("/manage/machines").text
     assert "DESK-01" in page
     assert "Acme MFP" in page
-    assert "Machines" in page
+    assert "Workstations" in page
 
 
 def test_services_refuse_a_cross_tenant_machine_assignment(db):

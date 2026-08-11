@@ -6,6 +6,7 @@ creating require any logged-in user; deletes require admin.
 
 from __future__ import annotations
 
+import ipaddress
 import shutil
 import tempfile
 from datetime import datetime, timezone
@@ -24,6 +25,7 @@ from central import models as m
 from central import queries
 from central import ratelimit
 from central import services
+from central import setup_checklist
 from central import suppression
 from central.audit import record
 from central.branding import branding_for
@@ -120,13 +122,22 @@ def _tpl(request: Request, template: str, db: Session, **ctx) -> HTMLResponse:
 
     ctx.setdefault("app", branding_for(db, ctx.get("user")))
     ctx.setdefault("central_version", _central_version)
-    # Conditional Approvals nav: link only renders when something is pending.
-    if "nav_pending" not in ctx:
+    # Conditional Approvals nav. Management routes are staff-only, but keep the
+    # role check here so this helper remains safe if a client-scoped page ever
+    # reuses it.
+    nav_user = ctx.get("user")
+    if (
+        "nav_pending" not in ctx
+        and nav_user is not None
+        and nav_user.role != m.UserRole.client_readonly
+    ):
         ctx["nav_pending"] = db.scalar(
             select(func.count())
             .select_from(m.Printer)
             .where(m.Printer.discovery_state == m.DiscoveryState.pending)
         ) or 0
+    else:
+        ctx.setdefault("nav_pending", 0)
     # Stalled-worker banner (base.html) -- see central.health.worker_banner.
     if "worker_banner" not in ctx:
         ctx["worker_banner"] = worker_banner(db, ctx.get("user"))
@@ -956,7 +967,7 @@ def agent_create(
 
 @router.get("/onboard", response_class=HTMLResponse)
 def onboard_form(request: Request, db: Session = Depends(get_db)):
-    """One screen for "a new customer signed, get them monitored".
+    """Guided setup status plus the one-transaction location onboarding flow.
 
     The pieces already existed -- client, site, subnet, agent -- but as four
     forms on three pages, none of which carried context to the next. Nothing
@@ -971,6 +982,7 @@ def onboard_form(request: Request, db: Session = Depends(get_db)):
     return _tpl(
         request, "onboard.html", db, user=user,
         clients=list(db.scalars(select(m.Client).order_by(m.Client.name))),
+        setup=setup_checklist.build_setup_status(db),
         tz_choices=_timezone_choices(),
         default_tz=(runtime.get("alerts.default_timezone") or "UTC"),
         flash=_pop_flash(request),
@@ -988,10 +1000,12 @@ def onboard_submit(
     snmp_community: str = Form("public"),
     snmp_version: str = Form("2c"),
     trusted: str = Form(""),
+    skip_network: str = Form(""),
+    skip_reason: str = Form(""),
     ttl_minutes: int = Form(1440),
     db: Session = Depends(get_db),
 ):
-    """Create client + site + (optional) subnet, and mint the claim code.
+    """Create client + site + subnet (or explicit bypass), then mint a claim code.
 
     An existing client of the same name is reused rather than rejected --
     onboarding a second site for a customer you already have is the common
@@ -1011,12 +1025,38 @@ def onboard_submit(
     client_name = client_name.strip()
     site_name = site_name.strip()
     if not client_name or not site_name:
-        _flash(request, "Client and site names are both required.")
+        _flash(request, "Client and location names are both required.")
         return _redirect("/manage/onboard")
 
     tz = client_timezone.strip()
     if tz and not suppression.valid_timezone(tz):
         _flash(request, f"'{tz}' isn't a recognised timezone — pick one from the list.")
+        return _redirect("/manage/onboard")
+
+    cidr = cidr.strip()
+    skip_network_requested = bool(skip_network.strip())
+    normalized_skip_reason = setup_checklist.normalize_reason(skip_reason)
+    if cidr and skip_network_requested:
+        _flash(request, "Choose a subnet or bypass it for now, not both.")
+        return _redirect("/manage/onboard")
+    if not cidr and not skip_network_requested:
+        _flash(
+            request,
+            "A subnet is required for printer discovery. Use the bypass option "
+            "and record a reason if it is not available yet.",
+        )
+        return _redirect("/manage/onboard")
+    if skip_network_requested and not normalized_skip_reason:
+        _flash(request, "Record why the subnet is being bypassed for now.")
+        return _redirect("/manage/onboard")
+    if cidr:
+        try:
+            cidr = str(ipaddress.ip_network(cidr, strict=False))
+        except ValueError:
+            _flash(request, "Enter a valid subnet in CIDR form, such as 10.10.0.0/24.")
+            return _redirect("/manage/onboard")
+    if snmp_version not in {"1", "2c", "3"}:
+        _flash(request, "Choose a supported SNMP version.")
         return _redirect("/manage/onboard")
 
     client = db.scalar(select(m.Client).where(m.Client.name == client_name))
@@ -1044,7 +1084,6 @@ def onboard_submit(
            target=f"site:{site.id} {site_name} (client:{client.id})",
            detail="via onboarding")
 
-    cidr = cidr.strip()
     if cidr:
         is_trusted = bool(trusted.strip())
         # agent_id stays NULL: the agent does not exist yet and will adopt this
@@ -1058,6 +1097,22 @@ def onboard_submit(
                target=f"subnet:{cidr} site:{site.id}",
                detail=f"snmp v{snmp_version} via onboarding"
                       + (" trusted=on (auto-approves discoveries)" if is_trusted else ""))
+    else:
+        db.add(m.SetupBypass(
+            key=setup_checklist.bypass_key(setup_checklist.STEP_SUBNET, site.id),
+            site_id=site.id,
+            step=setup_checklist.STEP_SUBNET,
+            reason=normalized_skip_reason,
+            created_by_user_id=user.id,
+        ))
+        record(
+            db,
+            request,
+            user,
+            "setup.bypass",
+            target=f"site:{site.id} step:{setup_checklist.STEP_SUBNET}",
+            detail="via onboarding; reason stored with setup exception",
+        )
 
     name = agent_name.strip() or f"{client_name} {site_name} agent"
     token, code = services.mint_claim_token(
@@ -1077,6 +1132,89 @@ def onboard_submit(
     })
     _flash(request, f"{client_name} / {site_name} is ready — run the install command below.")
     return _redirect("/manage/agents")
+
+
+@router.post("/setup/bypass")
+def setup_bypass(
+    request: Request,
+    step: str = Form(...),
+    site_id: str = Form(""),
+    reason: str = Form(...),
+    db: Session = Depends(get_db),
+):
+    """Record a named setup exception without claiming the fleet is healthy."""
+    user = _manager(request, db)
+    if user is None:
+        return _redirect("/login")
+
+    step = step.strip()
+    parsed_site_id: Optional[int] = None
+    if site_id.strip():
+        try:
+            parsed_site_id = int(site_id)
+        except ValueError:
+            _flash(request, "That setup location no longer exists.")
+            return _redirect("/manage/onboard")
+    try:
+        key = setup_checklist.bypass_key(step, parsed_site_id)
+    except ValueError:
+        _flash(request, "That setup requirement cannot be bypassed here.")
+        return _redirect("/manage/onboard")
+    if parsed_site_id is not None and db.get(m.Site, parsed_site_id) is None:
+        _flash(request, "That setup location no longer exists.")
+        return _redirect("/manage/onboard")
+
+    clean_reason = setup_checklist.normalize_reason(reason)
+    if not clean_reason:
+        _flash(request, "Record why this requirement is being bypassed.")
+        return _redirect("/manage/onboard")
+
+    row = db.scalar(select(m.SetupBypass).where(m.SetupBypass.key == key))
+    if row is None:
+        row = m.SetupBypass(
+            key=key,
+            site_id=parsed_site_id,
+            step=step,
+            reason=clean_reason,
+            created_by_user_id=user.id,
+        )
+        db.add(row)
+    else:
+        row.reason = clean_reason
+        row.created_by_user_id = user.id
+        row.created_at = datetime.now(timezone.utc)
+    record(
+        db,
+        request,
+        user,
+        "setup.bypass",
+        target=f"{'site:' + str(parsed_site_id) if parsed_site_id else 'global'} step:{step}",
+        detail="reason stored with setup exception",
+    )
+    db.commit()
+    _flash(request, "Requirement bypassed. Live monitoring will still show as unverified.")
+    return _redirect("/manage/onboard")
+
+
+@router.post("/setup/bypasses/{bypass_id}/clear")
+def setup_bypass_clear(
+    bypass_id: int,
+    request: Request,
+    db: Session = Depends(get_db),
+):
+    user = _manager(request, db)
+    if user is None:
+        return _redirect("/login")
+    row = db.get(m.SetupBypass, bypass_id)
+    if row is None:
+        _flash(request, "That setup bypass was already cleared.")
+        return _redirect("/manage/onboard")
+    target = f"{'site:' + str(row.site_id) if row.site_id else 'global'} step:{row.step}"
+    record(db, request, user, "setup.bypass_clear", target=target)
+    db.delete(row)
+    db.commit()
+    _flash(request, "Bypass cleared. The requirement is active again.")
+    return _redirect("/manage/onboard")
 
 
 @router.post("/agents/claim-code")
@@ -2264,7 +2402,7 @@ def user_create(
         except ValueError:
             pinned_client_id = None
     if role_enum == m.UserRole.client_readonly and pinned_client_id is None:
-        _flash(request, "client_readonly users must be assigned to a client.")
+        _flash(request, "A read-only client account must be assigned to a client.")
         return _redirect("/manage/users")
     # The same floor the reset and self-service paths already enforce. Without it
     # this route -- the one that can mint an ADMIN -- was the only way into the
@@ -2286,7 +2424,7 @@ def user_create(
     record(db, request, _admin(request, db), "user.create",
            target=f"user:{username}", detail=f"role={role_enum.value}")
     db.commit()
-    _flash(request, f"User '{username}' created.")
+    _flash(request, f"Console user '{username}' created.")
     return _redirect("/manage/users")
 
 
@@ -2308,7 +2446,7 @@ def user_update(
     # Last-admin guard: refuse to demote the only remaining admin (lockout).
     if (target.role == m.UserRole.admin and new_role != m.UserRole.admin
             and db.query(m.User).filter_by(role=m.UserRole.admin).count() <= 1):
-        _flash(request, "Refused: this is the only admin. Promote another user first.")
+        _flash(request, "Refused: this is the only admin. Promote another console user first.")
         return _redirect(f"/manage/users/{user_id}/edit")
     pinned_client_id: Optional[int] = None
     if client_id.strip():
@@ -2317,7 +2455,7 @@ def user_update(
         except ValueError:
             pinned_client_id = None
     if new_role == m.UserRole.client_readonly and pinned_client_id is None:
-        _flash(request, "client_readonly users must be assigned to a client.")
+        _flash(request, "A read-only client account must be assigned to a client.")
         return _redirect(f"/manage/users/{user_id}/edit")
     target.email = email.strip() or None
     target.role = new_role
@@ -2325,7 +2463,7 @@ def user_update(
     record(db, request, actor, "user.update",
            target=f"user:{target.username}", detail=f"role={new_role.value}")
     db.commit()
-    _flash(request, f"User '{target.username}' updated.")
+    _flash(request, f"Console user '{target.username}' updated.")
     return _redirect("/manage/users")
 
 
@@ -2382,7 +2520,7 @@ def user_delete(user_id: int, request: Request, db: Session = Depends(get_db)):
            target=f"user:{target.username}", detail=f"role={target.role.value}")
     db.delete(target)
     db.commit()
-    _flash(request, f"User '{target.username}' deleted.")
+    _flash(request, f"Console user '{target.username}' deleted.")
     return _redirect("/manage/users")
 
 

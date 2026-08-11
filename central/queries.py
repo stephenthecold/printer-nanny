@@ -369,6 +369,348 @@ def open_alerts(
     return list(db.scalars(stmt))
 
 
+# --------------------------------------------------------------------------- #
+# Operations dashboard queues
+# --------------------------------------------------------------------------- #
+def _aware_utc(value: Optional[datetime]) -> Optional[datetime]:
+    """Treat SQLite's naive timestamps as UTC, matching worker/freshness logic."""
+    if value is not None and value.tzinfo is None:
+        return value.replace(tzinfo=timezone.utc)
+    return value
+
+
+def subnet_health(db: Session, now: Optional[datetime] = None) -> dict:
+    """One honest tunnel-health row per configured subnet, worst first.
+
+    A heartbeat only proves that the collector can reach central. The product
+    decision for the dashboard is stricter: a subnet is ``verified`` only when
+    the active agent is current *and* at least one approved printer inside that
+    subnet has completed a poll inside the configured printer-offline grace.
+    That last printer reply is the end-to-end evidence that the site tunnel,
+    route, SNMP path, agent, and central ingest path all worked together.
+
+    Printers do not carry a subnet foreign key. Matching therefore uses the
+    collector's existing longest-prefix rule over the printer IP and the
+    subnets at its site. This avoids creating a second, drifting definition of
+    which overlapping subnet owns an address.
+
+    No SNMP credentials are returned. This dictionary is rendered into HTML,
+    and a health read must never become a path that exposes community strings
+    or v3 secrets merely because the operator opened the dashboard.
+    """
+    from central.collector import subnet_for_ip
+    from central.freshness import humanize_age
+    from central.runtime import load_settings
+
+    now = _aware_utc(now) or datetime.now(timezone.utc)
+    runtime = load_settings(db)
+    try:
+        agent_grace = max(1, int(runtime.get("alerts.offline_grace_seconds", 300)))
+    except (TypeError, ValueError):
+        agent_grace = 300
+    try:
+        printer_grace = max(
+            60, int(runtime.get("alerts.printer_offline_minutes", 30)) * 60
+        )
+    except (TypeError, ValueError):
+        printer_grace = 1800
+
+    clients = {row.id: row for row in db.scalars(select(m.Client))}
+    sites = {row.id: row for row in db.scalars(select(m.Site))}
+    agents = {row.id: row for row in db.scalars(select(m.Agent))}
+    subnets = list(db.scalars(select(m.Subnet)))
+    printers = list(
+        db.scalars(
+            select(m.Printer).where(
+                m.Printer.discovery_state == m.DiscoveryState.approved
+            )
+        )
+    )
+
+    subnets_by_site: dict = {}
+    for subnet in subnets:
+        subnets_by_site.setdefault(subnet.site_id, []).append(subnet)
+    printers_by_subnet: dict = {subnet.id: [] for subnet in subnets}
+    for printer in printers:
+        subnet = subnet_for_ip(subnets_by_site.get(printer.site_id, []), printer.ip)
+        if subnet is not None:
+            printers_by_subnet[subnet.id].append(printer)
+
+    rows = []
+    counts = {"verified": 0, "attention": 0, "down": 0}
+    active_agent_ids = set()
+    for subnet in subnets:
+        site = sites.get(subnet.site_id)
+        client = clients.get(site.client_id) if site is not None else None
+        # A leased subnet is served by its current collector. Without a lease,
+        # or before the first lease is acquired, its primary remains the only
+        # honest agent to show.
+        active_agent_id = subnet.collector_agent_id or subnet.agent_id
+        if active_agent_id is not None:
+            active_agent_ids.add(active_agent_id)
+        agent = agents.get(active_agent_id) if active_agent_id else None
+        heartbeat = _aware_utc(agent.last_heartbeat) if agent is not None else None
+        heartbeat_age = (
+            max(0.0, (now - heartbeat).total_seconds()) if heartbeat else None
+        )
+
+        subnet_printers = printers_by_subnet.get(subnet.id, [])
+        last_printer = max(
+            (p for p in subnet_printers if p.last_seen is not None),
+            key=lambda p: _aware_utc(p.last_seen),
+            default=None,
+        )
+        last_poll = _aware_utc(last_printer.last_seen) if last_printer else None
+        poll_age = max(0.0, (now - last_poll).total_seconds()) if last_poll else None
+
+        agent_current = bool(
+            agent is not None
+            and agent.status == m.AgentStatus.online
+            and heartbeat_age is not None
+            and heartbeat_age <= agent_grace
+        )
+        poll_current = poll_age is not None and poll_age <= printer_grace
+
+        if agent is None:
+            state, tone, label = "down", "error", "No agent"
+            explanation = "No collector is assigned to this subnet."
+        elif not agent_current:
+            state, tone, label = "down", "error", "Agent offline"
+            explanation = "The collector is not checking in; the tunnel is not verified."
+        elif not subnet_printers:
+            state, tone, label = "attention", "warning", "Not verified"
+            explanation = "No approved printer is available to prove the subnet path."
+        elif last_poll is None:
+            state, tone, label = "attention", "warning", "Awaiting first poll"
+            explanation = "No printer on this subnet has replied yet."
+        elif not poll_current:
+            state, tone, label = "down", "error", "Poll overdue"
+            explanation = "No printer reply arrived inside the configured offline window."
+        else:
+            state, tone, label = "verified", "ok", "Verified"
+            explanation = "A printer on this subnet replied successfully."
+
+        counts[state] += 1
+        rows.append(
+            {
+                "subnet_id": subnet.id,
+                "subnet_label": subnet.label or subnet.cidr,
+                "cidr": subnet.cidr,
+                "client_name": client.name if client is not None else "Unknown client",
+                "site_name": site.name if site is not None else "Unknown site",
+                "agent_id": agent.id if agent is not None else None,
+                "agent_name": agent.name if agent is not None else "Unassigned",
+                "agent_status": agent.status.value if agent is not None else "unassigned",
+                "heartbeat_at": heartbeat,
+                "heartbeat_iso": heartbeat.isoformat() if heartbeat else "",
+                "heartbeat_age": humanize_age(heartbeat_age),
+                "last_poll_at": last_poll,
+                "last_poll_iso": last_poll.isoformat() if last_poll else "",
+                "last_poll_age": humanize_age(poll_age),
+                "last_printer_id": last_printer.id if last_printer else None,
+                "last_printer_name": (
+                    last_printer.display_name
+                    or last_printer.model
+                    or last_printer.hostname
+                    or last_printer.ip
+                ) if last_printer else "",
+                "printer_count": len(subnet_printers),
+                "state": state,
+                "tone": tone,
+                "label": label,
+                "explanation": explanation,
+            }
+        )
+
+    state_rank = {"down": 0, "attention": 1, "verified": 2}
+    rows.sort(
+        key=lambda row: (
+            state_rank[row["state"]],
+            row["client_name"].casefold(),
+            row["site_name"].casefold(),
+            row["subnet_label"].casefold(),
+        )
+    )
+
+    # Agents not currently serving any subnet are not allowed to disappear from
+    # a page titled "System and agent status". Healthy spare/unassigned agents
+    # are setup detail, not an incident; unhealthy ones are the exception worth
+    # surfacing. An agent already represented by a subnet row is omitted here
+    # because that row carries the same failure and the remediation link.
+    agent_issues = []
+    for agent in agents.values():
+        if agent.id in active_agent_ids:
+            continue
+        heartbeat = _aware_utc(agent.last_heartbeat)
+        heartbeat_age = (
+            max(0.0, (now - heartbeat).total_seconds()) if heartbeat else None
+        )
+        if (
+            agent.status == m.AgentStatus.online
+            and heartbeat_age is not None
+            and heartbeat_age <= agent_grace
+        ):
+            continue
+        site = sites.get(agent.site_id)
+        client = clients.get(site.client_id) if site is not None else None
+        agent_issues.append(
+            {
+                "agent_id": agent.id,
+                "agent_name": agent.name,
+                "client_name": client.name if client is not None else "Unknown client",
+                "site_name": site.name if site is not None else "Unknown site",
+                "status": agent.status.value,
+                "heartbeat_at": heartbeat,
+                "heartbeat_iso": heartbeat.isoformat() if heartbeat else "",
+                "heartbeat_age": humanize_age(heartbeat_age),
+            }
+        )
+    agent_issues.sort(
+        key=lambda row: (
+            row["client_name"].casefold(),
+            row["site_name"].casefold(),
+            row["agent_name"].casefold(),
+        )
+    )
+    return {
+        "rows": rows,
+        "total": len(rows),
+        "agent_issues": agent_issues,
+        "agent_attention": len(agent_issues),
+        **counts,
+    }
+
+
+def printer_issue_queue(db: Session, limit: int = 12) -> dict:
+    """Affected printers, grouped once and ordered by operational impact.
+
+    A printer is one dashboard task even when three rules describe it. Grouping
+    keeps the overview from becoming an alert-log duplicate while retaining the
+    total through ``more_count``. Printers reporting ``offline`` or ``error``
+    are included even before the worker opens an Alert, so the dashboard never
+    waits a cycle to show a device that cannot print.
+    """
+    live_alerts = list(
+        db.scalars(
+            select(m.Alert).where(
+                m.Alert.state != m.AlertState.resolved,
+                m.Alert.printer_id.is_not(None),
+            )
+        )
+    )
+    status_printers = list(
+        db.scalars(
+            select(m.Printer).where(
+                m.Printer.discovery_state == m.DiscoveryState.approved,
+                m.Printer.status.in_([m.PrinterStatus.offline, m.PrinterStatus.error]),
+            )
+        )
+    )
+    printer_ids = {a.printer_id for a in live_alerts if a.printer_id is not None}
+    printer_ids.update(p.id for p in status_printers)
+    if not printer_ids:
+        return {"rows": [], "total": 0}
+
+    printers = {
+        p.id: p
+        for p in db.scalars(select(m.Printer).where(m.Printer.id.in_(printer_ids)))
+    }
+    site_ids = {p.site_id for p in printers.values()}
+    client_ids = {p.client_id for p in printers.values()}
+    sites = {
+        row.id: row
+        for row in db.scalars(select(m.Site).where(m.Site.id.in_(site_ids)))
+    }
+    clients = {
+        row.id: row
+        for row in db.scalars(select(m.Client).where(m.Client.id.in_(client_ids)))
+    }
+    alerts_by_printer: dict = {}
+    for alert in live_alerts:
+        alerts_by_printer.setdefault(alert.printer_id, []).append(alert)
+
+    severity_rank = {
+        m.EventSeverity.critical: 0,
+        m.EventSeverity.warning: 1,
+        m.EventSeverity.info: 2,
+    }
+    rows = []
+    for printer_id in printer_ids:
+        printer = printers.get(printer_id)
+        if printer is None:
+            continue
+        alerts = alerts_by_printer.get(printer_id, [])
+        blocking = printer.status in (m.PrinterStatus.offline, m.PrinterStatus.error)
+
+        # A current device state is stronger than an older rule title. Put it at
+        # the front so "Printer is offline" cannot be hidden behind "Toner low".
+        status_title = None
+        if printer.status == m.PrinterStatus.offline:
+            status_title = "Printer is offline"
+        elif printer.status == m.PrinterStatus.error:
+            status_title = "Printer reports an error"
+
+        ordered_alerts = sorted(
+            alerts,
+            key=lambda a: (
+                0 if a.type == m.AlertConditionType.printer_offline else 1,
+                severity_rank.get(a.severity, 9),
+                _aware_utc(a.created_at) or datetime.min.replace(tzinfo=timezone.utc),
+            ),
+        )
+        primary = ordered_alerts[0] if ordered_alerts else None
+        if status_title is not None:
+            title = status_title
+            detail = primary.title if primary is not None else ""
+            severity = m.EventSeverity.critical
+            issue_count = len(alerts) + 1
+            hidden_count = max(0, len(alerts) - 1)
+        elif primary is not None:
+            title = primary.title
+            detail = primary.detail or ""
+            severity = primary.severity
+            issue_count = len(alerts)
+            hidden_count = max(0, len(alerts) - 1)
+            blocking = blocking or primary.type == m.AlertConditionType.printer_offline
+        else:
+            continue
+
+        site = sites.get(printer.site_id)
+        client = clients.get(printer.client_id)
+        rows.append(
+            {
+                "printer_id": printer.id,
+                "printer_name": (
+                    printer.display_name or printer.model or printer.hostname or printer.ip
+                ),
+                "model": printer.model or "Unknown model",
+                "ip": printer.ip,
+                "client_name": client.name if client is not None else "Unknown client",
+                "site_name": site.name if site is not None else "Unknown site",
+                "location": printer.location or "",
+                "title": title,
+                "detail": detail,
+                "severity": severity.value,
+                "tone": "error" if severity == m.EventSeverity.critical else "warning",
+                "blocking": blocking,
+                "impact_label": "Printing stopped" if blocking else "Needs attention",
+                "issue_count": issue_count,
+                "more_count": hidden_count,
+            }
+        )
+
+    rows.sort(
+        key=lambda row: (
+            0 if row["blocking"] else 1,
+            0 if row["severity"] == m.EventSeverity.critical.value else 1,
+            row["client_name"].casefold(),
+            row["site_name"].casefold(),
+            row["printer_name"].casefold(),
+        )
+    )
+    return {"rows": rows[: max(0, limit)], "total": len(rows)}
+
+
 def undelivered_notifications(db: Session) -> dict:
     """Notifications an operator still owes somebody, for the Alerts-page banner.
 

@@ -7,8 +7,8 @@
  * Served from the image like everything else: installs sit on segmented
  * management VLANs with no outbound internet.
  *
- * It does exactly two things, both in service of the freshness strip
- * (templates/_freshness.html):
+ * It keeps the freshness strip honest and supplies progressive enhancements
+ * for the responsive navigation drawer.
  *
  *  1. RE-DERIVES THE RELATIVE AGE from the absolute timestamp the server sent.
  *     A server-rendered "2m ago" is true for one instant and a lie for as long
@@ -97,7 +97,97 @@
     announce();
   }
 
+  /* The navigation drawer remains pointer-operable when this file does not
+   * load. JavaScript adds keyboard activation, focus containment, Escape, and
+   * background inertness. The checkbox remains the source of truth. */
+  function initNavigation() {
+    var control = document.getElementById("pn-nav-toggle");
+    var navigation = document.getElementById("primary-navigation");
+    var page = document.getElementById("pn-page");
+    var mobileHeader = document.getElementById("pn-mobile-header");
+    var mobileMenu = document.getElementById("pn-mobile-menu");
+    if (!control) return;
+
+    function isDesktop() {
+      return window.matchMedia("(min-width: 1024px)").matches;
+    }
+
+    function sync() {
+      var open = control.checked && !isDesktop();
+      if (mobileMenu) mobileMenu.setAttribute("aria-expanded", open ? "true" : "false");
+      document.body.classList.toggle("overflow-hidden", open);
+      var backgroundNodes = [page, mobileHeader, mobileMenu];
+      for (var i = 0; i < backgroundNodes.length; i++) {
+        var node = backgroundNodes[i];
+        if (!node) continue;
+        if (open) {
+          node.setAttribute("inert", "");
+          node.setAttribute("aria-hidden", "true");
+        } else {
+          node.removeAttribute("inert");
+          node.removeAttribute("aria-hidden");
+        }
+      }
+    }
+
+    function focusables() {
+      if (!navigation) return [];
+      return Array.prototype.slice.call(navigation.querySelectorAll(
+        'a[href], summary, input:not([disabled]), button:not([disabled]), [tabindex]:not([tabindex="-1"])'
+      )).filter(function (node) {
+        return node.getClientRects().length > 0;
+      });
+    }
+
+    control.addEventListener("change", function () {
+      sync();
+      if (control.checked && !isDesktop()) {
+        var nodes = focusables();
+        var current = navigation && navigation.querySelector('[aria-current="page"]');
+        if (current) current.focus();
+        else if (nodes.length) nodes[0].focus();
+      } else if (navigation && navigation.contains(document.activeElement)) {
+        if (mobileMenu) mobileMenu.focus();
+      }
+    });
+    var toggles = document.querySelectorAll("[data-pn-nav-toggle][tabindex]");
+    for (var j = 0; j < toggles.length; j++) {
+      toggles[j].addEventListener("keydown", function (event) {
+        if (event.key !== "Enter" && event.key !== " ") return;
+        event.preventDefault();
+        this.click();
+      });
+    }
+    document.addEventListener("keydown", function (event) {
+      if (!control.checked || isDesktop()) return;
+      if (event.key === "Escape") {
+        control.checked = false;
+        sync();
+        if (mobileMenu) mobileMenu.focus();
+        return;
+      }
+      if (event.key !== "Tab") return;
+      var nodes = focusables();
+      if (!nodes.length) return;
+      var first = nodes[0];
+      var last = nodes[nodes.length - 1];
+      if (event.shiftKey && document.activeElement === first) {
+        event.preventDefault();
+        last.focus();
+      } else if (!event.shiftKey && document.activeElement === last) {
+        event.preventDefault();
+        first.focus();
+      }
+    });
+    window.addEventListener("resize", function () {
+      if (isDesktop() && control.checked) control.checked = false;
+      sync();
+    });
+    sync();
+  }
+
   refresh();
+  initNavigation();
   setInterval(tick, TICK_MS);
   /* htmx events bubble, so one listener on the document covers the strip being
    * replaced by its own poll and by the "Check now" button alike. */

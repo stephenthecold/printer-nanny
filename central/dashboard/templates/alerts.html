@@ -1,9 +1,9 @@
 {% extends "base.html" %}
 {% from "_components.html" import badge, btn, card_cls, empty_row, note, page_title,
         table_cls, table_wrap, td_cls, th_cls, thead_cls %}
-{% block title %}Alerts · Printer Nanny{% endblock %}
+{% block title %}Issues · Printer Nanny{% endblock %}
 {% block body %}
-{{ page_title('Alerts') }}
+{{ page_title('Issues') }}
 
 {# Undelivered notifications: alerts nobody was told about. `owed` means no
    channel was enabled/routed when the alert fired -- the notification is queued
@@ -40,7 +40,7 @@
       <thead class="{{ thead_cls() }}">
         <tr>
           <th class="{{ th_cls() }}">Severity</th>
-          <th class="{{ th_cls() }}">Alert</th>
+          <th class="{{ th_cls() }}">Issue</th>
           <th class="{{ th_cls() }}">State</th>
           <th class="{{ th_cls() }}">Opened</th>
           <th class="{{ th_cls('right') }}">Action</th>
@@ -88,7 +88,7 @@
           </td>
         </tr>
         {% else %}
-        {{ empty_row(5, 'No active alerts.') }}
+        {{ empty_row(5, 'No active issues.') }}
         {% endfor %}
       </tbody>
     </table>

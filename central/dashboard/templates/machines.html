@@ -1,9 +1,9 @@
 {% extends "base.html" %}
 {% import "_components.html" as c %}
-{% block title %}Machines{% endblock %}
+{% block title %}Workstations{% endblock %}
 
 {% block body %}
-{{ c.page_title("Machines", "Workstations running the print client, and the keys that let them enroll.") }}
+{{ c.page_title("Workstations", "Computers running the print client, and the keys that let them enroll.") }}
 
 {% if flash %}
   <div class="{{ c.note('info', 'mb-4') }}">{{ flash }}</div>
@@ -32,12 +32,12 @@
     <div class="{{ c.note('warning', 'mb-4') }}">
       <p class="font-medium">Copy this key now — it is not shown again.</p>
       <code class="mt-2 block break-all rounded bg-slate-900 px-3 py-2 font-mono text-xs text-slate-100">{{ new_key.key }}</code>
-      <p class="mt-2 text-xs">Bake it into this client's installer as <code>PN_ENROLL_KEY</code>. It can only enroll machines — it cannot read your fleet.</p>
+      <p class="mt-2 text-xs">Bake it into this client's installer as <code>PN_ENROLL_KEY</code>. It can only enroll workstations — it cannot read your fleet.</p>
     </div>
   {% endif %}
 
   <p class="mb-4 text-sm text-slate-600">
-    One key per client, baked into that client's installer. A machine redeems it
+    One key per client, baked into that client's installer. A workstation redeems it
     once to mint its own credential, so revoking a key stops <em>new</em>
     enrollments and leaves every enrolled workstation working.
   </p>
@@ -94,9 +94,9 @@
   {{ c.section_title("Vendor driver packages") }}
   <p class="mb-4 text-sm text-slate-600">
     For printers the inbox driverless path can't drive. A package is downloaded,
-    <strong>checksum-verified</strong> and staged as root on each machine that
+    <strong>checksum-verified</strong> and staged as root on each workstation that
     needs it — so upload only drivers you trust. Printers with no matching package
-    for their machine's platform stay skipped rather than bound to a wrong driver.
+    for their workstation's platform stay skipped rather than bound to a wrong driver.
   </p>
 
   <div class="{{ c.table_wrap() }}">
@@ -200,7 +200,7 @@
     workstation client, and a <strong>freshly minted enrollment key</strong> — one
     per build, so revoking a leaked installer leaves every other install alone.
     It runs as a LocalSystem service and provisions the queues assigned to each
-    machine and its signed-in user.
+    workstation and its signed-in user.
   </p>
   {% if msi_available %}
     <form method="post" action="/manage/machines/msi">
@@ -257,7 +257,7 @@
     <table class="{{ c.table_cls() }}">
       <thead class="{{ c.thead_cls() }}">
         <tr>
-          <th class="{{ c.th_cls() }}">Machine</th>
+          <th class="{{ c.th_cls() }}">Workstation</th>
           <th class="{{ c.th_cls() }}">Printers</th>
           <th class="{{ c.th_cls() }}">Last seen</th>
           <th class="{{ c.th_cls() }}">Status</th>
@@ -285,7 +285,7 @@
                   <input type="hidden" name="machine_id" value="{{ mach.id }}">
                   <input type="hidden" name="printer_id" value="{{ printer.id }}">
                   <button type="submit" class="{{ c.btn('subtle', 'sm') }}"
-                          aria-label="Remove {{ printer.display_name or printer.ip }} from {{ mach.name or 'this machine' }}">Remove</button>
+                          aria-label="Remove {{ printer.display_name or printer.ip }} from {{ mach.name or 'this workstation' }}">Remove</button>
                 </form>
               </div>
               {% endif %}
@@ -296,7 +296,7 @@
             <form method="post" action="/manage/machines/assign" class="mt-2 flex flex-wrap items-center gap-2">
               {{ csrf_field() }}
               <input type="hidden" name="machine_id" value="{{ mach.id }}">
-              <label class="sr-only" for="printer-{{ mach.id }}">Printer to assign to {{ mach.name or 'this machine' }}</label>
+              <label class="sr-only" for="printer-{{ mach.id }}">Printer to assign to {{ mach.name or 'this workstation' }}</label>
               <select id="printer-{{ mach.id }}" name="printer_id" class="{{ c.input_sm_cls() }}">
                 {% for p in printers %}
                   <option value="{{ p.id }}">{{ p.display_name or p.ip }}</option>
@@ -321,7 +321,7 @@
                 {{ csrf_field() }}
                 <input type="hidden" name="default_wins" value="{{ '0' if mach.default_wins else '1' }}">
                 <button type="submit" class="{{ c.btn('subtle', 'sm') }}"
-                        aria-label="{{ 'Stop' if mach.default_wins else 'Let' }} {{ mach.name or 'this machine' }} {{ 'overriding' if mach.default_wins else 'override' }} personal defaults">
+                        aria-label="{{ 'Stop' if mach.default_wins else 'Let' }} {{ mach.name or 'this workstation' }} {{ 'overriding' if mach.default_wins else 'override' }} personal defaults">
                   {{ 'Unset shared' if mach.default_wins else 'Shared terminal' }}
                 </button>
               </form>
@@ -329,7 +329,7 @@
                 {{ csrf_field() }}
                 <input type="hidden" name="active" value="{{ '0' if mach.active else '1' }}">
                 <button type="submit" class="{{ c.btn('warning' if mach.active else 'success', 'sm') }}"
-                        aria-label="{{ 'Retire' if mach.active else 'Reactivate' }} {{ mach.name or 'this machine' }}">
+                        aria-label="{{ 'Retire' if mach.active else 'Reactivate' }} {{ mach.name or 'this workstation' }}">
                   {{ 'Retire' if mach.active else 'Reactivate' }}
                 </button>
               </form>

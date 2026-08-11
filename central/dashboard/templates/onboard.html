@@ -1,125 +1,183 @@
 {% extends "base.html" %}
-{% from "_components.html" import btn, card_cls %}
-{% block title %}Onboard a client · {{ app.name or 'Printer Nanny' }}{% endblock %}
+{% from "_components.html" import badge, btn, card_cls, checkbox_field, field,
+        input_cls, note, page_title, select_field, setup_step with context %}
+{% block title %}Setup · {{ app.name or 'Printer Nanny' }}{% endblock %}
 {% block body %}
-<h1 class="text-2xl font-semibold mb-1">Onboard a client</h1>
-<p class="text-sm text-slate-500 mb-4 max-w-3xl">
-  Creates the client, the site and its subnet, then mints a single-use claim code
-  so the site box enrolls itself. Everything is saved together — you end on the
-  install command rather than four separate forms.
-</p>
+{{ page_title('Setup', 'Work down the required steps. Optional details are separated so they never hold up monitoring.') }}
 
 {% if flash %}
-<div class="mb-4 rounded border border-sky-200 bg-sky-50 text-sky-900 px-3 py-2 text-sm">{{ flash }}</div>
+<div class="{{ note('info', 'mb-4') }}" role="status">{{ flash }}</div>
 {% endif %}
 
-<form method="post" action="/manage/onboard" class="max-w-3xl space-y-5">
-  {{ csrf_field() }}
+<section class="{{ card_cls('md', 'mb-5') }}" aria-labelledby="setup-progress-title">
+  <div class="flex items-start justify-between gap-4 flex-wrap">
+    <div>
+      <h2 id="setup-progress-title" class="font-semibold">Required setup</h2>
+      <p class="text-sm text-slate-500 mt-1">
+        {{ setup.complete_count }} of {{ setup.required_total }} requirement{{ 's' if setup.required_total != 1 }} addressed.
+        {% if setup.bypassed_count %}{{ setup.bypassed_count }} bypassed requirement{{ 's' if setup.bypassed_count != 1 }} remain visible below.{% endif %}
+      </p>
+    </div>
+    {% if setup.open_count %}{{ badge(setup.open_count ~ ' still required', 'warning') }}
+    {% else %}{{ badge('Required setup addressed', 'ok') }}{% endif %}
+  </div>
+  <div class="mt-3 h-2 rounded bg-slate-200 overflow-hidden" role="progressbar"
+       aria-label="Required setup progress" aria-valuemin="0" aria-valuemax="{{ setup.required_total }}"
+       aria-valuenow="{{ setup.complete_count }}">
+    <div class="h-full bg-sky-600" style="width: {{ ((setup.complete_count * 100 / setup.required_total) if setup.required_total else 100)|round(0, 'floor') }}%"></div>
+  </div>
+  {% if setup.verification_attention %}
+  <p class="text-xs text-amber-800 mt-3">
+    {{ setup.verification_attention }} location{{ 's' if setup.verification_attention != 1 }} still need a current agent reply and successful printer poll. Setup exceptions never hide that live status.
+  </p>
+  {% endif %}
+</section>
 
-  <section class="{{ card_cls() }}">
-    <h2 class="font-semibold mb-1">1 · Customer</h2>
-    <p class="text-xs text-slate-500 mb-3">
-      An existing customer of the same name is reused, so this is also how you add
-      a second site to someone you already have.
-    </p>
-    <div class="grid sm:grid-cols-2 gap-3">
-      <label class="block">
-        <span class="text-xs text-slate-500">Client name</span>
-        <input name="client_name" required list="client-names" placeholder="Acme Ltd"
-               class="w-full border rounded px-3 py-2 text-sm" />
-        <datalist id="client-names">
-          {% for c in clients %}<option value="{{ c.name }}"></option>{% endfor %}
-        </datalist>
-      </label>
-      <label class="block">
-        <span class="text-xs text-slate-500">Timezone</span>
-        <input name="client_timezone" list="tz-list" placeholder="{{ default_tz }} (inherited)"
-               class="w-full border rounded px-3 py-2 text-sm" />
-        <datalist id="tz-list">
-          {% for tz in tz_choices %}<option value="{{ tz }}"></option>{% endfor %}
-        </datalist>
-        <span class="text-xs text-slate-400">Quiet hours are read in this zone. Blank inherits {{ default_tz }}.</span>
-      </label>
+<section class="{{ card_cls('md', 'mb-5') }}" aria-labelledby="shared-setup-title">
+  <h2 id="shared-setup-title" class="font-semibold mb-1">Shared services</h2>
+  <p class="text-xs text-slate-500 mb-3">Configured once for the whole system.</p>
+  <div class="space-y-2">
+    {% for step in setup.global_steps %}{{ setup_step(step) }}{% endfor %}
+  </div>
+</section>
+
+{% if not setup.has_clients %}
+<section class="{{ note('warning', 'mb-5') }}" aria-labelledby="first-client-title">
+  <h2 id="first-client-title" class="font-semibold">Start with a client and location</h2>
+  <p class="mt-1">Use the guided form below. It creates the hierarchy and a single-use agent claim code together.</p>
+</section>
+{% endif %}
+
+{% for missing in setup.missing_locations %}
+<section class="{{ note('warning', 'mb-3 flex items-center justify-between gap-3 flex-wrap') }}">
+  <div>
+    <h2 class="font-medium">{{ missing.client_name }} needs a location</h2>
+    <p class="text-xs mt-1">A location is required before a subnet, agent, or printer can be assigned.</p>
+  </div>
+  <a href="#add-location" class="{{ btn('accent', 'sm') }}">Add location</a>
+</section>
+{% endfor %}
+
+{% for location in setup.attention_sites %}
+  <section class="{{ card_cls('md', 'mb-4') }}" aria-labelledby="location-{{ location.site_id }}-title">
+    <div class="flex items-start justify-between gap-3 flex-wrap mb-3">
+      <div>
+        <p class="text-xs text-slate-500">{{ location.client_name }}</p>
+        <h2 id="location-{{ location.site_id }}-title" class="font-semibold">{{ location.site_name }}</h2>
+      </div>
+      {% if location.verified %}{{ badge('Monitoring verified', 'ok') }}
+      {% else %}{{ badge(location.verification, 'warning') }}{% endif %}
+    </div>
+    <div class="space-y-2">
+      {% for step in location.steps %}{{ setup_step(step, location.site_id) }}{% endfor %}
+    </div>
+    <div class="mt-3 rounded border border-dashed border-slate-300 px-3 py-2 flex items-center justify-between gap-3 flex-wrap">
+      <div>
+        <h3 class="text-sm font-medium">Optional location details</h3>
+        <p class="text-xs text-slate-500">Address and contact help technicians, but never block polling, tracking, or reports.</p>
+      </div>
+      {% if location.optional_complete %}{{ badge('Added', 'neutral') }}
+      {% else %}<a href="/manage/clients/{{ location.client_id }}#sites" class="text-xs text-sky-700 hover:underline rounded">Add optional details</a>{% endif %}
     </div>
   </section>
+{% endfor %}
 
-  <section class="{{ card_cls() }}">
-    <h2 class="font-semibold mb-3">2 · Site</h2>
-    <div class="grid sm:grid-cols-2 gap-3">
-      <label class="block">
-        <span class="text-xs text-slate-500">Site name</span>
-        <input name="site_name" required placeholder="Head office"
-               class="w-full border rounded px-3 py-2 text-sm" />
-      </label>
-      <label class="block">
-        <span class="text-xs text-slate-500">Agent name (optional)</span>
-        <input name="agent_name" placeholder="Acme Ltd Head office agent"
-               class="w-full border rounded px-3 py-2 text-sm" />
-      </label>
+{% if setup.ready_sites %}
+<details class="{{ card_cls('none', 'mb-4') }}">
+  <summary class="cursor-pointer rounded px-4 py-4 font-semibold focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-sky-500">
+    {{ setup.ready_sites|length }} configured location{{ 's' if setup.ready_sites|length != 1 }}
+    <span class="block text-xs font-normal text-slate-500 mt-1">Required setup and live monitoring are verified. Expand only when you need a location shortcut.</span>
+  </summary>
+  <div class="border-t divide-y">
+    {% for location in setup.ready_sites %}
+    <div class="px-4 py-3 flex items-center justify-between gap-3 flex-wrap">
+      <div>
+        <div class="text-xs text-slate-500">{{ location.client_name }}</div>
+        <div class="text-sm font-medium">{{ location.site_name }}</div>
+      </div>
+      <div class="flex items-center gap-3 flex-wrap">
+        {{ badge('Monitoring verified', 'ok') }}
+        <a href="/manage/clients/{{ location.client_id }}#sites" class="text-xs text-sky-700 hover:underline rounded">Manage location</a>
+      </div>
     </div>
-  </section>
+    {% endfor %}
+  </div>
+</details>
+{% endif %}
 
-  <section class="{{ card_cls() }}">
-    <h2 class="font-semibold mb-1">3 · Network</h2>
-    <p class="text-xs text-slate-500 mb-3">
-      Optional — you can add subnets later. The agent picks this up automatically
-      when it enrolls.
-    </p>
-    <div class="grid sm:grid-cols-4 gap-3">
-      <label class="block sm:col-span-2">
-        <span class="text-xs text-slate-500">Subnet (CIDR)</span>
-        <input name="cidr" placeholder="10.10.0.0/24"
-               class="w-full border rounded px-3 py-2 text-sm tabular-nums" />
-      </label>
-      <label class="block">
-        <span class="text-xs text-slate-500">SNMP community</span>
-        <input name="snmp_community" value="public" class="w-full border rounded px-3 py-2 text-sm" />
-      </label>
-      <label class="block">
-        <span class="text-xs text-slate-500">Version</span>
-        <select name="snmp_version" class="w-full border rounded px-3 py-2 text-sm">
+<details id="add-location" class="{{ card_cls('none', 'mb-5') }}" {% if not setup.has_clients %}open{% endif %}>
+  <summary class="cursor-pointer rounded px-4 py-4 font-semibold focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-sky-500">
+    Add a client or location
+    <span class="block text-xs font-normal text-slate-500 mt-1">Creates the client, location, subnet and claim code in one transaction.</span>
+  </summary>
+  <form method="post" action="/manage/onboard" class="border-t p-4 space-y-5">
+    {{ csrf_field() }}
+
+    <section>
+      <h2 class="font-semibold mb-1">1 · Client</h2>
+      <p class="text-xs text-slate-500 mb-3">Enter an existing client name to add another location without duplicating the client.</p>
+      <div class="grid sm:grid-cols-2 gap-3">
+        <label class="block">
+          <span class="text-xs text-slate-500">Client name <span class="text-red-600" aria-hidden="true">*</span></span>
+          <input name="client_name" required list="client-names" placeholder="Acme Ltd" class="{{ input_cls() }}" />
+          <datalist id="client-names">
+            {% for c in clients %}<option value="{{ c.name }}"></option>{% endfor %}
+          </datalist>
+        </label>
+        <label class="block">
+          <span class="text-xs text-slate-500">Timezone</span>
+          <input name="client_timezone" list="tz-list" placeholder="{{ default_tz }} (inherited)" class="{{ input_cls() }}" />
+          <datalist id="tz-list">
+            {% for tz in tz_choices %}<option value="{{ tz }}"></option>{% endfor %}
+          </datalist>
+          <span class="block text-xs text-slate-400 mt-0.5">Used for quiet hours. Blank inherits {{ default_tz }}.</span>
+        </label>
+      </div>
+    </section>
+
+    <section>
+      <h2 class="font-semibold mb-3">2 · Location</h2>
+      <div class="grid sm:grid-cols-2 gap-3">
+        {{ field('site_name', 'Location name', required=True, placeholder='Head office') }}
+        {{ field('agent_name', 'Agent name', placeholder='Acme Ltd Head office agent', help='Optional; a sensible name is generated if blank.') }}
+      </div>
+    </section>
+
+    <section>
+      <h2 class="font-semibold mb-1">3 · Network</h2>
+      <p class="text-xs text-slate-500 mb-3">Required for discovery and tracking. If the network details are not available, use the explicit bypass below and record why.</p>
+      <div class="grid sm:grid-cols-4 gap-3">
+        {{ field('cidr', 'Subnet (CIDR)', placeholder='10.10.0.0/24', extra_cls='tabular-nums sm:col-span-2') }}
+        {{ field('snmp_community', 'SNMP community', value='public') }}
+        {% call select_field('snmp_version', 'SNMP version') %}
           <option value="2c">v2c</option>
           <option value="1">v1</option>
           <option value="3">v3</option>
-        </select>
-      </label>
-    </div>
-    <label class="mt-3 flex items-start gap-2 text-xs text-slate-600">
-      <input type="checkbox" name="trusted" value="1" class="mt-0.5" />
-      <span>
-        <span class="font-medium">Trust this subnet</span> — approve discovered printers
-        automatically instead of queueing them for review.
-        <span class="text-slate-400">Only for a network you control: an approved device
-        joins this client's fleet and its self-reported name appears in dashboards and alerts.</span>
-      </span>
-    </label>
-    <p class="text-xs text-slate-400 mt-2">
-      SNMPv3 credentials are set per subnet on the
-      <a href="/manage/agents" class="text-sky-700 hover:underline">Agents</a> page after enrollment.
-    </p>
-  </section>
+        {% endcall %}
+      </div>
+      <div class="mt-3 space-y-3">
+        {{ checkbox_field('trusted', 'Trust this subnet', help='Auto-approves discovered printers. Use only for a network you control.', value='1') }}
+        {{ checkbox_field('skip_network', 'Continue without a subnet for now', help='Requires a reason below and leaves monitoring unverified.', value='1') }}
+        {{ field('skip_reason', 'Reason for bypass', placeholder='Waiting for network details from the client', help='Required only when bypassing. Do not enter credentials.') }}
+      </div>
+      <p class="text-xs text-slate-400 mt-3">SNMPv3 credentials are added on the Agents page after enrollment and are never shown in this checklist.</p>
+    </section>
 
-  <section class="{{ card_cls() }}">
-    <h2 class="font-semibold mb-3">4 · Claim code</h2>
-    <label class="block sm:w-64">
-      <span class="text-xs text-slate-500">Valid for</span>
-      <select name="ttl_minutes" class="w-full border rounded px-3 py-2 text-sm">
+    <section>
+      <h2 class="font-semibold mb-3">4 · Agent claim code</h2>
+      {% call select_field('ttl_minutes', 'Valid for', extra_cls='sm:w-64') %}
         <option value="60">1 hour</option>
         <option value="240">4 hours</option>
         <option value="1440" selected>1 day</option>
         <option value="10080">7 days (maximum)</option>
-      </select>
-    </label>
-    <p class="text-xs text-slate-400 mt-2">
-      Shown once on the next screen. Single use — it stops working after the agent enrolls.
-    </p>
-  </section>
+      {% endcall %}
+      <p class="text-xs text-slate-400 mt-2">The code is shown once on the next screen and stops working after the agent enrolls.</p>
+    </section>
 
-  <div class="flex items-center gap-3">
-    <button class="{{ btn('primary') }}">
-      Create &amp; show install command
-    </button>
-    <a href="/manage" class="text-sm text-slate-500 hover:underline">Cancel</a>
-  </div>
-</form>
+    <div class="flex items-center gap-3 flex-wrap">
+      <button class="{{ btn('primary') }}">Create and show install command</button>
+      <a href="/" class="text-sm text-slate-500 hover:underline rounded">Back to dashboard</a>
+    </div>
+  </form>
+</details>
 {% endblock %}

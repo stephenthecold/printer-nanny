@@ -127,6 +127,11 @@ class SupplyType(str, enum.Enum):
     other = "other"
 
 
+class SupplyOrderStatus(str, enum.Enum):
+    ordered = "ordered"
+    delivered = "delivered"
+
+
 class EventSeverity(str, enum.Enum):
     info = "info"
     warning = "warning"
@@ -372,8 +377,46 @@ class Site(Base):
     agents: Mapped[list[Agent]] = relationship(back_populates="site", cascade="all, delete-orphan")
     subnets: Mapped[list[Subnet]] = relationship(back_populates="site", cascade="all, delete-orphan")
     printers: Mapped[list[Printer]] = relationship(back_populates="site")
+    setup_bypasses: Mapped[list[SetupBypass]] = relationship(
+        back_populates="site", cascade="all, delete-orphan"
+    )
+    supply_orders: Mapped[list[SupplyOrder]] = relationship(
+        back_populates="site", cascade="all, delete-orphan"
+    )
 
     __table_args__ = (UniqueConstraint("client_id", "name", name="uq_site_client_name"),)
+
+
+class SetupBypass(Base):
+    """A deliberate, visible exception to one guided-setup requirement.
+
+    Bypasses are rows instead of anonymous settings so they can be site-scoped,
+    attributed to the console user who made the decision, removed with their
+    site, and audited without treating an operational exception as healthy.
+    ``key`` is the portable uniqueness boundary: SQL treats two NULL site ids as
+    distinct in a composite unique constraint, which would allow duplicate
+    global notification bypasses on both SQLite and Postgres.
+    """
+
+    __tablename__ = "setup_bypasses"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    key: Mapped[str] = mapped_column(String(120))
+    site_id: Mapped[Optional[int]] = mapped_column(
+        ForeignKey("sites.id", ondelete="CASCADE"), default=None, index=True
+    )
+    step: Mapped[str] = mapped_column(String(40))
+    reason: Mapped[str] = mapped_column(String(500))
+    created_by_user_id: Mapped[Optional[int]] = mapped_column(
+        ForeignKey("users.id", ondelete="SET NULL"), default=None
+    )
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+
+    site: Mapped[Optional[Site]] = relationship(back_populates="setup_bypasses")
+
+    __table_args__ = (
+        UniqueConstraint("key", name="uq_setup_bypasses_key"),
+    )
 
 
 # --------------------------------------------------------------------------- #
@@ -840,6 +883,63 @@ class Supply(Base):
         from central.supplies import is_receptacle  # lazy: supplies imports models
 
         return is_receptacle(self)
+
+
+class SupplyOrder(Base):
+    """A location-specific record of a consumable a technician ordered.
+
+    The identifying fields are copied from the printer/supply at order time so
+    the purchasing history survives a printer being retired. ``model`` plus the
+    supply slot is also the honest compatibility key available without a vendor
+    SKU catalogue; the UI shows every matching printer at this location and
+    never claims cross-model compatibility it cannot prove.
+    """
+
+    __tablename__ = "supply_orders"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    site_id: Mapped[int] = mapped_column(
+        ForeignKey("sites.id", ondelete="CASCADE"), index=True
+    )
+    printer_id: Mapped[Optional[int]] = mapped_column(
+        ForeignKey("printers.id", ondelete="SET NULL"), default=None, index=True
+    )
+    supply_id: Mapped[Optional[int]] = mapped_column(
+        ForeignKey("supplies.id", ondelete="SET NULL"), default=None
+    )
+    status: Mapped[SupplyOrderStatus] = mapped_column(
+        _enum(SupplyOrderStatus), default=SupplyOrderStatus.ordered, index=True
+    )
+    model: Mapped[str] = mapped_column(String(200))
+    supply_type: Mapped[str] = mapped_column(String(40))
+    color: Mapped[str] = mapped_column(String(40), default="")
+    description: Mapped[str] = mapped_column(String(200), default="")
+    manufacturer: Mapped[str] = mapped_column(String(100), default="")
+    sku: Mapped[str] = mapped_column(String(120), default="")
+    quantity: Mapped[int] = mapped_column(Integer, default=1)
+    vendor: Mapped[str] = mapped_column(String(160), default="Sun Data Supply")
+    source: Mapped[str] = mapped_column(String(32), default="manual")
+    external_ref: Mapped[Optional[str]] = mapped_column(
+        String(240), default=None
+    )
+    ordered_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+    estimated_delivery_at: Mapped[Optional[date]] = mapped_column(Date, default=None)
+    delivered_at: Mapped[Optional[datetime]] = mapped_column(
+        DateTime(timezone=True), default=None
+    )
+    created_by_user_id: Mapped[Optional[int]] = mapped_column(
+        ForeignKey("users.id", ondelete="SET NULL"), default=None
+    )
+
+    site: Mapped[Site] = relationship(back_populates="supply_orders")
+    printer: Mapped[Optional[Printer]] = relationship()
+    supply: Mapped[Optional[Supply]] = relationship()
+
+    __table_args__ = (
+        CheckConstraint("quantity > 0", name="ck_supply_orders_quantity_positive"),
+        UniqueConstraint("external_ref", name="uq_supply_orders_external_ref"),
+        Index("ix_supply_orders_site_status", "site_id", "status"),
+    )
 
 
 class Reading(Base):

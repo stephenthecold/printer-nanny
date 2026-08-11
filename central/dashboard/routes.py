@@ -2,12 +2,12 @@
 
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import date, datetime, timezone
 from typing import Optional
 
 from fastapi import APIRouter, Depends, Form, Request
 from fastapi.responses import HTMLResponse, RedirectResponse
-from sqlalchemy import func, select
+from sqlalchemy import case, func, select
 from sqlalchemy.orm import Session
 
 from central import models as m
@@ -178,14 +178,23 @@ def _render(
     # Central server version surfaced in the footer of every page so operators
     # can verify a rollout landed without dropping to the shell.
     ctx.setdefault("central_version", _central_version)
-    # Pending-discovery count drives the conditional Approvals nav entry:
-    # the link only renders when there's actually something to approve.
-    if db is not None and "nav_pending" not in ctx:
+    # Pending-discovery count drives the conditional Approvals nav entry. Only
+    # staff can reach that route, so never compute (or accidentally expose) a
+    # fleet-wide count for a client-scoped or signed-out render.
+    nav_user = ctx.get("user")
+    if (
+        db is not None
+        and "nav_pending" not in ctx
+        and nav_user is not None
+        and nav_user.role != m.UserRole.client_readonly
+    ):
         ctx["nav_pending"] = db.scalar(
             select(func.count())
             .select_from(m.Printer)
             .where(m.Printer.discovery_state == m.DiscoveryState.pending)
         ) or 0
+    else:
+        ctx.setdefault("nav_pending", 0)
     # Stalled-worker banner (base.html). A dead worker stops marking agents and
     # printers offline, so without this every page renders a green fleet over
     # frozen data. Returns None when healthy; never raises.
@@ -323,22 +332,29 @@ def overview(request: Request, db: Session = Depends(get_db)):
     # noise for them.
     if user.role == m.UserRole.client_readonly:
         return RedirectResponse("/portal", status_code=303)
-    client_filter = user.client_id if user.role == m.UserRole.client_readonly else None
-    rollup = queries.per_client_rollup(db)
-    if user.role == m.UserRole.client_readonly:
-        rollup = [r for r in rollup if r["client"].id == user.client_id]
+    # The staff dashboard is an operational queue, in the order established by
+    # the product interview: end-to-end subnet health, printer-stopping issues,
+    # then supplies by runway. The old recent-activity/errors/alerts panels all
+    # repeated pieces of those same facts and made the first decision harder.
+    from central import reorder as reorder_mod
+    from central import setup_checklist
+
+    health = queries.subnet_health(db)
+    issues = queries.printer_issue_queue(db, limit=12)
+    supply_recs = reorder_mod.recommendations(db)
     return _render(
         request,
         "overview.html",
         db=db,
         user=user,
-        summary=queries.fleet_summary(db, client_filter),
-        low=queries.low_supplies(db, limit=10),
-        errors=queries.recent_errors(db, 10),
-        alerts=queries.open_alerts(db, 10),
-        clients=list(db.scalars(select(m.Client).order_by(m.Client.name))),
-        rollup=rollup,
-        recent_activity=queries.recent_activity(db, 12),
+        summary=queries.fleet_summary(db),
+        subnet_health=health,
+        issue_queue=issues,
+        supply_queue=supply_recs[:12],
+        supply_total=len(supply_recs),
+        setup=setup_checklist.build_setup_status(db),
+        urgency_now=reorder_mod.URGENCY_NOW,
+        rollup=queries.per_client_rollup(db),
         printer_label=_printer_label,
         # The overview is the screen most likely to be left open on a wall, and
         # the one whose green tiles are most readily believed.
@@ -697,15 +713,10 @@ def printer_detail(printer_id: int, request: Request, db: Session = Depends(get_
     )
 
 
-# --- Supplies to order (recommend-only) ------------------------------------- #
+# --- Supplies to order and location-specific order ledger ------------------- #
 @router.get("/supplies/reorder", response_class=HTMLResponse)
 def supplies_reorder(request: Request, db: Session = Depends(get_db)):
-    """"Order these N cartridges" -- recommendations, not orders.
-
-    Nothing on this page places, tracks or records an order; there is no SKU
-    catalogue, no on-hand stock and no order state anywhere behind it. It reads
-    supply level, days-to-empty and pages-to-empty and applies the operator's
-    thresholds, so it is derived entirely from data the fleet already collects.
+    """Recommendations plus the operator's location-specific order ledger.
 
     client_readonly users are sent to their portal, which carries the same
     recommendations scoped to their own fleet -- the same treatment
@@ -714,6 +725,7 @@ def supplies_reorder(request: Request, db: Session = Depends(get_db)):
     rather than trusted from the query string.
     """
     from central import reorder as reorder_mod
+    from central import supply_orders as order_mod
 
     user = _user(request, db)
     if user is None:
@@ -737,6 +749,14 @@ def supplies_reorder(request: Request, db: Session = Depends(get_db)):
 
     thresholds = reorder_mod.ReorderThresholds.load(db)
     recs = reorder_mod.recommendations(db, client_id=selected_id, thresholds=thresholds)
+    orders = order_mod.active_orders(db, client_id=selected_id)
+    by_signature = order_mod.orders_by_signature(orders)
+    orders_for_supply = {
+        rec.supply_id: by_signature.get(
+            order_mod.signature(rec.site_id, rec.model, rec.supply_type, rec.color), []
+        )
+        for rec in recs
+    }
     return _render(
         request,
         "reorder.html",
@@ -747,12 +767,138 @@ def supplies_reorder(request: Request, db: Session = Depends(get_db)):
         thresholds=thresholds,
         clients=clients,
         selected_client_id=selected_id,
+        active_orders=orders,
+        compatible_printers=order_mod.compatible_printers(db, orders),
+        orders_for_supply=orders_for_supply,
+        default_delivery_date=order_mod.default_delivery_date(),
+        supply_flash=request.session.pop("supply_flash", None),
         urgency_now=reorder_mod.URGENCY_NOW,
         # A reorder list computed from supply levels nobody has refreshed since
         # yesterday is exactly as wrong as a green fleet that is on fire.
         **_freshness_ctx(request, db, user, client_id=selected_id,
                          scope_label=_scope_label(db, selected_id)),
     )
+
+
+@router.post("/supplies/orders")
+def supply_order_create(
+    request: Request,
+    supply_id: int = Form(...),
+    quantity: int = Form(1),
+    manufacturer: str = Form(""),
+    sku: str = Form(""),
+    vendor: str = Form("Sun Data Supply"),
+    estimated_delivery_at: str = Form(""),
+    db: Session = Depends(get_db),
+):
+    from central import supply_orders as order_mod
+    from central.audit import record
+
+    user = _user(request, db)
+    if user is None or user.role == m.UserRole.client_readonly:
+        return _login_redirect()
+    supply = db.get(m.Supply, supply_id)
+    printer = db.get(m.Printer, supply.printer_id) if supply is not None else None
+    if supply is None or printer is None or printer.discovery_state != m.DiscoveryState.approved:
+        request.session["supply_flash"] = "That supply is no longer available to order."
+        return RedirectResponse("/supplies/reorder", status_code=303)
+    if quantity < 1 or quantity > 100:
+        request.session["supply_flash"] = "Order quantity must be between 1 and 100."
+        return RedirectResponse("/supplies/reorder", status_code=303)
+    eta = None
+    if estimated_delivery_at.strip():
+        try:
+            eta = date.fromisoformat(estimated_delivery_at.strip())
+        except ValueError:
+            request.session["supply_flash"] = "Estimated delivery must be a valid date."
+            return RedirectResponse("/supplies/reorder", status_code=303)
+
+    key = order_mod.signature(
+        printer.site_id, printer.model or "", supply.type.value, supply.color
+    )
+    existing = order_mod.orders_by_signature(order_mod.active_orders(db)).get(key, [])
+    if existing:
+        request.session["supply_flash"] = (
+            "An active order already covers this cartridge at this location."
+        )
+        return RedirectResponse(
+            f"/supplies/reorder?client_id={printer.client_id}", status_code=303
+        )
+
+    order = m.SupplyOrder(
+        site_id=printer.site_id,
+        printer_id=printer.id,
+        supply_id=supply.id,
+        model=order_mod.one_line(printer.model, 200) or "Unknown model",
+        supply_type=supply.type.value,
+        color=order_mod.one_line(supply.color, 40),
+        description=order_mod.one_line(supply.description, 200),
+        manufacturer=(
+            order_mod.one_line(manufacturer, 100)
+            or order_mod.one_line(printer.brand, 100)
+        ),
+        sku=order_mod.one_line(sku, 120),
+        quantity=quantity,
+        vendor=order_mod.one_line(vendor, 160) or "Sun Data Supply",
+        estimated_delivery_at=eta or order_mod.default_delivery_date(),
+        created_by_user_id=user.id,
+    )
+    db.add(order)
+    db.flush()
+    record(
+        db,
+        request,
+        user,
+        "supply_order.create",
+        target=f"supply_order:{order.id} site:{order.site_id}",
+        detail=f"quantity={quantity}; supply={order.supply_type}/{order.color or 'unspecified'}",
+    )
+    db.commit()
+    request.session["supply_flash"] = "Order recorded for this location."
+    return RedirectResponse(
+        f"/supplies/reorder?client_id={printer.client_id}", status_code=303
+    )
+
+
+@router.post("/supplies/orders/{order_id}/delivered")
+def supply_order_delivered(
+    order_id: int, request: Request, db: Session = Depends(get_db)
+):
+    from central.audit import record
+
+    user = _user(request, db)
+    if user is None or user.role == m.UserRole.client_readonly:
+        return _login_redirect()
+    order = db.get(m.SupplyOrder, order_id)
+    if order is None:
+        request.session["supply_flash"] = "That order no longer exists."
+        return RedirectResponse("/supplies/reorder", status_code=303)
+    order.status = m.SupplyOrderStatus.delivered
+    order.delivered_at = datetime.now(timezone.utc)
+    record(db, request, user, "supply_order.delivered", target=f"supply_order:{order.id}")
+    db.commit()
+    request.session["supply_flash"] = "Order marked delivered."
+    return RedirectResponse("/supplies/reorder", status_code=303)
+
+
+@router.post("/supplies/orders/{order_id}/delete")
+def supply_order_delete(
+    order_id: int, request: Request, db: Session = Depends(get_db)
+):
+    from central.audit import record
+
+    user = _user(request, db)
+    if user is None or user.role == m.UserRole.client_readonly:
+        return _login_redirect()
+    order = db.get(m.SupplyOrder, order_id)
+    if order is None:
+        request.session["supply_flash"] = "That order was already removed."
+        return RedirectResponse("/supplies/reorder", status_code=303)
+    record(db, request, user, "supply_order.delete", target=f"supply_order:{order.id}")
+    db.delete(order)
+    db.commit()
+    request.session["supply_flash"] = "Order record removed."
+    return RedirectResponse("/supplies/reorder", status_code=303)
 
 
 # --- Device security posture ------------------------------------------------ #
@@ -929,7 +1075,16 @@ def alerts_inbox(request: Request, db: Session = Depends(get_db)):
         db.scalars(
             select(m.Alert)
             .where(m.Alert.state != m.AlertState.resolved)
-            .order_by(m.Alert.created_at.desc())
+            # The inbox is a work queue, not an activity log. A newer warning
+            # must never push a printer-stopping critical fault below the fold.
+            .order_by(
+                case(
+                    (m.Alert.severity == m.EventSeverity.critical, 0),
+                    (m.Alert.severity == m.EventSeverity.warning, 1),
+                    else_=2,
+                ),
+                m.Alert.created_at.desc(),
+            )
         )
     )
     # Notifications that were owed but never delivered (no channel enabled, or a

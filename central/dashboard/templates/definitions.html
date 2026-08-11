@@ -95,7 +95,7 @@
                help='Operator-facing. The key inside the JSON is what agents match on.') }}
 
     {% call c.select_field('client_id', 'Scope',
-                           help='A definition describes hardware, so leave it global unless one customer needs a different read.') %}
+                           help='A definition describes hardware, so leave it global unless one client needs a different read.') %}
       <option value="" {% if editing and not editing.client_id %}selected{% endif %}>All clients</option>
       {% for cl in clients %}
         <option value="{{ cl.id }}" {% if editing and editing.client_id == cl.id %}selected{% endif %}>{{ cl.name }}</option>

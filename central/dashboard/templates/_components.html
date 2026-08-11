@@ -334,6 +334,55 @@ focus:border-sky-500 {{ _focus }} {{ extra }}
 <span class="px-1.5 py-0.5 rounded text-xs font-medium {{ tones.get(tone, tones['neutral']) }} {{ extra }}">{{ text }}</span>
 {%- endmacro %}
 
+{#- A single requirement in the guided Setup checklist. Bypassed is its own
+    state: it advances the checklist but never borrows the visual language of a
+    completed or live-verified step. The reason remains visible until cleared. -#}
+{% macro setup_step(step, site_id=None) -%}
+<article class="rounded border {{ 'border-green-200 bg-green-50' if step.state == 'complete' else ('border-slate-300 bg-slate-50' if step.state == 'bypassed' else 'border-amber-200 bg-amber-50') }} px-3 py-3">
+  <div class="flex items-start justify-between gap-3 flex-wrap">
+    <div class="min-w-0">
+      <div class="flex items-center gap-2 flex-wrap">
+        <h4 class="text-sm font-medium">{{ step.label }}</h4>
+        {% if step.state == 'complete' %}{{ badge('Complete', 'ok') }}
+        {% elif step.state == 'bypassed' %}{{ badge('Bypassed', 'muted') }}
+        {% else %}{{ badge('Required', 'warning') }}{% endif %}
+      </div>
+      <p class="text-xs text-slate-600 mt-1">{{ step.guidance }}</p>
+      {% if step.bypassed %}
+      <p class="text-xs text-slate-600 mt-1"><span class="font-medium">Reason:</span> {{ step.bypass.reason }}</p>
+      {% endif %}
+    </div>
+    <div class="flex items-center gap-2 flex-wrap">
+      {% if step.state == 'open' %}
+      <a href="{{ step.href }}" class="{{ btn('accent', 'sm') }}">{{ step.action }}</a>
+      {% elif step.state == 'bypassed' %}
+      <form method="post" action="/manage/setup/bypasses/{{ step.bypass.id }}/clear">
+        {{ csrf_field() }}
+        <button class="{{ btn('neutral', 'sm') }}">Clear bypass</button>
+      </form>
+      {% endif %}
+    </div>
+  </div>
+  {% if step.state == 'open' %}
+  <details class="mt-2 text-xs">
+    <summary class="cursor-pointer rounded text-slate-600 hover:text-slate-900 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-sky-500">Bypass this requirement for now</summary>
+    <form method="post" action="/manage/setup/bypass" class="mt-2 space-y-2 border-t border-amber-200 pt-2">
+      {{ csrf_field() }}
+      <input type="hidden" name="step" value="{{ step.key }}" />
+      {% if site_id is not none %}<input type="hidden" name="site_id" value="{{ site_id }}" />{% endif %}
+      <label class="block">
+        <span class="text-xs text-slate-600">Why is this being bypassed? <span class="text-red-600" aria-hidden="true">*</span></span>
+        <textarea name="reason" rows="2" required maxlength="500" placeholder="Waiting for network details from the client"
+                  class="{{ input_cls() }}"></textarea>
+      </label>
+      <p class="text-xs text-slate-500">This stops the setup reminder only. It does not mark monitoring healthy. Do not enter passwords, API keys, or SNMP credentials.</p>
+      <button class="{{ btn('warning', 'sm') }}">Save bypass</button>
+    </form>
+  </details>
+  {% endif %}
+</article>
+{%- endmacro %}
+
 {#- ------------------------------------------------------------------ notes -#}
 {#  Inline explanatory panels. `tone` matches badge tones. #}
 {% macro note(tone='info', extra='') -%}

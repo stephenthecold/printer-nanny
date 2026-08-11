@@ -1,10 +1,8 @@
 """Dashboard: end users, groups, and printer assignment.
 
-Lives at ``/manage/people`` rather than ``/manage/users`` because
-``/manage/users`` already means something else here -- dashboard *operators*.
-Keeping the two words distinct in the URL is the cheapest way to keep them
-distinct in an operator's head: **Users** administer the system, **People**
-work at the customer and print things.
+Lives at ``/manage/people`` rather than ``/manage/users`` for compatibility;
+the UI calls these records **Staff** and calls dashboard operators **Console
+users**, keeping the two roles distinct in a technician's head.
 
 Every route is manager-gated and every mutation is audited. Tenancy is never
 enforced in this module: it is enforced once, in ``services.assign_printer`` /
@@ -83,7 +81,8 @@ def people_home(
     if client is None:
         return _tpl(request, "people.html", db, clients=[], client=None,
                     people=[], groups=[], printers=[], resolved={},
-                    memberships={}, providers=[], flash=_pop_flash(request))
+                    memberships={}, providers=[], user=user,
+                    flash=_pop_flash(request))
 
     people = list(db.scalars(
         select(m.EndUser)
@@ -149,7 +148,7 @@ def people_home(
 
     return _tpl(
         request, "people.html", db,
-        clients=clients, client=client, people=people, groups=groups,
+        user=user, clients=clients, client=client, people=people, groups=groups,
         printers=printers, resolved=resolved, memberships=memberships,
         group_assignments=group_assignments, providers=providers,
         flash=_pop_flash(request),
@@ -183,7 +182,7 @@ def people_create(
     display_name = display_name.strip() or None
     upn = upn.strip() or None
     if not (email or upn or display_name):
-        _flash(request, "Give the person at least a name, email, or username.")
+        _flash(request, "Give the staff member at least a name, email, or username.")
         return _redirect(f"/manage/people?client_id={client.id}")
 
     if email and db.scalar(
@@ -226,7 +225,7 @@ def people_set_active(
         return _redirect("/login")
     person = db.get(m.EndUser, person_id)
     if person is None:
-        _flash(request, "Person not found.")
+        _flash(request, "Staff member not found.")
         return _redirect("/manage/people")
 
     person.active = bool(active.strip())
@@ -269,7 +268,7 @@ def people_assign(
     back = f"/manage/people?client_id={printer.client_id}"
 
     if (person is None) == (group is None):
-        _flash(request, "Pick exactly one person or one group.")
+        _flash(request, "Pick exactly one staff member or one group.")
         return _redirect(back)
 
     try:
@@ -281,7 +280,7 @@ def people_assign(
         record(db, request, user, "printer_assignment.refused",
                target=f"printer:{printer.id}", detail=f"cross-tenant: {exc}")
         db.commit()
-        _flash(request, "That printer and that person belong to different clients.")
+        _flash(request, "That printer and that staff member belong to different clients.")
         return _redirect(back)
 
     target = (f"end_user:{person.id}" if person else f"group:{group.id}")
@@ -398,7 +397,7 @@ def group_members(
         record(db, request, user, "end_user_group.refused",
                target=f"group:{group.id}", detail=f"cross-tenant: {exc}")
         db.commit()
-        _flash(request, "Those people belong to a different client.")
+        _flash(request, "Those staff members belong to a different client.")
         return _redirect(f"/manage/people?client_id={group.client_id}")
 
     record(db, request, user, "end_user_group.members",
@@ -570,5 +569,5 @@ def directory_delete(
            detail="synced people left in place")
     db.delete(conn)
     db.commit()
-    _flash(request, f"Removed the {provider} connection. Synced people kept.")
+    _flash(request, f"Removed the {provider} connection. Synced staff kept.")
     return _redirect(f"/manage/people?client_id={client_id}")

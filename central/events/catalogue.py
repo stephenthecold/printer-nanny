@@ -140,8 +140,7 @@ CATALOGUE: Dict[str, EventType] = {
             "supply.reorder_recommended",
             1,
             "A supply is forecast to run out inside the configured lead time. "
-            "A recommendation only -- Printer Nanny holds no SKU catalog, no "
-            "stock and no order state, by design.",
+            "A recommendation only -- it does not claim a vendor order was placed.",
             (
                 "printer.id", "printer.name", "printer.ip", "printer.model",
                 "printer.serial", "printer.location",

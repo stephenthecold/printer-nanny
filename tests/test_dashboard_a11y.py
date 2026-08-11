@@ -76,6 +76,7 @@ class _Controls(HTMLParser):
         self.label_for: set[str] = set()
         self.controls: list[dict] = []
         self.aria_current: list[str] = []
+        self.primary_navs = 0
 
     def handle_starttag(self, tag, attrs):
         a = dict(attrs)
@@ -86,6 +87,8 @@ class _Controls(HTMLParser):
             return
         if a.get("aria-current"):
             self.aria_current.append(a.get("href", "?"))
+        if tag == "nav" and a.get("aria-label") == "Primary":
+            self.primary_navs += 1
         if tag in CONTROL_TAGS:
             if (a.get("type") or "text").lower() in EXEMPT_TYPES:
                 return
@@ -162,11 +165,18 @@ def test_login_page_controls_are_labelled(db):
         ("/", "/"),
         ("/printers", "/printers"),
         ("/alerts", "/alerts"),
+        # An empty approvals queue hides its conditional link; Setup remains
+        # the truthful parent destination.
+        ("/approvals", "/manage/onboard"),
         ("/manage", "/manage"),
         # Longest-prefix wins: /manage/agents must mark Agents, not Manage.
         ("/manage/agents", "/manage/agents"),
+        ("/manage/people", "/manage/people"),
+        ("/manage/machines", "/manage/machines"),
+        ("/manage/onboard", "/manage/onboard"),
         ("/manage/users", "/manage/users"),
         ("/manage/audit", "/manage/audit"),
+        ("/account", "/account"),
     ],
 )
 def test_nav_marks_the_current_page(http, page, expected):
@@ -189,7 +199,88 @@ def test_skip_link_and_landmarks_present(http):
     html = http.get("/").text
     assert 'href="#main"' in html, "skip-to-content link missing"
     assert 'id="main"' in html, "main landmark missing"
-    assert '<nav aria-label="Primary"' in html, "nav landmark is unnamed"
+    parsed = _parse(html)
+    assert parsed.primary_navs == 1, "page needs exactly one named primary nav landmark"
+
+
+def test_client_navigation_is_scoped_and_has_no_dead_end(db):
+    """Client chrome must neither leak fleet controls nor link to refused routes."""
+    client = m.Client(name="Acme")
+    db.add(client)
+    db.flush()
+    site = m.Site(client_id=client.id, name="Main")
+    db.add(site)
+    db.flush()
+    db.add_all(
+        [
+            m.User(
+                username="client",
+                password_hash=hash_password("pw"),
+                role=m.UserRole.client_readonly,
+                client_id=client.id,
+            ),
+            m.Printer(
+                client_id=client.id,
+                site_id=site.id,
+                ip="10.0.0.20",
+                discovery_state=m.DiscoveryState.pending,
+            ),
+        ]
+    )
+    db.commit()
+    client_http = TestClient(app)
+    assert client_http.post(
+        "/login",
+        data={"username": "client", "password": "pw"},
+        follow_redirects=False,
+    ).status_code == 303
+
+    html = client_http.get("/portal").text
+    parsed = _parse(html)
+    assert parsed.primary_navs == 1
+    assert parsed.aria_current == ["/portal"]
+    for forbidden in (
+        "/alerts",
+        "/approvals",
+        "/manage",
+        "/settings",
+        "/security/posture",
+    ):
+        assert f'href="{forbidden}"' not in html
+
+
+def test_staff_navigation_uses_operator_terminology(http):
+    html = http.get("/manage/people").text
+    assert ">Staff</span>" in html
+    assert ">Workstations</span>" in html
+    assert ">Console users</span>" in html
+    assert "Client operations" in html
+    assert "Administration" in html
+
+
+def test_detail_and_preview_routes_keep_a_current_parent(http, db):
+    client = m.Client(name="Acme")
+    db.add(client)
+    db.commit()
+    client_detail = _parse(http.get(f"/clients/{client.id}").text)
+    portal_preview = _parse(http.get(f"/portal?client_id={client.id}").text)
+    assert client_detail.aria_current == ["/"]
+    assert portal_preview.aria_current == ["/manage"]
+
+
+def test_mobile_drawer_has_keyboard_and_background_guards(http):
+    html = http.get("/").text
+    assert 'aria-controls="primary-navigation"' in html
+    assert 'aria-expanded="false"' in html
+    assert 'id="pn-mobile-menu"' in html
+    assert 'tabindex="0" role="button"' in html
+    script = http.get("/static/dashboard.js").text
+    assert 'event.key === "Escape"' in script
+    assert "backgroundNodes = [page, mobileHeader, mobileMenu]" in script
+    assert 'node.setAttribute("inert", "")' in script
+    assert 'node.removeAttribute("inert")' in script
+    assert 'event.key !== "Tab"' in script
+    assert "navigation.querySelector('[aria-current=\"page\"]')" in script
 
 
 # --------------------------------------------------------------------------
@@ -246,4 +337,3 @@ def test_cards_can_shrink_below_their_content(http, page):
             f"{page}: card '{card.strip()}' lacks min-w-0 and cannot shrink "
             "inside a grid. Use the card_cls() macro."
         )
-

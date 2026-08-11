@@ -1,4 +1,4 @@
-"""Supply reorder recommendations -- RECOMMEND-ONLY, by decision.
+"""Supply reorder recommendations feeding a separate operator order ledger.
 
 WHAT THIS IS
 ------------
@@ -7,14 +7,11 @@ already collects, surfaced in the dashboard, the customer portal and the weekly
 report, and published as a ``supply.reorder_recommended`` event so an MSP's own
 ERP can act on it.
 
-WHAT THIS DELIBERATELY IS NOT
------------------------------
-There is no SKU catalogue, no on-hand inventory, no purchase-order generation
-and no order state machine. A human places every order. Printer Nanny stays a
-signal source and never holds commercial state -- so nothing here records that
-an order was placed, acknowledged, shipped or received, and no code should be
-added that does. If a change starts to need an order lifecycle, that is the
-signal it is out of scope, not the signal to build one.
+WHAT STAYS SEPARATE
+-------------------
+This module never places an order and the recommendation is still computed on
+read. ``SupplyOrder`` records the human action, destination and delivery state;
+it does not mutate the measurement or make a recommendation disappear.
 
 PERSIST vs COMPUTE
 ------------------
@@ -32,8 +29,7 @@ stored nowhere:
     concludes the setting does nothing;
   * there is no recommendation row to go stale when a cartridge is swapped, and
     therefore no reconciliation pass to get wrong;
-  * "no recommendation exists as a row" is what makes the recommend-only
-    boundary structural rather than a matter of discipline.
+  * there is no recommendation row to reconcile with the separate order ledger.
 
 TRIGGERS
 --------
@@ -168,6 +164,7 @@ class SupplyRecommendation:
                          # page a customer's whole office can open.
     client_id: int
     client_name: str
+    site_id: int
     site_name: str
     model: str
     supply_id: int
@@ -432,6 +429,7 @@ def recommendations(
                 printer_name=_printer_name(printer),
                 client_id=printer.client_id,
                 client_name=_one_line(printer.client.name if printer.client else "", 80),
+                site_id=printer.site_id,
                 site_name=_one_line(printer.site.name if printer.site else "", 80),
                 model=_one_line(printer.model, 80),
                 supply_id=supply.id,

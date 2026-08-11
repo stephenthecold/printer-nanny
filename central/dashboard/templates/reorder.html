@@ -1,22 +1,55 @@
 {% extends "base.html" %}
-{#
-  Supplies to order — RECOMMEND-ONLY.
-
-  There is deliberately no "mark as ordered" control anywhere on this page, and
-  none should be added. Printer Nanny recommends; a human orders. The moment a
-  row can be ticked off, this page owns order state, needs reconciling against
-  what was actually bought, and has become the thing the scope decision ruled
-  out. That absence is also why no table row here carries a form control.
-#}
 {% from "_components.html" import btn, card_cls, page_title, note, badge,
                                   table_wrap, table_cls, thead_cls, th_cls,
-                                  td_cls, tr_cls, empty_row, select_field %}
+                                  td_cls, tr_cls, empty_row, input_sm_cls, select_field %}
 {% block title %}Supplies to order · {{ app.name or 'Printer Nanny' }}{% endblock %}
 {% block body %}
 
 {{ page_title(
      'Supplies to order',
-     'Cartridges to order now, and why. Recommendations only — nothing here places or tracks an order.') }}
+     'See what needs ordering, record where it is going, and avoid ordering the same cartridge twice.') }}
+
+{% if supply_flash %}<div class="{{ note('info', 'mb-5') }}" role="status">{{ supply_flash }}</div>{% endif %}
+
+{% if active_orders %}
+<section class="{{ card_cls('md', 'mb-5') }}" aria-labelledby="active-orders-title">
+  <div class="flex items-start justify-between gap-3 flex-wrap mb-3">
+    <div>
+      <h2 id="active-orders-title" class="font-semibold">On the way</h2>
+      <p class="text-xs text-slate-500 mt-1">Active orders by destination. Delivery and mailbox automation will use these same records.</p>
+    </div>
+    {{ badge(active_orders|length ~ ' active', 'info') }}
+  </div>
+  <div class="space-y-2">
+    {% for order in active_orders %}
+    <article class="rounded border border-slate-200 px-3 py-3 flex items-start justify-between gap-3 flex-wrap">
+      <div>
+        <div class="text-sm font-medium">{{ order.quantity }}× {{ order.description or ((order.color ~ ' ' ~ order.supply_type)|trim) }}</div>
+        <div class="text-xs text-slate-500 mt-0.5">{{ order.site.client.name }} · {{ order.site.name }} · {{ order.model }}</div>
+        <div class="text-xs text-slate-500 mt-0.5">
+          {{ order.manufacturer or 'Manufacturer not recorded' }}{% if order.sku %} · SKU {{ order.sku }}{% endif %} · {{ order.vendor }}
+          {% if order.estimated_delivery_at %} · estimated {{ order.estimated_delivery_at.strftime('%b %d, %Y') }}{% endif %}
+        </div>
+        {% set matches = compatible_printers.get(order.id, []) %}
+        <div class="text-xs text-sky-800 mt-1">
+          Compatible here: {% if matches %}{% for printer in matches %}{{ printer.display_name or printer.model or printer.ip }}{{ ', ' if not loop.last }}{% endfor %}{% else %}no currently approved matching printer{% endif %}
+        </div>
+      </div>
+      <div class="flex items-center gap-2">
+        <form method="post" action="/supplies/orders/{{ order.id }}/delivered">
+          {{ csrf_field() }}
+          <button class="{{ btn('success', 'sm') }}">Mark delivered</button>
+        </form>
+        <form method="post" action="/supplies/orders/{{ order.id }}/delete" onsubmit="return confirm('Remove this order record?')">
+          {{ csrf_field() }}
+          <button class="{{ btn('danger', 'sm') }}">Delete</button>
+        </form>
+      </div>
+    </article>
+    {% endfor %}
+  </div>
+</section>
+{% endif %}
 
 <div class="grid sm:grid-cols-2 lg:grid-cols-4 gap-4 mb-5">
   <div class="{{ card_cls('sm') }}">
@@ -107,6 +140,7 @@
           <th class="{{ th_cls('right') }}">Days left</th>
           <th class="{{ th_cls('right') }}">Pages left</th>
           <th class="{{ th_cls() }}">Why</th>
+          <th class="{{ th_cls('right') }}"><span class="sr-only">Order action</span></th>
         </tr>
       </thead>
       <tbody>
@@ -133,9 +167,40 @@
             {% if rec.pages_remaining is not none %}{{ '{:,.0f}'.format(rec.pages_remaining) }}{% else %}<span class="text-slate-400">—</span>{% endif %}
           </td>
           <td class="{{ td_cls('left', 'text-xs text-slate-500') }}">{{ rec.reasons | join('; ') }}</td>
+          <td class="{{ td_cls('right') }}">
+            {% set covering = orders_for_supply.get(rec.supply_id, []) %}
+            {% if covering %}
+              {{ badge('Already ordered', 'info') }}
+            {% else %}
+            <details class="text-left">
+              <summary class="cursor-pointer whitespace-nowrap rounded text-sky-700 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-sky-500">Record order</summary>
+              <form method="post" action="/supplies/orders" class="mt-2 w-64 max-w-[75vw] space-y-2 rounded border bg-white p-3 shadow-lg">
+                {{ csrf_field() }}
+                <input type="hidden" name="supply_id" value="{{ rec.supply_id }}" />
+                <label class="block text-xs">Quantity
+                  <input class="{{ input_sm_cls('w-full') }}" type="number" name="quantity" min="1" max="100" value="1" required />
+                </label>
+                <label class="block text-xs">Manufacturer
+                  <input class="{{ input_sm_cls('w-full') }}" name="manufacturer" value="" placeholder="{{ rec.model.split(' ')[0] if rec.model else 'OEM preferred' }}" />
+                </label>
+                <label class="block text-xs">SKU or part number
+                  <input class="{{ input_sm_cls('w-full') }}" name="sku" value="" />
+                </label>
+                <label class="block text-xs">Vendor
+                  <input class="{{ input_sm_cls('w-full') }}" name="vendor" value="Sun Data Supply" required />
+                </label>
+                <label class="block text-xs">Estimated delivery
+                  <input class="{{ input_sm_cls('w-full') }}" type="date" name="estimated_delivery_at" value="{{ default_delivery_date.isoformat() }}" />
+                </label>
+                <p class="text-xs text-slate-500">Destination: {{ rec.client_name }} · {{ rec.site_name }}. Compatibility is traced to this model and supply slot at that location.</p>
+                <button class="{{ btn('primary', 'sm') }}">Save order</button>
+              </form>
+            </details>
+            {% endif %}
+          </td>
         </tr>
         {% else %}
-        {{ empty_row(6, 'Nothing to order for this client.') }}
+        {{ empty_row(7, 'Nothing to order for this client.') }}
         {% endfor %}
       </tbody>
     </table>

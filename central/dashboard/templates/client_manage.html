@@ -1,7 +1,7 @@
 {% extends "base.html" %}
 {% from "_components.html" import btn, card_cls, field, input_cls, section_title, textarea_field %}
 {% from "base.html" import status_badge %}
-{% block title %}{{ client.name }} · Manage · Printer Nanny{% endblock %}
+{% block title %}{{ client.name }} · Clients · Printer Nanny{% endblock %}
 {% block body %}
 <div class="flex items-center gap-3 mb-4">
   <a href="/manage" class="text-sm text-sky-700 hover:underline">← Clients</a>
@@ -116,16 +116,16 @@
     </section>
 
     {#
-      Portal branding. Applies to what THIS customer sees at /portal and
+      Portal branding. Applies to what THIS client sees at /portal and
       nowhere else -- alert email and tickets keep the MSP's own identity,
       because those channels are shared across tenants and a message branded
-      as the wrong customer is worse than an unbranded one. Every field blank
+      as the wrong client is worse than an unbranded one. Every field blank
       = inherit the global Settings → Branding value.
     #}
     <section class="{{ card_cls() }}">
       {{ section_title('Portal branding') }}
       <p class="text-[11px] text-slate-400 mb-3">
-        What this customer sees at <a href="/portal?client_id={{ client.id }}" class="text-sky-700 hover:underline">their portal</a>.
+        What this client sees at <a href="/portal?client_id={{ client.id }}" class="text-sky-700 hover:underline">their portal</a>.
         Blank fields inherit <a href="/settings?group=branding" class="text-sky-700 hover:underline">the global branding</a>.
         Alert emails and tickets always use the global branding.
       </p>

@@ -372,9 +372,9 @@ def emit_supply_reorder_recommended(
 ) -> Optional[m.OutboundEvent]:
     """``supply.reorder_recommended`` -- a recommendation, never an order.
 
-    Printer Nanny holds no SKU catalog, no stock and no order state by explicit
-    product decision; this event is how that decision stays workable, by handing
-    the recommendation to whatever system the MSP already buys through.
+    The event remains a signal for external purchasing systems. A separately
+    recorded ``SupplyOrder`` is a human acknowledgement and is never emitted as
+    though Printer Nanny placed a purchase with a vendor.
 
     ``period`` scopes the idempotency key to whatever window the caller considers
     one recommendation (a date, a forecast run id). Without it a daily job would

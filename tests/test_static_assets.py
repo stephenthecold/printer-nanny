@@ -29,7 +29,12 @@ REPO_ROOT = Path(__file__).resolve().parent.parent
 TEMPLATE_DIR = REPO_ROOT / "central" / "dashboard" / "templates"
 STATIC_DIR = REPO_ROOT / "central" / "static"
 
-TEMPLATES = sorted(TEMPLATE_DIR.glob("*.html"))
+# External macOS volumes can materialise AppleDouble metadata as ``._name``
+# sidecars. They are binary filesystem bookkeeping, not Jinja templates.
+TEMPLATES = sorted(
+    template for template in TEMPLATE_DIR.glob("*.html")
+    if not template.name.startswith("._")
+)
 
 # Anything that would pull a subresource from off-box at render time.
 EXTERNAL_REF = re.compile(

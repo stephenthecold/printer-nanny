@@ -1,10 +1,9 @@
-"""Machines: the workstations running the print client, and their enroll keys.
+"""Workstations running the print client, and their enrollment keys.
 
-Sits beside People rather than inside it. A machine is not a person -- it is
-where a person stands -- and folding the two into one page would put a device
-inventory into the screen operators use to manage staff. The assignment story is
-the shared one: both pages assign printers, through the same service layer and
-the same tenancy checks.
+Sits beside Staff rather than inside it. A workstation is where a staff member
+works, and folding the two into one page would put a device inventory into the
+screen technicians use to manage staff. Both pages assign printers through the
+same service layer and the same tenancy checks.
 """
 
 from __future__ import annotations
@@ -60,7 +59,7 @@ def _msi_cap():
 def _resolve_client(db: Session, raw: Optional[str]) -> Optional[m.Client]:
     """Resolve the selected client, falling back to the first.
 
-    Same shape as the People page: a stale bookmark carrying a deleted client id
+    Same shape as the Staff page: a stale bookmark carrying a deleted client id
     lands on a real page rather than a stack trace.
     """
     clients = list(db.scalars(select(m.Client).order_by(m.Client.name)))
@@ -244,7 +243,7 @@ def revoke_enroll_key(
             f"client={row.client_id} label={row.label!r}",
         )
         db.commit()
-        _flash(request, "Key revoked. Machines already enrolled keep working — they "
+        _flash(request, "Key revoked. Workstations already enrolled keep working — they "
             "authenticate with their own keys.",
         )
     return _redirect(f"/manage/machines?client_id={row.client_id}")
@@ -263,7 +262,7 @@ def set_machine_active(
 
     machine = db.get(m.Machine, machine_id)
     if machine is None:
-        _flash(request, "That machine no longer exists.")
+        _flash(request, "That workstation no longer exists.")
         return _redirect("/manage/machines")
 
     machine.active = active == "1"
@@ -278,7 +277,7 @@ def set_machine_active(
     db.commit()
     _flash(
         request,
-        f"{machine.name or 'Machine'} "
+        f"{machine.name or 'Workstation'} "
         + ("reactivated." if machine.active else "retired — it stops provisioning now."),
     )
     return _redirect(f"/manage/machines?client_id={machine.client_id}")
@@ -304,7 +303,7 @@ def set_default_wins(
 
     machine = db.get(m.Machine, machine_id)
     if machine is None:
-        _flash(request, "That machine no longer exists.")
+        _flash(request, "That workstation no longer exists.")
         return _redirect("/manage/machines")
 
     machine.default_wins = default_wins == "1"
@@ -320,9 +319,9 @@ def set_default_wins(
     _flash(
         request,
         (
-            f"{machine.name or 'Machine'} now overrides each person's own default."
+            f"{machine.name or 'Workstation'} now overrides each staff member's own default."
             if machine.default_wins
-            else f"{machine.name or 'Machine'} no longer overrides personal defaults."
+            else f"{machine.name or 'Workstation'} no longer overrides personal defaults."
         ),
     )
     return _redirect(f"/manage/machines?client_id={machine.client_id}")
@@ -343,7 +342,7 @@ def assign_to_machine(
     machine = db.get(m.Machine, machine_id)
     printer = db.get(m.Printer, printer_id)
     if machine is None or printer is None:
-        _flash(request, "That machine or printer no longer exists.")
+        _flash(request, "That workstation or printer no longer exists.")
         return _redirect("/manage/machines")
 
     try:
@@ -397,7 +396,7 @@ def unassign_from_machine(
 
     machine = db.get(m.Machine, machine_id)
     if machine is None:
-        _flash(request, "That machine no longer exists.")
+        _flash(request, "That workstation no longer exists.")
         return _redirect("/manage/machines")
 
     row = db.scalar(

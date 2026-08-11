@@ -109,7 +109,7 @@ def test_fallback_is_per_field(db, two_clients):
 
 def _nav(html: str) -> str:
     """Just the chrome: everything from the nav element to the main landmark."""
-    return html.split('<nav aria-label="Primary"', 1)[-1].split("<main", 1)[0]
+    return html.split('<nav id="primary-navigation"', 1)[-1].split("<main", 1)[0]
 
 
 def test_client_branding_never_reaches_a_staff_page(db, two_clients):

@@ -1,12 +1,12 @@
 {% extends "base.html" %}
 {% from "_components.html" import btn, card_cls, field, input_sm_cls %}
-{% block title %}People · {{ app.name or 'Printer Nanny' }}{% endblock %}
+{% block title %}Staff · {{ app.name or 'Printer Nanny' }}{% endblock %}
 {% block body %}
-<h1 class="text-2xl font-semibold mb-1">People</h1>
+<h1 class="text-2xl font-semibold mb-1">Staff</h1>
 <p class="text-sm text-slate-500 mb-4">
-  The customer's staff and the printers assigned to them. Distinct from
-  <a href="/manage/users" class="text-sky-700 hover:underline">Users</a>, who
-  administer <em>this</em> system. Assign printers directly to a person, or to a
+  The client's staff and the printers assigned to them. Distinct from
+  <a href="/manage/users" class="text-sky-700 hover:underline">Console users</a>, who
+  administer <em>this</em> system. Assign printers directly to a staff member, or to a
   group so the assignment survives staff turnover.
 </p>
 
@@ -44,7 +44,7 @@
     <table class="w-full text-sm">
       <thead class="text-left text-xs text-slate-500 bg-slate-50">
         <tr>
-          <th class="px-4 py-2">Person</th>
+          <th class="px-4 py-2">Staff member</th>
           <th class="py-2">Source</th>
           <th class="py-2">Printers</th>
           <th class="py-2 w-28 text-right pr-4"></th>
@@ -95,14 +95,14 @@
       </tbody>
     </table>
     {% else %}
-    <p class="px-4 py-6 text-sm text-slate-500">Nobody yet. Add someone on the right.</p>
+    <p class="px-4 py-6 text-sm text-slate-500">No staff yet. Add a staff member on the right.</p>
     {% endif %}
   </section>
 
   <!-- ------------------------------- add + assign ------------------------ -->
   <aside class="space-y-6">
     <section class="{{ card_cls() }}">
-      <div class="font-semibold mb-2 text-sm">Add a person</div>
+      <div class="font-semibold mb-2 text-sm">Add staff member</div>
       <form method="post" action="/manage/people/create" class="space-y-2">
         {{ csrf_field() }}
         <input type="hidden" name="client_id" value="{{ client.id }}" />
@@ -112,7 +112,7 @@
         <button class="{{ btn('accent', 'md', 'w-full') }}">Add</button>
       </form>
       <p class="text-xs text-slate-400 mt-2">
-        Any one field is enough. People added here are marked <em>manual</em> and
+        Any one field is enough. Staff added here are marked <em>manual</em> and
         are never modified or deactivated by a directory sync.
       </p>
     </section>
@@ -129,7 +129,7 @@
           {% endfor %}
         </select>
         <select name="end_user_id" class="w-full border rounded px-2 py-1.5 text-sm">
-          <option value="">— to a person —</option>
+          <option value="">— to a staff member —</option>
           {% for p in people if p.active %}
           <option value="{{ p.id }}">{{ p.display_name or p.email or p.upn }}</option>
           {% endfor %}
@@ -147,11 +147,11 @@
         <button class="{{ btn('accent', 'md', 'w-full') }}">Assign</button>
       </form>
       <p class="text-xs text-slate-400 mt-2">
-        Pick exactly one of person or group. Only approved printers appear here.
+        Pick exactly one staff member or group. Only approved printers appear here.
       </p>
       {% else %}
       <p class="text-xs text-slate-500">
-        {% if not printers %}No approved printers for this client yet.{% else %}Add a person or a group first.{% endif %}
+        {% if not printers %}No approved printers for this client yet.{% else %}Add a staff member or group first.{% endif %}
       </p>
       {% endif %}
     </section>
@@ -230,7 +230,7 @@
   <div class="px-4 py-3 border-b font-semibold">Direct assignments</div>
   <table class="w-full text-sm">
     <thead class="text-left text-xs text-slate-500 bg-slate-50">
-      <tr><th class="px-4 py-2">Person</th><th class="py-2">Printer</th><th class="py-2 w-20 text-right pr-4"></th></tr>
+      <tr><th class="px-4 py-2">Staff member</th><th class="py-2">Printer</th><th class="py-2 w-20 text-right pr-4"></th></tr>
     </thead>
     <tbody>
       {% for p in people %}
@@ -261,11 +261,11 @@
 <section class="{{ card_cls('none', 'mt-6') }}">
   <div class="px-4 py-3 border-b font-semibold flex items-center justify-between">
     <span>Directory sync</span>
-    <span class="text-xs font-normal text-slate-500">people and groups for {{ client.name }}</span>
+    <span class="text-xs font-normal text-slate-500">staff and groups for {{ client.name }}</span>
   </div>
   <p class="px-4 pt-3 text-xs text-slate-500">
-    Synced people are matched on the directory's immutable object id, so renames
-    and address changes keep the same record and its printers. People added by
+    Synced staff are matched on the directory's immutable object id, so renames
+    and address changes keep the same record and its printers. Staff added by
     hand are never touched by a sync, and leavers are deactivated rather than
     deleted so assignment history survives.
   </p>
@@ -355,7 +355,7 @@
           <button class="text-xs rounded border px-2 py-1 hover:bg-slate-50">Sync now</button>
         </form>
         <form method="post" action="/manage/people/directory/{{ conn.id }}/delete" class="inline"
-              onsubmit="return confirm('Remove this connection? Synced people are kept.')">
+              onsubmit="return confirm('Remove this connection? Synced staff are kept.')">
           {{ csrf_field() }}
           <button class="text-xs rounded border px-2 py-1 text-rose-700 hover:bg-rose-50">Remove</button>
         </form>

@@ -742,22 +742,16 @@ def test_reorder_page_says_so_when_there_is_nothing_to_order(db):
     assert "Nothing to order" in resp.text
 
 
-def test_reorder_page_has_no_ordering_control(db):
-    """RECOMMEND-ONLY is a property of the page, not just of the docstring.
-
-    A control that marks a row ordered is order state; this asserts the page
-    never grew one.
-    """
+def test_reorder_page_offers_a_human_order_record_without_claiming_to_buy(db):
     client, site = _client_site(db)
     _supply(db, _printer(db, client, site), level=5.0)
     http = _login(db, "admin", "admin", m.UserRole.admin)
     body = http.get("/supplies/reorder").text
     lowered = body.lower()
-    for forbidden in ("mark ordered", "mark as ordered", "place order",
-                      "purchase order", "add to cart", "/order"):
-        assert forbidden not in lowered, f"{forbidden!r} is out of scope for this page"
-    # The only form on the page is the client filter (a GET).
-    assert 'method="post"' not in lowered
+    assert "record order" in lowered
+    assert 'action="/supplies/orders"' in lowered
+    for forbidden in ("place order", "purchase now", "add to cart"):
+        assert forbidden not in lowered
 
 
 def test_client_readonly_is_sent_to_the_portal(db):

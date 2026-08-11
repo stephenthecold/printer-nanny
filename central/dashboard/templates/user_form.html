@@ -1,9 +1,9 @@
 {% extends "base.html" %}
 {% from "_components.html" import badge, btn, btn_link, card_cls, field, page_title,
         section_title, select_field %}
-{% block title %}Edit user · {{ app.name or 'Printer Nanny' }}{% endblock %}
+{% block title %}Edit console user · {{ app.name or 'Printer Nanny' }}{% endblock %}
 {% block body %}
-{% call page_title('Edit user: ' ~ target.username, back_href='/manage/users', back_label='Users') %}
+{% call page_title('Edit console user: ' ~ target.username, back_href='/manage/users', back_label='Console users') %}
   {{ badge(target.auth_provider, 'muted') }}
 {% endcall %}
 
@@ -11,11 +11,12 @@
   {{ csrf_field() }}
   {{ field('email', 'Email', type='email', value=target.email or '') }}
   {% call select_field('role', 'Role') %}
+    {% set role_labels = {'admin': 'Administrator', 'tech': 'Technician', 'client_readonly': 'Client (read only)'} %}
     {% for r in roles %}
-    <option value="{{ r }}" {% if r == target.role.value %}selected{% endif %}>{{ r }}</option>
+    <option value="{{ r }}" {% if r == target.role.value %}selected{% endif %}>{{ role_labels.get(r, r) }}</option>
     {% endfor %}
   {% endcall %}
-  {% call select_field('client_id', 'Client', help='Only used when the role is client_readonly.') %}
+  {% call select_field('client_id', 'Client', help='Only used for a read-only client account.') %}
     <option value="">—</option>
     {% for c in clients %}
     <option value="{{ c.id }}" {% if target.client_id == c.id %}selected{% endif %}>{{ c.name }}</option>
@@ -29,7 +30,7 @@
 
 <section class="{{ card_cls('lg', 'max-w-lg mt-6') }}">
   {{ section_title('Reset password') }}
-  <p class="text-xs text-slate-500 mb-2">Forces a new local password — the user can change it later from <code>/account</code>.</p>
+  <p class="text-xs text-slate-500 mb-2">Forces a new local password — the console user can change it later from <code>/account</code>.</p>
   <form method="post" action="/manage/users/{{ target.id }}/reset-password" class="space-y-3">
     {{ csrf_field() }}
     {{ field('new_password', 'New password', type='password', required=True,
