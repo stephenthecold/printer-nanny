@@ -725,6 +725,7 @@ def supplies_reorder(request: Request, db: Session = Depends(get_db)):
     rather than trusted from the query string.
     """
     from central import reorder as reorder_mod
+    from central import supply_inventory as inventory_mod
     from central import supply_orders as order_mod
 
     user = _user(request, db)
@@ -750,6 +751,8 @@ def supplies_reorder(request: Request, db: Session = Depends(get_db)):
     thresholds = reorder_mod.ReorderThresholds.load(db)
     recs = reorder_mod.recommendations(db, client_id=selected_id, thresholds=thresholds)
     orders = order_mod.active_orders(db, client_id=selected_id)
+    stock = inventory_mod.stock_groups(db, client_id=selected_id)
+    unresolved = inventory_mod.unresolved_usages(db, client_id=selected_id)
     by_signature = order_mod.orders_by_signature(orders)
     orders_for_supply = {
         rec.supply_id: by_signature.get(
@@ -768,6 +771,12 @@ def supplies_reorder(request: Request, db: Session = Depends(get_db)):
         clients=clients,
         selected_client_id=selected_id,
         active_orders=orders,
+        stock=stock,
+        stock_compatible_printers=order_mod.compatible_printers(
+            db, [item.order for item in stock]
+        ),
+        unresolved_usages=unresolved,
+        usage_options=inventory_mod.assignment_options(db, unresolved),
         compatible_printers=order_mod.compatible_printers(db, orders),
         orders_for_supply=orders_for_supply,
         default_delivery_date=order_mod.default_delivery_date(),
@@ -894,11 +903,102 @@ def supply_order_delete(
     if order is None:
         request.session["supply_flash"] = "That order was already removed."
         return RedirectResponse("/supplies/reorder", status_code=303)
+    if db.scalar(
+        select(m.SupplyUsage.id).where(m.SupplyUsage.supply_order_id == order.id).limit(1)
+    ) is not None:
+        request.session["supply_flash"] = (
+            "That stock record has cartridge use attached and cannot be deleted."
+        )
+        return RedirectResponse("/supplies/reorder", status_code=303)
     record(db, request, user, "supply_order.delete", target=f"supply_order:{order.id}")
     db.delete(order)
     db.commit()
     request.session["supply_flash"] = "Order record removed."
     return RedirectResponse("/supplies/reorder", status_code=303)
+
+
+@router.post("/supplies/usages/{usage_id}/assign")
+def supply_usage_assign(
+    usage_id: int,
+    request: Request,
+    order_id: int = Form(...),
+    db: Session = Depends(get_db),
+):
+    from central import supply_inventory as inventory_mod
+    from central.audit import record
+
+    user = _user(request, db)
+    if user is None or user.role == m.UserRole.client_readonly:
+        return _login_redirect()
+    usage = db.scalar(
+        select(m.SupplyUsage)
+        .where(m.SupplyUsage.id == usage_id)
+        .with_for_update()
+    )
+    order = db.scalar(
+        select(m.SupplyOrder)
+        .where(m.SupplyOrder.id == order_id)
+        .with_for_update()
+    )
+    if usage is None or order is None:
+        request.session["supply_flash"] = "That stock assignment is no longer available."
+        return RedirectResponse("/supplies/reorder", status_code=303)
+    if not inventory_mod.assign_usage(db, usage, order, user_id=user.id):
+        request.session["supply_flash"] = (
+            "That cartridge is incompatible, already assigned, or no longer in stock."
+        )
+        return RedirectResponse("/supplies/reorder", status_code=303)
+    record(
+        db,
+        request,
+        user,
+        "supply_usage.assign",
+        target=f"supply_usage:{usage.id} supply_order:{order.id} site:{usage.site_id}",
+    )
+    client_id = usage.site.client_id
+    db.commit()
+    request.session["supply_flash"] = "Cartridge use assigned to location stock."
+    return RedirectResponse(
+        f"/supplies/reorder?client_id={client_id}", status_code=303
+    )
+
+
+@router.post("/supplies/usages/{usage_id}/delete")
+def supply_usage_delete(
+    usage_id: int, request: Request, db: Session = Depends(get_db)
+):
+    from central.audit import record
+
+    user = _user(request, db)
+    if user is None or user.role == m.UserRole.client_readonly:
+        return _login_redirect()
+    usage = db.scalar(
+        select(m.SupplyUsage)
+        .where(m.SupplyUsage.id == usage_id)
+        .with_for_update()
+    )
+    if usage is None:
+        request.session["supply_flash"] = "That cartridge-use record was already removed."
+        return RedirectResponse("/supplies/reorder", status_code=303)
+    if usage.supply_order_id is not None:
+        request.session["supply_flash"] = (
+            "Assigned cartridge use cannot be deleted from the reconciliation queue."
+        )
+        return RedirectResponse("/supplies/reorder", status_code=303)
+    client_id = usage.site.client_id
+    record(
+        db,
+        request,
+        user,
+        "supply_usage.delete",
+        target=f"supply_usage:{usage.id} site:{usage.site_id}",
+    )
+    db.delete(usage)
+    db.commit()
+    request.session["supply_flash"] = "Unmatched cartridge-use record removed."
+    return RedirectResponse(
+        f"/supplies/reorder?client_id={client_id}", status_code=303
+    )
 
 
 # --- Device security posture ------------------------------------------------ #

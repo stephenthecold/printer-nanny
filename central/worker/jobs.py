@@ -1813,6 +1813,7 @@ def scan_supply_cycles(db: Session, now: Optional[datetime] = None) -> dict:
     setting off, nothing is transmitted and the result says so rather than
     reporting a send that did not happen.
     """
+    from central import supply_inventory as _inventory
     from central import supply_yield as _yield
 
     settings = load_settings(db)
@@ -1833,6 +1834,7 @@ def scan_supply_cycles(db: Session, now: Optional[datetime] = None) -> dict:
             return {}
 
     totals = {"points": 0, "extended": 0, "opened": 0, "closed": 0}
+    inventory_totals = {"auto_assigned": 0, "ambiguous": 0, "no_stock": 0}
     closed_ids: list = []
     scanned = 0
     for printer in db.scalars(
@@ -1842,6 +1844,9 @@ def scan_supply_cycles(db: Session, now: Optional[datetime] = None) -> dict:
     ):
         try:
             scan = _yield.scan_printer(db, printer, now=now, runtime=settings)
+            reconciled = _inventory.reconcile_replacements(
+                db, printer, scan.closed, now=now
+            )
             db.commit()
             # Read AFTER the commit: the ids only exist once the INSERTs have
             # run, and a scan whose transaction failed must contribute no
@@ -1855,6 +1860,8 @@ def scan_supply_cycles(db: Session, now: Optional[datetime] = None) -> dict:
         counts = scan.counts
         for key in totals:
             totals[key] += counts[key]
+        for key, value in reconciled.items():
+            inventory_totals[key] += value
 
     if marker is None:
         db.add(m.AppSetting(key=YIELD_SCAN_MARKER, value=now.isoformat()))
@@ -1868,6 +1875,8 @@ def scan_supply_cycles(db: Session, now: Optional[datetime] = None) -> dict:
         "cycles_opened": totals["opened"],
         "readings": totals["points"],
     }
+    if totals["closed"]:
+        result["inventory"] = inventory_totals
     events = _publish_yield_events(
         db, thresholds, closed_ids=closed_ids, now=now
     )

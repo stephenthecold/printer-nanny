@@ -11,6 +11,95 @@
 
 {% if supply_flash %}<div class="{{ note('info', 'mb-5') }}" role="status">{{ supply_flash }}</div>{% endif %}
 
+{% if unresolved_usages %}
+<section class="{{ card_cls('md', 'mb-5') }} border-amber-300" aria-labelledby="unmatched-usage-title">
+  <div class="flex items-start justify-between gap-3 flex-wrap mb-3">
+    <div>
+      <h2 id="unmatched-usage-title" class="font-semibold">Cartridge use needs review</h2>
+      <p class="text-xs text-slate-500 mt-1">A printer returned near 100%, but stock could not be deducted safely. Assign the cartridge used or remove a false detection.</p>
+    </div>
+    {{ badge(unresolved_usages|length ~ ' to review', 'warning') }}
+  </div>
+  <div class="space-y-2">
+    {% for usage in unresolved_usages %}
+    {% set options = usage_options.get(usage.id, []) %}
+    <article class="rounded border border-amber-200 bg-amber-50 px-3 py-3 flex items-start justify-between gap-3 flex-wrap">
+      <div class="min-w-0">
+        <div class="text-sm font-medium">{{ usage.color|title if usage.color else 'Unspecified' }} {{ usage.supply_type }} · {{ usage.model }}</div>
+        <div class="text-xs text-slate-600 mt-0.5">
+          {{ usage.site.client.name }} · {{ usage.site.name }} ·
+          {% if usage.printer %}<a class="text-sky-700 hover:underline" href="/printers/{{ usage.printer.id }}">{{ usage.printer.display_name or usage.printer.model or usage.printer.ip }}</a>{% else %}retired printer{% endif %}
+          · detected {{ usage.detected_at.strftime('%b %d, %Y %I:%M %p') }}
+        </div>
+        <p class="text-xs text-amber-800 mt-1">
+          {% if usage.status.value == 'ambiguous' %}More than one stocked product could fit; choose the cartridge that was used.{% else %}No compatible cartridge is currently recorded in stock at this location.{% endif %}
+        </p>
+      </div>
+      <div class="flex items-end gap-2 flex-wrap">
+        {% if options %}
+        <form method="post" action="/supplies/usages/{{ usage.id }}/assign" class="flex items-end gap-2 flex-wrap">
+          {{ csrf_field() }}
+          <label class="block text-xs">Cartridge used
+            <select name="order_id" class="{{ input_sm_cls('block mt-1 max-w-72') }}" required>
+              {% for item in options %}
+              <option value="{{ item.order.id }}">{{ item.order.manufacturer or 'Unknown maker' }}{% if item.order.sku %} · {{ item.order.sku }}{% endif %} · {{ item.on_hand }} in stock</option>
+              {% endfor %}
+            </select>
+          </label>
+          <button class="{{ btn('primary', 'sm') }}">Assign</button>
+        </form>
+        {% endif %}
+        <form method="post" action="/supplies/usages/{{ usage.id }}/delete" onsubmit="return confirm('Remove this cartridge-use detection?')">
+          {{ csrf_field() }}
+          <button class="{{ btn('danger', 'sm') }}">Delete</button>
+        </form>
+      </div>
+    </article>
+    {% endfor %}
+  </div>
+</section>
+{% endif %}
+
+{% if stock %}
+<section class="{{ card_cls('md', 'mb-5') }}" aria-labelledby="location-stock-title">
+  <div class="flex items-start justify-between gap-3 flex-wrap mb-3">
+    <div>
+      <h2 id="location-stock-title" class="font-semibold">Stock by location</h2>
+      <p class="text-xs text-slate-500 mt-1">Delivered cartridges minus replacements detected at that location.</p>
+    </div>
+    {{ badge(stock|sum(attribute='on_hand') ~ ' on hand', 'success') }}
+  </div>
+  <div class="{{ table_wrap() }}">
+    <table class="{{ table_cls() }}">
+      <thead class="{{ thead_cls() }}">
+        <tr>
+          <th class="{{ th_cls() }}">Location</th>
+          <th class="{{ th_cls() }}">Cartridge</th>
+          <th class="{{ th_cls() }}">Compatible printers</th>
+          <th class="{{ th_cls('right') }}">Received</th>
+          <th class="{{ th_cls('right') }}">Used</th>
+          <th class="{{ th_cls('right') }}">On hand</th>
+        </tr>
+      </thead>
+      <tbody>
+        {% for item in stock %}
+        {% set order = item.order %}
+        {% set matches = stock_compatible_printers.get(order.id, []) %}
+        <tr class="{{ tr_cls() }}">
+          <td class="{{ td_cls() }}"><span class="font-medium">{{ order.site.name }}</span><div class="text-xs text-slate-400">{{ order.site.client.name }}</div></td>
+          <td class="{{ td_cls() }}">{{ order.description or ((order.color ~ ' ' ~ order.supply_type)|trim) }}<div class="text-xs text-slate-400">{{ order.model }}{% if order.manufacturer %} · {{ order.manufacturer }}{% endif %}{% if order.sku %} · {{ order.sku }}{% endif %}</div></td>
+          <td class="{{ td_cls('left', 'text-xs text-slate-500') }}">{% if matches %}{% for printer in matches %}<a class="text-sky-700 hover:underline" href="/printers/{{ printer.id }}">{{ printer.display_name or printer.model or printer.ip }}</a>{{ ', ' if not loop.last }}{% endfor %}{% else %}No approved match{% endif %}</td>
+          <td class="{{ td_cls('right', 'tabular-nums') }}">{{ item.received }}</td>
+          <td class="{{ td_cls('right', 'tabular-nums') }}">{{ item.used }}</td>
+          <td class="{{ td_cls('right', 'tabular-nums font-semibold') }}">{% if item.on_hand %}{{ item.on_hand }}{% else %}<span class="text-red-700">0</span>{% endif %}</td>
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+</section>
+{% endif %}
+
 {% if active_orders %}
 <section class="{{ card_cls('md', 'mb-5') }}" aria-labelledby="active-orders-title">
   <div class="flex items-start justify-between gap-3 flex-wrap mb-3">

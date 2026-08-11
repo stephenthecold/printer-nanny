@@ -132,6 +132,13 @@ class SupplyOrderStatus(str, enum.Enum):
     delivered = "delivered"
 
 
+class SupplyUsageStatus(str, enum.Enum):
+    auto_assigned = "auto_assigned"
+    manually_assigned = "manually_assigned"
+    no_stock = "no_stock"
+    ambiguous = "ambiguous"
+
+
 class EventSeverity(str, enum.Enum):
     info = "info"
     warning = "warning"
@@ -381,6 +388,9 @@ class Site(Base):
         back_populates="site", cascade="all, delete-orphan"
     )
     supply_orders: Mapped[list[SupplyOrder]] = relationship(
+        back_populates="site", cascade="all, delete-orphan"
+    )
+    supply_usages: Mapped[list[SupplyUsage]] = relationship(
         back_populates="site", cascade="all, delete-orphan"
     )
 
@@ -934,6 +944,7 @@ class SupplyOrder(Base):
     site: Mapped[Site] = relationship(back_populates="supply_orders")
     printer: Mapped[Optional[Printer]] = relationship()
     supply: Mapped[Optional[Supply]] = relationship()
+    usages: Mapped[list[SupplyUsage]] = relationship(back_populates="supply_order")
 
     __table_args__ = (
         CheckConstraint("quantity > 0", name="ck_supply_orders_quantity_positive"),
@@ -1150,6 +1161,9 @@ class SupplyCycle(Base):
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
 
     printer: Mapped[Printer] = relationship()
+    inventory_usage: Mapped[Optional[SupplyUsage]] = relationship(
+        back_populates="supply_cycle", cascade="all, delete-orphan", uselist=False
+    )
 
     __table_args__ = (
         # Every read is "this printer's cycles for this slot" -- the scan looks
@@ -1157,6 +1171,56 @@ class SupplyCycle(Base):
         Index("ix_supply_cycles_printer_slot", "printer_id", "supply_type", "color"),
         # ...except the replacement log, which is "the fleet's, newest first".
         Index("ix_supply_cycles_ended", "ended_at"),
+    )
+
+
+class SupplyUsage(Base):
+    """One cartridge replacement reconciled against location stock.
+
+    The cycle foreign key is unique because a detected replacement may consume
+    at most one stocked cartridge, even when the worker retries after a crash.
+    A nullable order is an explicit reconciliation task, never an invitation to
+    guess: no compatible stock and multiple distinct compatible products are
+    both shown to a technician for Assign/Delete.
+    """
+
+    __tablename__ = "supply_usages"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    supply_cycle_id: Mapped[int] = mapped_column(
+        ForeignKey("supply_cycles.id", ondelete="CASCADE"), unique=True
+    )
+    site_id: Mapped[int] = mapped_column(
+        ForeignKey("sites.id", ondelete="CASCADE"), index=True
+    )
+    printer_id: Mapped[Optional[int]] = mapped_column(
+        ForeignKey("printers.id", ondelete="SET NULL"), default=None, index=True
+    )
+    supply_order_id: Mapped[Optional[int]] = mapped_column(
+        ForeignKey("supply_orders.id", ondelete="SET NULL"), default=None, index=True
+    )
+    status: Mapped[SupplyUsageStatus] = mapped_column(
+        _enum(SupplyUsageStatus), index=True
+    )
+    model: Mapped[str] = mapped_column(String(200))
+    supply_type: Mapped[str] = mapped_column(String(40))
+    color: Mapped[str] = mapped_column(String(40), default="")
+    detected_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    assigned_at: Mapped[Optional[datetime]] = mapped_column(
+        DateTime(timezone=True), default=None
+    )
+    assigned_by_user_id: Mapped[Optional[int]] = mapped_column(
+        ForeignKey("users.id", ondelete="SET NULL"), default=None
+    )
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+
+    supply_cycle: Mapped[SupplyCycle] = relationship(back_populates="inventory_usage")
+    site: Mapped[Site] = relationship(back_populates="supply_usages")
+    printer: Mapped[Optional[Printer]] = relationship()
+    supply_order: Mapped[Optional[SupplyOrder]] = relationship(back_populates="usages")
+
+    __table_args__ = (
+        Index("ix_supply_usages_site_status", "site_id", "status"),
     )
 
 
