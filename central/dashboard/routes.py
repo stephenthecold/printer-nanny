@@ -729,6 +729,7 @@ def supplies_reorder(request: Request, db: Session = Depends(get_db)):
     from central import supply_compatibility as compatibility_mod
     from central import supply_inventory as inventory_mod
     from central import supply_orders as order_mod
+    from central.business_calendar import ProcurementCalendar
 
     user = _user(request, db)
     if user is None:
@@ -750,7 +751,9 @@ def supplies_reorder(request: Request, db: Session = Depends(get_db)):
         if candidate is not None and any(c.id == candidate for c in clients):
             selected_id = candidate
 
-    thresholds = reorder_mod.ReorderThresholds.load(db)
+    procurement_calendar = ProcurementCalendar.load(db)
+    today = datetime.now(timezone.utc).date()
+    thresholds = reorder_mod.ReorderThresholds.load(db, today=today)
     recs = reorder_mod.recommendations(db, client_id=selected_id, thresholds=thresholds)
     orders = order_mod.active_orders(db, client_id=selected_id)
     stock = inventory_mod.stock_groups(db, client_id=selected_id)
@@ -809,7 +812,10 @@ def supplies_reorder(request: Request, db: Session = Depends(get_db)):
         compatible_printers=order_mod.compatible_printers(db, orders),
         orders_for_supply=orders_for_supply,
         products_for_supply=products_for_supply,
-        default_delivery_date=order_mod.default_delivery_date(),
+        default_delivery_date=order_mod.default_delivery_date(
+            start=today, policy=procurement_calendar
+        ),
+        procurement_calendar=procurement_calendar,
         supply_flash=request.session.pop("supply_flash", None),
         urgency_now=reorder_mod.URGENCY_NOW,
         # A reorder list computed from supply levels nobody has refreshed since
@@ -833,6 +839,7 @@ def supply_order_create(
 ):
     from central import supply_compatibility as compatibility_mod
     from central import supply_orders as order_mod
+    from central.business_calendar import ProcurementCalendar
     from central.audit import record
 
     user = _user(request, db)
@@ -918,7 +925,12 @@ def supply_order_create(
         ),
         quantity=quantity,
         vendor=order_mod.one_line(vendor, 160) or "Sun Data Supply",
-        estimated_delivery_at=eta or order_mod.default_delivery_date(),
+        estimated_delivery_at=(
+            eta
+            or order_mod.default_delivery_date(
+                policy=ProcurementCalendar.load(db)
+            )
+        ),
         created_by_user_id=user.id,
     )
     db.add(order)

@@ -228,9 +228,11 @@
   <em>or</em> it is forecast to last
   <strong class="tabular-nums">{{ thresholds.days_remaining }}</strong> day(s) or fewer,
   <em>or</em> <strong class="tabular-nums">{{ '{:,}'.format(thresholds.pages_remaining) }}</strong> page(s) or fewer.
-  Anything running out inside the
-  <strong class="tabular-nums">{{ thresholds.lead_days }}</strong>-day replacement lead time is
-  <strong>order now</strong>.
+  <strong>Order now</strong> means the supply may run out inside the
+  <strong>{{ procurement_calendar.delivery_business_days }} delivery +
+  {{ procurement_calendar.safety_business_days }} safety business-day</strong>
+  window (currently {{ thresholds.lead_days }} calendar day(s), accounting for
+  weekends, holidays, and closures).
   {% if user.role.value == 'admin' %}
   <a href="/settings?group=alerts" class="text-sky-700 hover:underline">Change these in Settings</a>.
   {% endif %}

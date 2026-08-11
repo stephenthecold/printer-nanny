@@ -45,6 +45,7 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass, field
+from datetime import datetime, timezone
 from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple
 
 from sqlalchemy import select
@@ -107,13 +108,18 @@ class ReorderThresholds:
     # operator tuning one must not silently move the other.
     receptacle_full_pct: float = 80.0
     urgent_receptacle_full_pct: float = 95.0
-    lead_days: int = 14            # alerts.reorder_lead_days -- the operator has
-                                   # already told us how long a cartridge takes
-                                   # to arrive; a supply that will not outlast it
-                                   # is not "soon", it is late.
+    # ``load`` replaces this pure-unit-test fallback with the procurement
+    # calendar's delivery + safety business-day horizon. A supply that will not
+    # outlast that window is not "soon", it is late.
+    lead_days: int = 14
 
     @classmethod
-    def from_runtime(cls, runtime: Optional[Dict[str, Any]]) -> "ReorderThresholds":
+    def from_runtime(
+        cls,
+        runtime: Optional[Dict[str, Any]],
+        *,
+        lead_days: Optional[int] = None,
+    ) -> "ReorderThresholds":
         rt = runtime or {}
         d = cls()
 
@@ -134,14 +140,24 @@ class ReorderThresholds:
             urgent_receptacle_full_pct=_num(
                 "reorder.urgent_receptacle_full_pct", d.urgent_receptacle_full_pct, float
             ),
-            lead_days=_num("alerts.reorder_lead_days", d.lead_days, int),
+            lead_days=(
+                _num("alerts.reorder_lead_days", d.lead_days, int)
+                if lead_days is None
+                else lead_days
+            ),
         )
 
     @classmethod
-    def load(cls, db: Session) -> "ReorderThresholds":
+    def load(cls, db: Session, *, today=None) -> "ReorderThresholds":
+        from central.business_calendar import effective_order_window_days
         from central.runtime import load_settings  # lazy: avoid an import cycle
 
-        return cls.from_runtime(load_settings(db))
+        rt = load_settings(db)
+        if today is None:
+            today = datetime.now(timezone.utc).date()
+        return cls.from_runtime(
+            rt, lead_days=effective_order_window_days(rt, today)
+        )
 
 
 # --------------------------------------------------------------------------- #

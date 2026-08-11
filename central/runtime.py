@@ -154,13 +154,32 @@ SPECS: List[Spec] = [
     Spec("reports.send_hour", "int", "Reports", "Send hour (UTC, 0-23)", 7),
     Spec("reports.recipients", "str", "Reports", "Report recipients", "",
          "Comma-separated. Leave blank to use the alert email recipients."),
+    # Supply procurement calendar. Delivery and safety stay separate because
+    # the former predicts the ETA shown on an order while their sum decides
+    # when a forecast becomes "order now".
+    Spec("procurement.delivery_business_days", "int", "Supply ordering",
+         "Delivery time (business days)", 5,
+         "Expected vendor transit time. Weekends, observed US federal holidays, "
+         "and custom closure dates do not consume a day."),
+    Spec("procurement.safety_business_days", "int", "Supply ordering",
+         "Safety margin (business days)", 2,
+         "Order this many business days before the expected delivery window so "
+         "a late shipment does not stop printing."),
+    Spec("procurement.observe_us_holidays", "bool", "Supply ordering",
+         "Skip observed US federal holidays", True,
+         "Treat observed federal holidays as closed days in delivery and order windows."),
+    Spec("procurement.closed_dates", "str", "Supply ordering",
+         "Additional closed dates", "",
+         "Comma-separated YYYY-MM-DD dates. Invalid entries are ignored and shown "
+         "unchanged so they can be corrected."),
     # Alerts
     Spec("alerts.low_supply_pct", "float", "Alerts", "Low-supply threshold (%)", 20.0,
          "Default supply level that counts as 'low' in the dashboard"),
-    Spec("alerts.reorder_lead_days", "int", "Alerts", "Reorder lead time (days)", 14,
-         "Open a predicted-depletion alert when a supply is forecast to run out "
-         "within this many days — set it to how long a replacement cartridge "
-         "takes to arrive so you order before the printer goes dark"),
+    Spec("alerts.reorder_lead_days", "int", "Alerts",
+         "Minimum order window override (calendar days)", 0,
+         "Normally leave at 0: Supply workflow computes the window from delivery "
+         "+ safety business days. Set a larger calendar-day minimum only for a "
+         "vendor with an unusually long lead time."),
     Spec("alerts.offline_grace_seconds", "int", "Alerts", "Agent offline grace (seconds)",
          _env.agent_offline_grace_seconds, "Mark an agent offline after this long without a heartbeat"),
     Spec("alerts.printer_offline_minutes", "int", "Alerts", "Printer offline grace (minutes)", 30,
@@ -641,7 +660,9 @@ SETTINGS_GROUPS: "Dict[str, tuple]" = {
         ["Email (SMTP)", "Microsoft Teams", "Slack", "Webhook (generic)", "FreeScout",
          "Event bus"],
     ),
-    "procurement": ("Supply workflow", ["Shipping mailbox (O365)"]),
+    "procurement": (
+        "Supply workflow", ["Supply ordering", "Shipping mailbox (O365)"]
+    ),
     "alerts": ("Alerts & Reports",
                ["Alerts", "Supplies (reorder)", "Supplies (yield)", "Reports",
                 "ESG / Sustainability"]),

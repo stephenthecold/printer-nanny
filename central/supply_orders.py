@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from datetime import date, datetime, timedelta, timezone
+from datetime import date, datetime, timezone
 from typing import Iterable, Optional
 
 from sqlalchemy import select
@@ -19,15 +19,17 @@ def normalized(value: Optional[str]) -> str:
     return one_line(value, 200).casefold()
 
 
-def default_delivery_date(start: Optional[date] = None, business_days: int = 5) -> date:
-    """Five weekdays after ordering; weekends never consume delivery time."""
-    day = start or datetime.now(timezone.utc).date()
-    remaining = max(1, business_days)
-    while remaining:
-        day += timedelta(days=1)
-        if day.weekday() < 5:
-            remaining -= 1
-    return day
+def default_delivery_date(
+    start: Optional[date] = None,
+    business_days: int = 5,
+    *,
+    policy=None,
+) -> date:
+    """Expected delivery after business days, including holidays/closures."""
+    from central.business_calendar import ProcurementCalendar
+
+    calendar = policy or ProcurementCalendar(delivery_business_days=business_days)
+    return calendar.estimated_delivery(start or datetime.now(timezone.utc).date())
 
 
 def signature(site_id: int, model: str, supply_type: str, color: Optional[str]) -> tuple:

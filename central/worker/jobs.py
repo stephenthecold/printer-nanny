@@ -1462,20 +1462,24 @@ def forecast_supplies(db: Session, now: Optional[datetime] = None) -> dict:
          the reorder recommendations read them instead of re-fitting 30 days of
          readings on every render. A supply with no trustworthy estimate is
          cleared back to ``None``.
-      3. If the estimate is at/under the operator's reorder lead-time
-         (``alerts.reorder_lead_days``), open a ``predicted_depletion`` alert
+      3. If the estimate is at/under the procurement order window (delivery +
+         safety business days, skipping weekends/holidays/closures), open a
+         ``predicted_depletion`` alert
          deduped PER (printer, supply) — not per printer, so a color device
          with three depleting toners raises three actionable alerts instead of
          one storm-prone aggregate. The dedupe / auto-resolve machinery is the
          same scaffolding the rule engine uses: keys re-added this pass stay
          open, keys that drop out (estimate recovered, or the cartridge was
          swapped/refilled so the recent segment no longer projects empty) are
-         resolved.
+         resolved. ``alerts.reorder_lead_days`` is only an optional wider
+         calendar-day override for unusual vendors.
     """
     now = now or _now()
     runtime = load_settings(db)
     candidates = routable_channels(db, runtime)
-    lead_days = runtime.get("alerts.reorder_lead_days", 14)
+    from central.business_calendar import effective_order_window_days
+
+    lead_days = effective_order_window_days(runtime, now.date())
     history_since = now - timedelta(days=FORECAST_HISTORY_WINDOW_DAYS)
 
     flagged = 0

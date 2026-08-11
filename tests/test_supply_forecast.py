@@ -113,7 +113,8 @@ def _add_declining_series(db, printer, *, supplies, start, drop_per_day, days=14
 def test_predicted_depletion_opens_and_dedupes_per_supply(db):
     printer = _approved_printer(db)
     # Two depleting toners on one (color) printer. Both end low enough that at
-    # ~2%/day they're inside the default 14-day reorder window.
+    # ~2%/day they're inside the default 5-delivery + 2-safety-business-day
+    # order window.
     specs = [
         {"type": m.SupplyType.toner, "color": "black"},
         {"type": m.SupplyType.toner, "color": "cyan"},
@@ -122,7 +123,7 @@ def test_predicted_depletion_opens_and_dedupes_per_supply(db):
         db.add(m.Supply(printer_id=printer.id, type=sp["type"], color=sp["color"], level_pct=18.0))
     _add_declining_series(
         db, printer, supplies=specs,
-        start={"black": 46.0, "cyan": 46.0}, drop_per_day=2.0, days=14,
+        start={"black": 42.0, "cyan": 42.0}, drop_per_day=2.0, days=14,
     )
     db.commit()
 
@@ -202,7 +203,7 @@ def test_predicted_depletion_auto_resolves_on_refill(db):
     db.add(supply)
     _add_declining_series(
         db, printer, supplies=specs,
-        start={"black": 46.0}, drop_per_day=2.0, days=14,
+        start={"black": 42.0}, drop_per_day=2.0, days=14,
     )
     db.commit()
 
