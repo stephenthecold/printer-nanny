@@ -500,10 +500,11 @@ PAGES = [
     "/manage", "/manage/agents", "/manage/users", "/manage/maintenance",
     "/manage/audit", "/manage/events", "/manage/onboard", "/manage/alert-rules",
     "/manage/suppression", "/manage/billing", "/manage/people",
-    "/manage/machines", "/manage/definitions",
+    "/manage/machines", "/manage/definitions", "/manage/supply-compatibility",
     "/supplies/reorder", "/security/posture", "/admin/backup",
     "/settings?group=branding", "/settings?group=notifications",
     "/settings?group=alerts", "/settings?group=polling",
+    "/settings?group=procurement",
 ]
 
 

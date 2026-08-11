@@ -108,6 +108,9 @@
     nearest truthful parent so every page still answers "where am I?". -#}
 {%- if path.startswith('/clients/') -%}
   {%- set ns.active = dashboard_href -%}
+{%- elif path.startswith('/manage/supply-compatibility') -%}
+  {%- set ns.active = '/supplies/reorder' -%}
+  {%- set ns.active_label = 'Supplies' -%}
   {%- set ns.active_label = 'Dashboard' -%}
 {%- elif path.startswith('/portal') and user.role.value != 'client_readonly' -%}
   {%- set ns.active = '/manage' -%}

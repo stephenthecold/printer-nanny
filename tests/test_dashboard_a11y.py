@@ -52,6 +52,7 @@ PAGES = [
     "/manage/suppression",
     "/manage/billing",
     "/supplies/reorder",
+    "/manage/supply-compatibility",
     # Carries the "add an expected yield" form -- five controls, one of them a
     # select whose only visible context is the column it sits in.
     "/supplies/yield",
@@ -64,6 +65,7 @@ PAGES = [
     # checked at all, so a spec added there was unlabelled-until-noticed.
     "/settings?group=alerts",
     "/settings?group=polling",
+    "/settings?group=procurement",
 ]
 
 

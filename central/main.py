@@ -36,6 +36,7 @@ from central.dashboard import (
     remote as remote_routes,
     routes as dashboard,
     settings_routes,
+    supply_compatibility_routes,
     yield_routes,
 )
 from central.dashboard.templating import render_csrf_error
@@ -72,7 +73,7 @@ log = logging.getLogger("central.main")
 # cookie" is the trigger rather than a path allowlist.
 app = FastAPI(
     title="Printer Nanny",
-    version="1.7.0",
+    version="1.8.0",
     dependencies=[Depends(csrf_protect)],
     # /docs, /redoc and /openapi.json are FastAPI defaults and were UNAUTHENTICATED
     # -- 198 KB of schema describing every SCIM, agent-ingest, workstation-enroll
@@ -212,6 +213,7 @@ app.include_router(events_routes.router)
 app.include_router(definitions.router)
 app.include_router(remote_routes.router)
 app.include_router(yield_routes.router)
+app.include_router(supply_compatibility_routes.router)
 app.include_router(settings_routes.router)
 app.include_router(backup_routes.router)
 app.include_router(auth_oidc.router)

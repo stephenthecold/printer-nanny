@@ -64,13 +64,9 @@ def orders_by_signature(orders: Iterable[m.SupplyOrder]) -> dict[tuple, list[m.S
 def compatible_printers(
     db: Session, orders: Iterable[m.SupplyOrder]
 ) -> dict[int, list[m.Printer]]:
-    """Printers proven compatible by same location, model, type and colour.
+    """Printers proven compatible by catalogue data or exact-model fallback."""
+    from central import supply_compatibility as compatibility
 
-    This intentionally refuses fuzzy model guesses. Manufacturer data can be
-    enriched later, but a stock screen must never tell a technician that toner
-    fits a printer merely because two hostile/device-reported strings resemble
-    one another.
-    """
     order_rows = list(orders)
     if not order_rows:
         return {}
@@ -93,13 +89,24 @@ def compatible_printers(
             (supply.type.value, normalized(supply.color))
         )
     result: dict[int, list[m.Printer]] = {}
+    products = compatibility.catalogue_products(db)
     for order in order_rows:
+        product = compatibility.resolve_order_product(products, order)
         result[order.id] = [
             printer
             for printer in printers
             if printer.site_id == order.site_id
-            and normalized(printer.model) == normalized(order.model)
             and (order.supply_type, normalized(order.color))
             in supply_slots.get(printer.id, set())
+            and (
+                compatibility.product_fits(
+                    product,
+                    model=printer.model or "",
+                    supply_type=order.supply_type,
+                    color=order.color,
+                )
+                if product is not None
+                else normalized(printer.model) == normalized(order.model)
+            )
         ]
     return result

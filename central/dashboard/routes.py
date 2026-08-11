@@ -726,6 +726,7 @@ def supplies_reorder(request: Request, db: Session = Depends(get_db)):
     """
     from central import reorder as reorder_mod
     from central import shipping_mailbox as shipping_mod
+    from central import supply_compatibility as compatibility_mod
     from central import supply_inventory as inventory_mod
     from central import supply_orders as order_mod
 
@@ -755,10 +756,29 @@ def supplies_reorder(request: Request, db: Session = Depends(get_db)):
     stock = inventory_mod.stock_groups(db, client_id=selected_id)
     unresolved = inventory_mod.unresolved_usages(db, client_id=selected_id)
     shipping_notices = shipping_mod.pending_notices(db, client_id=selected_id)
-    by_signature = order_mod.orders_by_signature(orders)
+    catalogue_products = compatibility_mod.catalogue_products(db)
     orders_for_supply = {
-        rec.supply_id: by_signature.get(
-            order_mod.signature(rec.site_id, rec.model, rec.supply_type, rec.color), []
+        rec.supply_id: [
+            order
+            for order in orders
+            if compatibility_mod.order_fits(
+                db,
+                order,
+                site_id=rec.site_id,
+                model=rec.model,
+                supply_type=rec.supply_type,
+                color=rec.color,
+                products=catalogue_products,
+            )
+        ]
+        for rec in recs
+    }
+    products_for_supply = {
+        rec.supply_id: compatibility_mod.products_for_printer(
+            catalogue_products,
+            model=rec.model,
+            supply_type=rec.supply_type,
+            color=rec.color,
         )
         for rec in recs
     }
@@ -788,6 +808,7 @@ def supplies_reorder(request: Request, db: Session = Depends(get_db)):
         usage_options=inventory_mod.assignment_options(db, unresolved),
         compatible_printers=order_mod.compatible_printers(db, orders),
         orders_for_supply=orders_for_supply,
+        products_for_supply=products_for_supply,
         default_delivery_date=order_mod.default_delivery_date(),
         supply_flash=request.session.pop("supply_flash", None),
         urgency_now=reorder_mod.URGENCY_NOW,
@@ -805,10 +826,12 @@ def supply_order_create(
     quantity: int = Form(1),
     manufacturer: str = Form(""),
     sku: str = Form(""),
+    product_id: Optional[int] = Form(None),
     vendor: str = Form("Sun Data Supply"),
     estimated_delivery_at: str = Form(""),
     db: Session = Depends(get_db),
 ):
+    from central import supply_compatibility as compatibility_mod
     from central import supply_orders as order_mod
     from central.audit import record
 
@@ -831,10 +854,42 @@ def supply_order_create(
             request.session["supply_flash"] = "Estimated delivery must be a valid date."
             return RedirectResponse("/supplies/reorder", status_code=303)
 
-    key = order_mod.signature(
-        printer.site_id, printer.model or "", supply.type.value, supply.color
+    catalogue_products = compatibility_mod.catalogue_products(db)
+    selected_product = (
+        next(
+            (product for product in catalogue_products if product.id == product_id),
+            None,
+        )
+        if product_id
+        else None
     )
-    existing = order_mod.orders_by_signature(order_mod.active_orders(db)).get(key, [])
+    if product_id and (
+        selected_product is None
+        or not compatibility_mod.product_fits(
+            selected_product,
+            model=printer.model or "",
+            supply_type=supply.type.value,
+            color=supply.color,
+        )
+    ):
+        request.session["supply_flash"] = (
+            "That catalogue product is not compatible with this printer supply."
+        )
+        return RedirectResponse("/supplies/reorder", status_code=303)
+
+    existing = [
+        order
+        for order in order_mod.active_orders(db)
+        if compatibility_mod.order_fits(
+            db,
+            order,
+            site_id=printer.site_id,
+            model=printer.model or "",
+            supply_type=supply.type.value,
+            color=supply.color,
+            products=catalogue_products,
+        )
+    ]
     if existing:
         request.session["supply_flash"] = (
             "An active order already covers this cartridge at this location."
@@ -852,10 +907,15 @@ def supply_order_create(
         color=order_mod.one_line(supply.color, 40),
         description=order_mod.one_line(supply.description, 200),
         manufacturer=(
-            order_mod.one_line(manufacturer, 100)
+            (selected_product.manufacturer if selected_product is not None else "")
+            or order_mod.one_line(manufacturer, 100)
             or order_mod.one_line(printer.brand, 100)
         ),
-        sku=order_mod.one_line(sku, 120),
+        sku=(
+            selected_product.sku
+            if selected_product is not None
+            else order_mod.one_line(sku, 120)
+        ),
         quantity=quantity,
         vendor=order_mod.one_line(vendor, 160) or "Sun Data Supply",
         estimated_delivery_at=eta or order_mod.default_delivery_date(),

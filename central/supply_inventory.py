@@ -131,18 +131,34 @@ def compatible_stock(
     supply_type: str,
     color: str,
 ) -> list[StockItem]:
-    wanted = order_mod.signature(site_id, model, supply_type, color)
+    from central import supply_compatibility as compatibility
+
+    products = compatibility.catalogue_products(db)
     return [
         item
         for item in stock_items(db)
         if item.on_hand > 0
-        and order_mod.signature(
-            item.order.site_id,
-            item.order.model,
-            item.order.supply_type,
-            item.order.color,
+        and (
+            compatibility.product_fits(
+                product,
+                model=model,
+                supply_type=supply_type,
+                color=color,
+            )
+            if (
+                product := compatibility.resolve_order_product(
+                    products, item.order
+                )
+            ) is not None
+            else order_mod.signature(
+                item.order.site_id,
+                item.order.model,
+                item.order.supply_type,
+                item.order.color,
+            )
+            == order_mod.signature(site_id, model, supply_type, color)
         )
-        == wanted
+        and item.order.site_id == site_id
     ]
 
 
@@ -260,13 +276,16 @@ def assign_usage(
     """Assign an unresolved use if the selected order is compatible and stocked."""
     if usage.supply_order_id is not None:
         return False
-    wanted = order_mod.signature(
-        usage.site_id, usage.model, usage.supply_type, usage.color
-    )
-    offered = order_mod.signature(
-        order.site_id, order.model, order.supply_type, order.color
-    )
-    if order.status != m.SupplyOrderStatus.delivered or offered != wanted:
+    from central import supply_compatibility as compatibility
+
+    if order.status != m.SupplyOrderStatus.delivered or not compatibility.order_fits(
+        db,
+        order,
+        site_id=usage.site_id,
+        model=usage.model,
+        supply_type=usage.supply_type,
+        color=usage.color,
+    ):
         return False
     counts = _usage_counts(db, [order.id])
     if counts.get(order.id, 0) >= order.quantity:

@@ -9,6 +9,10 @@
      'Supplies to order',
      'See what needs ordering, record where it is going, and avoid ordering the same cartridge twice.') }}
 
+<div class="flex justify-end -mt-3 mb-4">
+  <a href="/manage/supply-compatibility" class="{{ btn('neutral', 'sm') }}">Manage compatibility</a>
+</div>
+
 {% if supply_flash %}<div class="{{ note('info', 'mb-5') }}" role="status">{{ supply_flash }}</div>{% endif %}
 
 {% if pending_shipping_notices %}
@@ -318,6 +322,7 @@
             {% if covering %}
               {{ badge('Already ordered', 'info') }}
             {% else %}
+            {% set known_products = products_for_supply.get(rec.supply_id, []) %}
             <details class="text-left">
               <summary class="cursor-pointer whitespace-nowrap rounded text-sky-700 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-sky-500">Record order</summary>
               <form method="post" action="/supplies/orders" class="mt-2 w-64 max-w-[75vw] space-y-2 rounded border bg-white p-3 shadow-lg">
@@ -326,6 +331,16 @@
                 <label class="block text-xs">Quantity
                   <input class="{{ input_sm_cls('w-full') }}" type="number" name="quantity" min="1" max="100" value="1" required />
                 </label>
+                {% if known_products %}
+                <label class="block text-xs">Known compatible product
+                  <select class="{{ input_sm_cls('w-full') }}" name="product_id">
+                    <option value="">Enter a different product below</option>
+                    {% for product in known_products %}
+                    <option value="{{ product.id }}">{{ product.manufacturer }} · {{ product.sku }}{% if product.is_oem %} · OEM{% endif %}</option>
+                    {% endfor %}
+                  </select>
+                </label>
+                {% endif %}
                 <label class="block text-xs">Manufacturer
                   <input class="{{ input_sm_cls('w-full') }}" name="manufacturer" value="" placeholder="{{ rec.model.split(' ')[0] if rec.model else 'OEM preferred' }}" />
                 </label>
@@ -338,7 +353,7 @@
                 <label class="block text-xs">Estimated delivery
                   <input class="{{ input_sm_cls('w-full') }}" type="date" name="estimated_delivery_at" value="{{ default_delivery_date.isoformat() }}" />
                 </label>
-                <p class="text-xs text-slate-500">Destination: {{ rec.client_name }} · {{ rec.site_name }}. Compatibility is traced to this model and supply slot at that location.</p>
+                <p class="text-xs text-slate-500">Destination: {{ rec.client_name }} · {{ rec.site_name }}. A known product fills its manufacturer and SKU automatically; otherwise enter them above.</p>
                 <button class="{{ btn('primary', 'sm') }}">Save order</button>
               </form>
             </details>

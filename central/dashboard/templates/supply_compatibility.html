@@ -1,0 +1,94 @@
+{% extends "base.html" %}
+{% from "_components.html" import btn, card_cls, page_title, note, badge,
+                                  table_wrap, table_cls, thead_cls, th_cls,
+                                  td_cls, tr_cls, empty_row, field, select_field,
+                                  textarea_field, checkbox_field %}
+{% block title %}Supply compatibility · {{ app.name or 'Printer Nanny' }}{% endblock %}
+{% block body %}
+
+{{ page_title(
+     'Supply compatibility',
+     'Teach Printer Nanny which cartridge SKUs fit which printer model families.') }}
+
+{% if flash %}<div class="{{ note('info', 'mb-5') }}" role="status">{{ flash }}</div>{% endif %}
+
+<div class="{{ note('muted', 'mb-5') }}">
+  Matching is deliberately conservative. A catalogue SKU can span several printer models,
+  but stock is still kept at its physical location. If more than one stocked product could
+  have been used, Printer Nanny asks a technician instead of deducting a guess.
+</div>
+
+<section class="{{ card_cls('md', 'mb-5') }}" aria-labelledby="add-product-title">
+  <h2 id="add-product-title" class="font-semibold mb-3">Add a compatible cartridge</h2>
+  <form method="post" action="/manage/supply-compatibility" class="space-y-4">
+    {{ csrf_field() }}
+    <div class="grid md:grid-cols-2 gap-3">
+      {{ field('manufacturer', 'Manufacturer', required=True, placeholder='HP') }}
+      {{ field('sku', 'SKU', required=True, placeholder='W1470A') }}
+      {{ field('description', 'Description', placeholder='147A black toner') }}
+      {% call select_field('supply_type', 'Supply type', required=True) %}
+        {% for item in supply_types %}<option value="{{ item }}">{{ item|title }}</option>{% endfor %}
+      {% endcall %}
+      {{ field('color', 'Colour / slot', placeholder='black', help='Leave blank for model-wide parts such as a fuser.') }}
+      {{ checkbox_field('is_oem', 'Manufacturer / OEM product', checked=True, help='OEM products are listed first; compatibility still has to match.') }}
+    </div>
+    {{ textarea_field('model_tags', 'Compatible printer model families', required=True, rows=3, placeholder='LaserJet Enterprise M611\nLaserJet Enterprise M612', help='One per line or comma-separated. Use a distinctive family name, at least 3 characters.') }}
+    {{ textarea_field('notes', 'Technician notes', rows=2, placeholder='Manufacturer datasheet verified 2026-08-11') }}
+    <button class="{{ btn('primary') }}">Add compatibility</button>
+  </form>
+</section>
+
+<section class="{{ card_cls('md') }}" aria-labelledby="catalogue-title">
+  <div class="flex items-center justify-between gap-3 mb-3">
+    <div>
+      <h2 id="catalogue-title" class="font-semibold">Known products</h2>
+      <p class="text-xs text-slate-500 mt-1">Edit a row when manufacturer information changes. Order history is never rewritten.</p>
+    </div>
+    {{ badge(products|length ~ ' product(s)', 'neutral') }}
+  </div>
+  <div class="{{ table_wrap() }}">
+    <table class="{{ table_cls() }}">
+      <thead class="{{ thead_cls() }}"><tr>
+        <th class="{{ th_cls() }}">Product</th>
+        <th class="{{ th_cls() }}">Supply</th>
+        <th class="{{ th_cls() }}">Compatible models</th>
+        <th class="{{ th_cls() }}"><span class="sr-only">Actions</span></th>
+      </tr></thead>
+      <tbody>
+      {% for product in products %}
+        <tr class="{{ tr_cls() }}">
+          <td class="{{ td_cls() }}"><span class="font-medium">{{ product.manufacturer }} · {{ product.sku }}</span><div class="text-xs text-slate-500">{{ product.description or 'No description' }}{% if product.is_oem %} · OEM{% endif %}</div></td>
+          <td class="{{ td_cls() }}">{{ product.color|title if product.color else 'Any colour' }} {{ product.supply_type }}</td>
+          <td class="{{ td_cls('left', 'text-xs text-slate-600') }}">{% for mapping in product.model_mappings|sort(attribute='model_tag') %}{{ mapping.model_tag }}{{ ', ' if not loop.last }}{% endfor %}</td>
+          <td class="{{ td_cls('right') }}">
+            <details class="text-left">
+              <summary class="cursor-pointer rounded text-xs text-sky-700 hover:underline focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-sky-500">Edit</summary>
+              <form method="post" action="/manage/supply-compatibility/{{ product.id }}" class="mt-3 p-3 rounded border bg-slate-50 space-y-3 min-w-72">
+                {{ csrf_field() }}
+                {{ field('manufacturer', 'Manufacturer', value=product.manufacturer, required=True, size='sm') }}
+                {{ field('sku', 'SKU', value=product.sku, required=True, size='sm') }}
+                {{ field('description', 'Description', value=product.description, size='sm') }}
+                {% call select_field('supply_type', 'Supply type', required=True, size='sm') %}
+                  {% for item in supply_types %}<option value="{{ item }}" {% if item == product.supply_type %}selected{% endif %}>{{ item|title }}</option>{% endfor %}
+                {% endcall %}
+                {{ field('color', 'Colour / slot', value=product.color, size='sm') }}
+                {{ checkbox_field('is_oem', 'Manufacturer / OEM product', checked=product.is_oem) }}
+                {{ textarea_field('model_tags', 'Compatible printer model families', value=model_tags_text(product), required=True, rows=3) }}
+                {{ textarea_field('notes', 'Technician notes', value=product.notes, rows=2) }}
+                <div class="flex items-center justify-between gap-2">
+                  <button class="{{ btn('primary', 'sm') }}">Save</button>
+                  <button class="{{ btn('danger', 'sm') }}" formaction="/manage/supply-compatibility/{{ product.id }}/delete" onclick="return confirm('Remove this compatibility product? Existing orders will be kept.')">Delete</button>
+                </div>
+              </form>
+            </details>
+          </td>
+        </tr>
+      {% else %}
+        {{ empty_row(4, 'No compatibility products yet. Add the first manufacturer SKU above.') }}
+      {% endfor %}
+      </tbody>
+    </table>
+  </div>
+</section>
+
+{% endblock %}

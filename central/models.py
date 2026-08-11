@@ -957,6 +957,60 @@ class SupplyOrder(Base):
     )
 
 
+class SupplyProduct(Base):
+    """A technician-maintained consumable and its stable product identity.
+
+    Orders deliberately keep their copied manufacturer/SKU strings: purchasing
+    history must survive a catalogue correction or deletion. ``product_key`` is
+    the portable, case-insensitive uniqueness boundary used by both SQLite and
+    Postgres; relying on either database's default collation would make the same
+    SKU behave differently in development and production.
+    """
+
+    __tablename__ = "supply_products"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    manufacturer: Mapped[str] = mapped_column(String(100))
+    sku: Mapped[str] = mapped_column(String(120))
+    product_key: Mapped[str] = mapped_column(String(240), unique=True)
+    description: Mapped[str] = mapped_column(String(200), default="")
+    supply_type: Mapped[str] = mapped_column(String(40))
+    color: Mapped[str] = mapped_column(String(40), default="")
+    is_oem: Mapped[bool] = mapped_column(Boolean, default=True)
+    notes: Mapped[str] = mapped_column(String(500), default="")
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+
+    model_mappings: Mapped[list[SupplyProductModel]] = relationship(
+        back_populates="product", cascade="all, delete-orphan"
+    )
+
+    __table_args__ = (
+        Index("ix_supply_products_slot", "supply_type", "color"),
+    )
+
+
+class SupplyProductModel(Base):
+    """One printer-model family proven compatible with a supply product."""
+
+    __tablename__ = "supply_product_models"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    product_id: Mapped[int] = mapped_column(
+        ForeignKey("supply_products.id", ondelete="CASCADE"), index=True
+    )
+    model_tag: Mapped[str] = mapped_column(String(200))
+    model_key: Mapped[str] = mapped_column(String(200))
+
+    product: Mapped[SupplyProduct] = relationship(back_populates="model_mappings")
+
+    __table_args__ = (
+        UniqueConstraint(
+            "product_id", "model_key", name="uq_supply_product_model_key"
+        ),
+    )
+
+
 class Reading(Base):
     """Append-only per-poll time-series: the raw material for meters and forecasts.
 
