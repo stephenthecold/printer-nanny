@@ -43,7 +43,9 @@ def test_cycle_stamps_every_job_with_a_real_timestamp(db):
     worker_run.run_cycle(60)
 
     rows = {r.job: r for r in db.scalars(select(m.WorkerJobRun))}
-    expected = {job.__name__ for job in worker_run.JOBS}
+    expected = {
+        getattr(job, "_health_job_name", job.__name__) for job in worker_run.JOBS
+    }
     assert set(rows) == expected
     for row in rows.values():
         assert row.last_success_at is not None

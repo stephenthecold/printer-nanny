@@ -1290,6 +1290,13 @@ FORECAST_MIN_HISTORY_DAYS = 3.0  # ...spanning at least this long (matches RUNWA
 # bound and drags alert latency down with it as a deployment ages. A month is
 # far more than the fit needs (it segments to the current cartridge anyway).
 FORECAST_HISTORY_WINDOW_DAYS = 30
+# Machine state for the worker-facing cadence gate. The fit works over a month
+# and decides a day-scale procurement action; reloading that whole month every
+# 60-second worker tick adds no useful precision. The direct forecast function
+# stays ungated for tests/manual runs, while the scheduled wrapper records only
+# the last SUCCESSFUL pass so a failure is retried on the next worker tick.
+FORECAST_RUN_MARKER = "forecast.last_run_at"
+FORECAST_INTERVAL_MIN_DEFAULT = 60
 # The same confidence gate expressed on the PAGES axis. A segment spanning three
 # printed pages has a slope, and it is meaningless -- toner level readings are
 # coarse (many devices report in 1% or 10% steps), so the fit needs enough pages
@@ -1451,6 +1458,41 @@ def forecast_pages_to_empty(
     return float(round(level_now / rate))
 
 
+def forecast_supplies_if_due(db: Session, now: Optional[datetime] = None) -> dict:
+    """Run the full supply forecast only when its operator cadence is due."""
+    now = _aware(now) or _now()
+    settings = load_settings(db)
+    try:
+        interval = max(
+            1,
+            int(settings.get("forecast.interval_min", FORECAST_INTERVAL_MIN_DEFAULT)),
+        )
+    except (TypeError, ValueError):
+        interval = FORECAST_INTERVAL_MIN_DEFAULT
+
+    marker = db.get(m.AppSetting, FORECAST_RUN_MARKER)
+    if marker is not None and marker.value:
+        try:
+            last = _aware(datetime.fromisoformat(marker.value))
+        except ValueError:
+            last = None  # hand-edited/corrupt marker: run rather than wedge
+        if last is not None and last > now - timedelta(minutes=interval):
+            return {}
+
+    result = forecast_supplies(db, now=now)
+    if marker is None:
+        db.add(m.AppSetting(key=FORECAST_RUN_MARKER, value=now.isoformat()))
+    else:
+        marker.value = now.isoformat()
+    db.commit()
+    return result
+
+
+# Preserve the pre-existing worker-health row name across the scheduled-wrapper
+# change. Dashboards and upgrades already know this job as ``forecast_supplies``.
+forecast_supplies_if_due._health_job_name = "forecast_supplies"  # type: ignore[attr-defined]
+
+
 def forecast_supplies(db: Session, now: Optional[datetime] = None) -> dict:
     """Forecast each supply's days-to-empty, persist it, and raise reorder alerts.
 
@@ -1505,8 +1547,8 @@ def forecast_supplies(db: Session, now: Optional[datetime] = None) -> dict:
         # fit needs that to spot a meter reset.
         series: dict[str, list[tuple[datetime, float]]] = {}
         page_series: dict[str, list] = {}
-        for r in db.scalars(
-            select(m.Reading)
+        for ts, page_count, supply_snapshot in db.execute(
+            select(m.Reading.ts, m.Reading.page_count, m.Reading.supply_snapshot)
             .where(
                 m.Reading.printer_id == printer.id,
                 m.Reading.supply_snapshot.is_not(None),
@@ -1514,14 +1556,17 @@ def forecast_supplies(db: Session, now: Optional[datetime] = None) -> dict:
             )
             .order_by(m.Reading.ts.asc())
         ):
-            for snap in r.supply_snapshot or []:
+            for snap in supply_snapshot or []:
                 lvl = snap.get("level_pct")
                 if lvl is None:
                     continue
+                aware_ts = _aware(ts)
+                if aware_ts is None:
+                    continue
                 key = f"{snap.get('type')}:{snap.get('color')}"
-                series.setdefault(key, []).append((_aware(r.ts), float(lvl)))
-                if r.page_count is not None:
-                    page_series.setdefault(key, []).append((r.page_count, float(lvl)))
+                series.setdefault(key, []).append((aware_ts, float(lvl)))
+                if page_count is not None:
+                    page_series.setdefault(key, []).append((page_count, float(lvl)))
 
         for key, pts in series.items():
             supply = supplies_by_key.get(key)

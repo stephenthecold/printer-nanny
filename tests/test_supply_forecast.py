@@ -8,8 +8,11 @@ from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
 
+from sqlalchemy import event
+
 from central import models as m
 from central import runtime
+from central.db import engine
 from central.worker import jobs
 
 
@@ -234,3 +237,78 @@ def test_predicted_depletion_auto_resolves_on_refill(db):
     # projected to run out (refill-aware fit + lead-time both pass).
     db.refresh(supply)
     assert supply.days_to_empty is None or supply.days_to_empty > 14
+
+
+def test_worker_forecast_is_interval_gated(db, monkeypatch):
+    """A day-scale forecast must not reload 30 days of readings every minute."""
+    now = datetime(2026, 8, 26, 12, 0, tzinfo=timezone.utc)
+    calls = []
+
+    def _forecast(session, *, now=None):
+        calls.append((session, now))
+        return {"supplies_forecasted": 1}
+
+    monkeypatch.setattr(jobs, "forecast_supplies", _forecast)
+
+    assert jobs.forecast_supplies_if_due(db, now=now) == {"supplies_forecasted": 1}
+    assert jobs.forecast_supplies_if_due(db, now=now + timedelta(minutes=59)) == {}
+    assert len(calls) == 1
+
+
+def test_worker_forecast_runs_again_when_interval_is_due(db, monkeypatch):
+    now = datetime(2026, 8, 26, 12, 0, tzinfo=timezone.utc)
+    calls = []
+
+    def _forecast(session, *, now=None):
+        calls.append((session, now))
+        return {"supplies_forecasted": len(calls)}
+
+    monkeypatch.setattr(jobs, "forecast_supplies", _forecast)
+
+    jobs.forecast_supplies_if_due(db, now=now)
+    result = jobs.forecast_supplies_if_due(db, now=now + timedelta(minutes=60))
+
+    assert result == {"supplies_forecasted": 2}
+    assert len(calls) == 2
+
+
+def test_forecast_query_projects_only_columns_used_by_the_fit(db):
+    printer = _approved_printer(db)
+    db.add(m.Supply(
+        printer_id=printer.id,
+        type=m.SupplyType.toner,
+        color="black",
+        level_pct=50.0,
+    ))
+    _add_declining_series(
+        db,
+        printer,
+        supplies=[{"type": m.SupplyType.toner, "color": "black"}],
+        start={"black": 80.0},
+        drop_per_day=1.0,
+        days=5,
+    )
+    db.commit()
+
+    statements = []
+
+    def _record(conn, cursor, statement, params, context, executemany):
+        if "FROM readings" in statement:
+            statements.append(statement)
+
+    event.listen(engine, "before_cursor_execute", _record)
+    try:
+        jobs.forecast_supplies(db)
+    finally:
+        event.remove(engine, "before_cursor_execute", _record)
+
+    assert statements
+    for statement in statements:
+        assert "readings.ts" in statement
+        assert "readings.page_count" in statement
+        assert "readings.supply_snapshot" in statement
+        assert "readings.id" not in statement
+        assert "readings.mono_count" not in statement
+        assert "readings.color_count" not in statement
+        assert "readings.meter_snapshot" not in statement
+        assert "readings.status" not in statement

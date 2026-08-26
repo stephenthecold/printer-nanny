@@ -135,7 +135,7 @@ def _known_job_names() -> set:
     try:
         from central.worker.run import JOBS
 
-        return {job.__name__ for job in JOBS}
+        return {getattr(job, "_health_job_name", job.__name__) for job in JOBS}
     except Exception:  # noqa: BLE001
         return set()
 
