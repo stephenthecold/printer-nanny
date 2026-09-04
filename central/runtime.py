@@ -218,6 +218,11 @@ SPECS: List[Spec] = [
          "One alert per distinct error code, capped here so a misbehaving "
          "device can't open dozens at once. Codes beyond the cap are counted "
          "in the detail of the alerts that do open, never dropped silently."),
+    Spec("forecast.interval_min", "int", "Supplies (forecast)",
+         "Recompute depletion forecasts every (minutes)", 60,
+         "Each pass reads up to 30 days of supply history. Forecasts drive "
+         "day-scale procurement decisions, so recomputing every worker minute "
+         "adds database traffic without useful precision. Minimum 1."),
     # Supplies (reorder) — thresholds for the RECOMMEND-ONLY reorder surface
     # (central.reorder). These decide what appears on the reorder list, in the
     # portal panel and in the weekly report; they do not order anything, and

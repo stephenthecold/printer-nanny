@@ -51,16 +51,19 @@ JOBS = (
     # notification paths because a human being paged is more urgent than an
     # integration being told.
     jobs.deliver_events,
-    jobs.forecast_supplies,
+    # A 30-day regression is a procurement-timescale calculation, not a
+    # per-minute one. The wrapper interval-gates the expensive history read while
+    # leaving forecast_supplies itself available for explicit/manual runs.
+    jobs.forecast_supplies_if_due,
     # Publish supply-reorder recommendations to the outbound event bus. After
-    # forecast_supplies so it reads this cycle's estimates rather than the last
-    # one's. Interval-gated internally (reorder.emit_interval_min) and off by
+    # the forecast pass so it reads the latest available persisted estimates.
+    # Interval-gated internally (reorder.emit_interval_min) and off by
     # default, so on most installs and most cycles it is a settings read.
     jobs.publish_reorder_recommendations,
     # Fold new readings into cartridge cycles (central.supply_yield), which is
     # what makes pages-per-cartridge measurable at all. Interval-gated
     # internally (yield.scan_interval_min, default 6h), so on almost every cycle
-    # this is one settings read and a marker comparison. After forecast_supplies
+    # this is one settings read and a marker comparison. After the forecast gate
     # because both walk the same reading history and the forecast is the one an
     # operator is waiting on.
     jobs.scan_supply_cycles,
@@ -138,14 +141,15 @@ def _stamp(
 def _run_jobs(db, interval_seconds: int = DEFAULT_CYCLE_SECONDS) -> dict:
     summary: dict = {}
     for job in JOBS:
+        health_job_name = getattr(job, "_health_job_name", job.__name__)
         try:
             summary.update(job(db))
         except Exception as exc:  # noqa: BLE001 - keep the cycle alive on a single job failure
             log.exception("job %s failed", job.__name__)
             db.rollback()
-            _stamp(db, job.__name__, interval_seconds=interval_seconds, ok=False, error=exc)
+            _stamp(db, health_job_name, interval_seconds=interval_seconds, ok=False, error=exc)
         else:
-            _stamp(db, job.__name__, interval_seconds=interval_seconds, ok=True)
+            _stamp(db, health_job_name, interval_seconds=interval_seconds, ok=True)
     return summary
 
 
